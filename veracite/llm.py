@@ -1,9 +1,10 @@
 """Optional LLM relevance/placement rating, and citation-context extraction.
 
 The rating is off by default (enabled with --llm) and advisory only. A provider
-is a callable (prompt, model, timeout) -> reply_text (or None on failure);
-register one in LLM_PROVIDERS to add a backend. Everything else -- prompting,
-parsing, scoring, reporting -- is provider-agnostic.
+is a callable (prompt, model, timeout) -> reply_text, or a falsy value / an
+{"error": reason} dict on failure (the dict lets the cause, e.g. a retired model
+id, reach the user). Register one in LLM_PROVIDERS to add a backend. Everything
+else -- prompting, parsing, scoring, reporting -- is provider-agnostic.
 """
 
 import bisect
@@ -152,12 +153,16 @@ def find_citation_groups(tex_files):
 # --- providers -------------------------------------------------------------
 
 def _provider_claude_cli(prompt, model, timeout):
-    """Provider backed by the local `claude` CLI (uses existing Claude auth)."""
+    """Provider backed by the local `claude` CLI (uses existing Claude auth).
+
+    Returns the reply text on success, or an {"error": reason} dict on failure so
+    the cause -- a missing CLI, a timeout, or (commonly) a retired/unknown model id
+    in the pinned default -- reaches the user instead of a bare "no response"."""
     # Resolve the executable so a Windows shim (claude.cmd / claude.exe) is found
     # too -- subprocess.run does not consult PATHEXT for a bare 'claude' on Windows.
     exe = shutil.which("claude")
     if not exe:
-        return None
+        return {"error": "claude CLI not found on PATH"}
     # Run from a neutral temp directory (portable; not the hardcoded POSIX '/tmp')
     # so the CLI does not pick up project-local config from the current directory.
     try:
@@ -165,12 +170,16 @@ def _provider_claude_cli(prompt, model, timeout):
             [exe, "-p", prompt, "--model", model, "--output-format", "json"],
             capture_output=True, text=True, timeout=timeout,
             cwd=tempfile.gettempdir())
-    except (FileNotFoundError, OSError):
-        return None
+    except (FileNotFoundError, OSError) as ex:
+        return {"error": f"could not run claude CLI: {ex}"}
     except subprocess.TimeoutExpired:
-        return None
+        return {"error": f"claude CLI timed out after {timeout}s"}
     if proc.returncode != 0:
-        return None
+        # Surface the CLI's own message (e.g. an unknown/retired model id), trimmed
+        # to one line so a stale pinned default is diagnosable, not a silent failure.
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = detail[-1] if detail else f"exit code {proc.returncode}"
+        return {"error": f"claude CLI failed (model {model!r}): {reason}"}
     try:
         return json.loads(proc.stdout).get("result", proc.stdout)
     except json.JSONDecodeError:
@@ -249,8 +258,12 @@ Reply with ONLY a JSON object, no prose, in exactly this form:
 
 
 def rate_citation(provider, model, prompt, timeout=120):
-    """Run one rating prompt through `provider` and parse the JSON reply."""
+    """Run one rating prompt through `provider` and parse the JSON reply. A provider
+    returns the reply text, or an {"error": reason} dict it wants surfaced (e.g. a
+    retired model id), which is passed straight through."""
     reply = provider(prompt, model, timeout)
+    if isinstance(reply, dict) and "error" in reply:
+        return reply
     if not reply:
         return {"error": "no response from LLM provider"}
     m = re.search(r"\{.*\}", reply, re.S)

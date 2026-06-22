@@ -1081,6 +1081,61 @@ def test_cli_offline_output_is_ordered_and_deduplicated(tmp_path, capfd):
     assert out.index("zeta") < out.index("alpha")
 
 
+# --- CLI input-handling: bad inputs fail cleanly, never with a traceback ----
+
+_ONE_ENTRY = ("@article{k, title={T}, author={A. B}, year={2020}, "
+              "journal={J}, volume={1}, pages={1--2}}\n")
+
+
+def test_cli_zero_entries_is_an_error_not_healthy(tmp_path, capfd):
+    """A wrong file (no @entries) must NOT report HEALTHY -- that is a false pass.
+    It exits non-zero with a 'no BibTeX entries' message (regression: .pdf/.bbl
+    given as --bib used to print 'HEALTHY')."""
+    from veracite.cli import main
+    p = tmp_path / "paper.bbl"
+    p.write_text("\\relax \\bibcite{x}{1}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["--bib", str(p), "--offline", "--no-color"])
+    assert exc.value.code != 0
+    err = capfd.readouterr().err
+    assert "no BibTeX entries found" in err
+    assert "HEALTHY" not in capfd.readouterr().out
+
+
+def test_cli_binary_file_errors_cleanly(tmp_path, capfd):
+    """A binary file fed to --bib errors with a clear message, not a raw
+    UnicodeDecodeError traceback (regression)."""
+    from veracite.cli import main
+    p = tmp_path / "junk.bib"
+    p.write_bytes(b"%PDF-1.5\x00\x00\xf7\xfe binary not text\x00")
+    with pytest.raises(SystemExit) as exc:
+        main(["--bib", str(p), "--offline", "--no-color"])
+    assert exc.value.code != 0
+    assert "not a text file" in capfd.readouterr().err
+
+
+def test_cli_latin1_bib_reads_with_a_warning(tmp_path, capfd):
+    """A Latin-1 .bib (common in older TeX setups) is read via fallback with a
+    warning, not a crash."""
+    from veracite.cli import main
+    p = tmp_path / "refs.bib"
+    p.write_bytes(("@article{k, title={Caf\xe9}, author={A. B}, year={2020}, "
+                   "journal={J}, volume={1}, pages={1--2}}\n").encode("latin-1"))
+    main(["--bib", str(p), "--offline", "--no-color"])
+    assert "Latin-1" in capfd.readouterr().err
+
+
+def test_cli_unwritable_json_warns_not_crashes(tmp_path, capfd):
+    """A bad --json path must not mask the completed analysis with a traceback."""
+    from veracite.cli import main
+    p = tmp_path / "refs.bib"
+    p.write_text(_ONE_ENTRY, encoding="utf-8")
+    bad = tmp_path / "no_such_dir" / "out.json"   # parent does not exist
+    rc = main(["--bib", str(p), "--offline", "--no-color", "--json", str(bad)])
+    assert "could not write JSON report" in capfd.readouterr().err
+    assert not bad.exists()
+
+
 # --- L1: identifier checksum validators ------------------------------------
 
 def test_isbn_issn_orcid_checksums():

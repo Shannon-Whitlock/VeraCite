@@ -300,6 +300,10 @@ Recognized keys (all optional):
 
 - `contact_email` is added to the User-Agent (Crossref/OpenAlex "polite pool");
   may also be set with `VERACITE_CONTACT_EMAIL`.
+- `llm_models` pins the model used per provider. The default is a specific,
+  pinned model id (for reproducible ratings); if that model is ever retired,
+  `--llm` will report `rating unavailable: claude CLI failed (model '...')` —
+  set `llm_models` to a current id to fix it, no code change needed.
 - `severity` re-ranks any finding category to `error`/`warning`/`note`.
 - `protected_terms` is the project's must-stay-capitalized title terms.
 - `request_delay`/`request_timeout` set API pacing; `--delay`/`--timeout`

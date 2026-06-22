@@ -52,6 +52,27 @@ def discover_bib(roots):
     return found[0] if found else None
 
 
+def read_bib_text(bib_path, ap):
+    """Read a .bib as text, tolerating the common non-UTF-8 case. A .bib saved in
+    Latin-1 (still common in older European TeX setups) or a binary file fed by
+    mistake would otherwise crash with a raw UnicodeDecodeError traceback. Try
+    UTF-8, fall back to Latin-1 (which never raises) for a real text file, and only
+    if that still looks like binary do we error cleanly instead of dumping a stack."""
+    data = open(bib_path, "rb").read()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    # A NUL byte means it is not text at all (a .pdf, an object file, ...).
+    if b"\x00" in data:
+        ap.error(f"{bib_path} is not a text file (looks binary) -- is it really a "
+                 ".bib? If it is a PDF or compiled output, point --bib at the .bib "
+                 "source instead")
+    print(f"warning: {bib_path} is not valid UTF-8; reading it as Latin-1 -- "
+          "re-save it as UTF-8 to silence this", file=sys.stderr)
+    return data.decode("latin-1")
+
+
 def parse_args(argv):
     """Define and parse the command-line interface. Returns (parser, args)."""
     ap = argparse.ArgumentParser(
@@ -140,9 +161,17 @@ def main(argv=None):
     contexts = find_citation_contexts(tex_files, tex_base) if tex_files else {}
     cite_groups = find_citation_groups(tex_files) if tex_files else []
 
-    with open(bib_path, encoding="utf-8") as fh:
-        raw = fh.read()
+    raw = read_bib_text(bib_path, ap)
     entries, problems = parse_bib(raw)
+
+    # A wrong file (a .pdf, .bbl, .txt, or a path that simply holds no @entries)
+    # parses to zero entries. Reporting "HEALTHY" on an empty set is a false pass --
+    # the worst outcome for a verification tool -- so say so plainly and exit non-zero.
+    if not entries:
+        hint = ("" if bib_path.lower().endswith(".bib")
+                else f" (its extension is not .bib -- is '{os.path.basename(bib_path)}' "
+                     "really your bibliography?)")
+        ap.error(f"no BibTeX entries found in {bib_path}{hint}")
 
     # Color when attached to a terminal and not disabled -- and, on Windows, only
     # if the console accepts ANSI (otherwise the escapes would print literally).
@@ -255,10 +284,16 @@ def main(argv=None):
                        tex_mode=tex_mode, any_findings=any_emitted, integrity=summary)
 
     if args.json:
-        with open(args.json, "w", encoding="utf-8") as fh:
-            json.dump(rep.to_json(summary=summary, results=results, statuses=statuses),
-                      fh, indent=2, ensure_ascii=False)
-        print(f"\nJSON report written to {args.json}")
+        try:
+            with open(args.json, "w", encoding="utf-8") as fh:
+                json.dump(rep.to_json(summary=summary, results=results, statuses=statuses),
+                          fh, indent=2, ensure_ascii=False)
+            print(f"\nJSON report written to {args.json}")
+        except OSError as ex:
+            # The analysis already ran and printed; a bad --json path should not
+            # mask that with a traceback. Report it and let the exit code stand.
+            print(f"\nwarning: could not write JSON report to {args.json}: {ex}",
+                  file=sys.stderr)
 
     return 1 if rep.count(Severity.ERROR) else 0
 
