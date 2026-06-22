@@ -35,8 +35,7 @@ A bibliography is easy to get wrong and tedious to check by hand: a wrong year,
 a mistyped DOI, a page number that doesn't match the published article, a
 preprint that has since appeared in a journal, or a misplaced citation that
 points to the wrong work. These slip through because BibTeX accepts
-them without complaint — and checking each entry against the real record by hand
-takes hours. VeraCite does that checking for you, and is built to be:
+them without complaint — and checking each entry against the real record is slow and error prone. VeraCite does that checking for you, and is built to be:
 
 - **Simple to run** — one small Python program you run from the command line. No
   account, no website, no setup; it works out of the box and needs no extra
@@ -183,6 +182,9 @@ Checks run in layers, syntax first.
    its `=`, an unknown entry type, a duplicate field, a file-level brace
    imbalance, and a **cited key with no entry** are each errors. The parser
    recovers at the next `@entry{`, so one broken entry does not hide the others.
+   `@string` abbreviations (both `{…}` and `(…)` delimited) and `#` concatenation
+   are expanded, so a `journal = prb` macro is checked by its full value, not the
+   bare macro name.
 
 1. **Static** (offline) — a rule registry (`rules.py`); add a check by writing a
    function and decorating it `@rule`/`@file_rule`. Covers missing fields;
@@ -276,6 +278,12 @@ array — each with its `status`, `confidence`, `identifiers`, the matched
   "findings": [ ... ]
 }
 ```
+
+All three top-level keys (`summary`, `references`, `findings`) are always present.
+Under `--offline` there is no online verification, so the `summary` records the
+offline mode and finding counts with a null score
+(`{"mode": "offline", "integrity_score": null, "errors": …, "warnings": …, "notes": …}`)
+and `references` is empty — a stable shape to parse, never a fabricated score.
 
 ## Configuration
 

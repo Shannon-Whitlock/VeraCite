@@ -9,9 +9,12 @@ drop the entries after it.
 import bisect
 import re
 
-# Start of a BibTeX entry: '@type{'. Used both to find entries and to resync
-# after a malformed one rather than swallowing the rest of the file.
-ENTRY_START = re.compile(r"@(\w+)\s*\{")
+# Start of a BibTeX entry: '@type{' or '@type(' -- BibTeX accepts either delimiter,
+# and '@string'/'@preamble' in the wild are commonly written with parens (e.g.
+# '@String(JOV = {J. Vis.})'). Group 2 is the opening delimiter so we know which
+# closer ('}' or ')') to match. Used both to find entries and to resync after a
+# malformed one rather than swallowing the rest of the file.
+ENTRY_START = re.compile(r"@(\w+)\s*([{(])")
 
 # A field declaration inside an entry: 'name = ' or a malformed 'name {'/'name "'
 # with the '=' missing. Group 2 distinguishes the two.
@@ -98,40 +101,62 @@ def _blank_comments(text):
 
 def parse_bib(text):
     """Parse BibTeX source into (entries, problems). Brace/quote aware; skips
-    @comment/@string/@preamble and '%' line comments. On a structurally broken
-    entry (a brace or quote that never closes before the next entry) it records a
-    structural problem and resyncs at the next '@entry{'. `problems` is a list of
-    (lineno, message)."""
+    @comment/@preamble and '%' line comments. A '@string' definition (either
+    '{...}' or '(...)' delimited) is collected into a macro table and its
+    abbreviations are expanded in field values, including '#' concatenation, so a
+    'journal = prb' resolves to its full name rather than comparing the bare macro
+    against the record. On a structurally broken entry (a brace or quote that never
+    closes before the next entry) it records a structural problem and resyncs at the
+    next '@entry{'. `problems` is a list of (lineno, message)."""
     entries, problems = [], []
     # Scan a comment-blanked copy for structure (so a '%@article{...}' is never
     # parsed as an entry), but keep `text` for line numbers and raw entry source.
     scan = _blank_comments(text)
     i, n = 0, len(scan)
     line_of = _line_index(text)
+    # '@string' abbreviations, accumulated as we scan. A later @string may reference
+    # an earlier one, so values are resolved against the table built so far. Field
+    # values are then expanded against it (bare macro names and '#' concatenation).
+    macros = {}
     while i < n:
         m = ENTRY_START.search(scan, i)
         if not m:
             break
         at, body_start = m.start(), m.end()
-        # Find this entry's closing brace. Stop early if a new '@entry{' starts
+        opener = m.group(2)
+        # Find this entry's closing delimiter. Stop early if a new '@entry{' starts
         # at the beginning of a line: that is unambiguously the next entry, so
         # this one's braces never balanced. (Checking the line start, not just
         # depth==1, lets us recover even from a deeply unclosed inner brace.)
         # Brace counting runs on `scan` so a '%'-commented brace is not counted.
+        # A brace-delimited entry closes when brace depth returns to 0 (the opening
+        # '{' counts as depth 1). A paren-delimited entry (common for '@string') closes
+        # at a top-level ')' -- one seen while no '{...}' field value is open -- so its
+        # braces are tracked separately and the close is the unbraced ')'.
         depth, j, resync = 1, body_start, None
-        while j < n and depth:
+        if opener == "(":
+            depth = 0   # for parens, `depth` tracks only braces inside the body
+        while j < n and (opener == "(" or depth):
             c = scan[j]
             if c == "{":
                 depth += 1
             elif c == "}":
                 depth -= 1
+            elif c == ")" and opener == "(" and depth == 0:
+                j += 1          # consume the closing ')'
+                break
             elif c == "@" and (j == 0 or scan[j - 1] == "\n") and ENTRY_START.match(scan, j):
                 resync = j      # next entry begins before this one closed
                 break
             j += 1
 
         etype = m.group(1).lower()
-        if depth != 0:
+        # Unbalanced iff we never reached the matching closer: a brace entry whose
+        # depth never returned to 0, or any entry that hit the next '@entry{' first.
+        closed_paren = opener == "(" and resync is None and j <= n and scan[j - 1:j] == ")"
+        unbalanced = resync is not None or (opener == "{" and depth != 0) or \
+            (opener == "(" and not closed_paren)
+        if unbalanced:
             # Unbalanced: report and resync at the next entry (or give up at EOF).
             if etype not in ("comment", "string", "preamble"):
                 key = _peek_key(scan[body_start:body_start + 200])
@@ -143,7 +168,10 @@ def parse_bib(text):
 
         body = scan[body_start:j - 1]
         i = j
-        if etype in ("comment", "string", "preamble"):
+        if etype == "string":
+            _collect_string(body, macros)
+            continue
+        if etype in ("comment", "preamble"):
             continue
         # An extra '}' closes the entry one brace early. It shows up two ways:
         # a stray '}' left between this entry and the next, or -- when the stray
@@ -187,7 +215,7 @@ def parse_bib(text):
                              f"@{etype}{{{_peek_key(body)}}}: field '{sm.group(2).lower()}' "
                              f"is outside the entry (after its closing '}}'); BibTeX "
                              f"ignores it -- move it inside the entry"))
-        fields, key = _parse_body(body)
+        fields, key = _parse_body(body, macros)
         if not key:
             problems.append((line_of(at), f"@{etype}: entry has no citation key"))
             continue
@@ -200,7 +228,22 @@ def _peek_key(s):
     return s.split(",", 1)[0].strip() or "?"
 
 
-def _parse_body(body):
+def _collect_string(body, macros):
+    """Record a '@string' definition ('name = value') into `macros`. The value is
+    expanded against the macros defined so far, so '@string{a={X}} @string{b=a # {Y}}'
+    resolves b to 'XY'. A malformed @string (no '=') is ignored, matching biber's
+    tolerance. Names are lowercased; BibTeX macro lookup is case-insensitive."""
+    eq = _find_top_level(body, "=")
+    if eq == -1:
+        return
+    name = body[:eq].strip().lower()
+    if not re.fullmatch(r"[a-z][\w-]*", name):
+        return
+    value, _ = _read_value(body[eq + 1:].lstrip(), macros)
+    macros[name] = value
+
+
+def _parse_body(body, macros=None):
     key, rest = _split_first_comma(body)
     fields = {}
     while rest:
@@ -211,7 +254,7 @@ def _parse_body(body):
         if eq == -1:
             break
         name = rest[:eq].strip().lower()
-        value, rest = _read_value(rest[eq + 1:].lstrip())
+        value, rest = _read_value(rest[eq + 1:].lstrip(), macros)
         # A clean field name is a single token; anything with whitespace/braces
         # means we ran past a malformed (e.g. '='-less) field. Skip it -- the
         # syntax pass reports the structural cause -- rather than store junk.
@@ -220,7 +263,7 @@ def _parse_body(body):
     return fields, key.strip()
 
 
-def field_occurrences(body):
+def field_occurrences(body, macros=None):
     """All values for each field name in an entry body, in order, as
     {name: [value, ...]}. Unlike _parse_body's dict (which keeps only the last
     value), this preserves repeats so a duplicate-field check can compare them.
@@ -235,13 +278,32 @@ def field_occurrences(body):
         if eq == -1:
             break
         name = rest[:eq].strip().lower()
-        value, rest = _read_value(rest[eq + 1:].lstrip())
+        value, rest = _read_value(rest[eq + 1:].lstrip(), macros)
         if name and re.fullmatch(r"[a-z][\w-]*", name):
             occ.setdefault(name, []).append(value)
     return occ
 
 
-def _read_value(s):
+def _read_value(s, macros=None):
+    """Read one field value and return (value, rest). A value is one or more atoms
+    -- '{...}', '"..."', or a bare word -- joined by '#' concatenation (standard
+    BibTeX). A bare word is a '@string' abbreviation: resolved against `macros` when
+    defined, else kept verbatim (so a month name like 'may', or a number, is
+    untouched and the style/identifier checks still see it). With no '#' and no
+    matching macro this returns exactly what the old single-atom reader did."""
+    value, rest = _read_atom(s, macros)
+    # '#' concatenation: 'a # {b} # "c"'. Join atoms until no '#' follows.
+    after = rest.lstrip()
+    while after.startswith("#"):
+        piece, rest = _read_atom(after[1:].lstrip(), macros)
+        value += piece
+        after = rest.lstrip()
+    return value, rest
+
+
+def _read_atom(s, macros=None):
+    """Read a single value atom -- '{...}', '"..."', or a bare word -- returning
+    (text, rest). A bare word that names a '@string' macro expands to its value."""
     if not s:
         return "", ""
     if s[0] == "{":
@@ -258,8 +320,14 @@ def _read_value(s):
             if s[j] == '"' and depth == 0:
                 return s[1:j], s[j + 1:]
         return s[1:], ""
-    cut = _find_top_level(s, ",")
-    return (s.strip(), "") if cut == -1 else (s[:cut].strip(), s[cut:])
+    # A bare word ends at the next top-level ',' or '#' (concatenation), whichever
+    # comes first -- a '#' splits two atoms, so the bare token must not absorb it.
+    cut = _find_top_level_any(s, ",#")
+    raw, rest = (s, "") if cut == -1 else (s[:cut], s[cut:])
+    token = raw.strip()
+    if macros and token.lower() in macros:
+        return macros[token.lower()], rest
+    return token, rest
 
 
 def _strip_braces(v):
@@ -280,6 +348,21 @@ def _find_top_level(s, ch):
         elif c == "}":
             depth -= 1
         elif c == ch and depth == 0:
+            return k
+    return -1
+
+
+def _find_top_level_any(s, chars):
+    """Index of the first of `chars` at brace depth 0, or -1. Like _find_top_level
+    but stops at any one of several delimiters (used to end a bare value atom at a
+    ',' or a concatenation '#')."""
+    depth = 0
+    for k, c in enumerate(s):
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+        elif c in chars and depth == 0:
             return k
     return -1
 

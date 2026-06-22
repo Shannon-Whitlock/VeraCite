@@ -1933,3 +1933,88 @@ def test_shouted_author_surnames_flagged():
     run_static([e2], rep2)
     assert not any(f.category == "author_format" and "ALL-CAPS" in f.message
                    for f in rep2.findings)
+
+
+# --- @string abbreviation + '#' concatenation expansion --------------------
+# A .bib that uses @string journal macros is correct BibTeX; leaving the macro
+# name unexpanded makes the record-layer compare 'prb' against 'Physical Review B'
+# and emit a false metadata_mismatch. These pin the expansion in the parser.
+
+def test_string_macro_brace_form_is_expanded():
+    e, _ = parse_bib('@string{prb = "Phys. Rev. B"}\n'
+                     '@article{r, journal=prb, title={T}, author={A. B}, year={2020}}')
+    assert e[0].fields["journal"] == "Phys. Rev. B"
+
+
+def test_string_macro_paren_form_is_expanded():
+    # '@String(NAME = {value})' -- the paren-delimited form common in real .bib files.
+    e, _ = parse_bib('@String(JOV = {J. Vis.})\n'
+                     '@article{r, journal=JOV, title={T}, author={A. B}, year={2020}}')
+    assert e[0].fields["journal"] == "J. Vis."
+
+
+def test_string_concatenation_with_hash():
+    e, _ = parse_bib('@string{ieee = "IEEE Transactions on "}\n'
+                     '@article{c, journal = ieee # "Information Theory", '
+                     'title={T}, year={2020}}')
+    assert e[0].fields["journal"] == "IEEE Transactions on Information Theory"
+
+
+def test_string_macro_referencing_earlier_macro():
+    e, _ = parse_bib('@string{a={X}}\n@string{b = a # {Y}}\n'
+                     '@article{r, journal=b, title={T}, year={2020}}')
+    assert e[0].fields["journal"] == "XY"
+
+
+def test_string_lookup_is_case_insensitive():
+    e, _ = parse_bib('@string{PR="Physical Review"}\n'
+                     '@article{r, journal=pr, title={T}, year={2020}}')
+    assert e[0].fields["journal"] == "Physical Review"
+
+
+def test_undefined_bare_word_is_kept_verbatim():
+    # A bare word that is NOT a defined macro (a month name, a number) must pass
+    # through unchanged so the month-name and identifier checks still see it.
+    e, _ = parse_bib('@article{r, month=may, year=2020, journal={Nature}, title={T}}')
+    assert e[0].fields["month"] == "may"
+    assert e[0].fields["year"] == "2020"
+
+
+def test_unclosed_paren_string_recovers_at_next_entry():
+    # A malformed @string(...) that never closes must not swallow the entries after
+    # it -- the parser resyncs at the next '@entry{'.
+    e, _ = parse_bib('@string(bad = {oops}\n'
+                     '@article{survivor, title={T}, author={A. B}, '
+                     'journal={Nature}, year={2020}}')
+    assert [x.key for x in e] == ["survivor"]
+
+
+# --- JSON report shape & --offline/--llm guard -----------------------------
+
+def test_offline_json_has_summary_block_with_null_score(tmp_path):
+    """The documented `summary` top-level key must exist offline too, but with an
+    honest null integrity_score -- never a fabricated 100 from zero verified."""
+    import json
+    from veracite.cli import main
+    bib = tmp_path / "refs.bib"
+    bib.write_text(_ONE_ENTRY, encoding="utf-8")
+    out = tmp_path / "rep.json"
+    main(["--bib", str(bib), "--offline", "--no-color", "--json", str(out)])
+    d = json.loads(out.read_text())
+    assert set(["findings", "summary", "references"]) <= set(d)
+    assert d["summary"]["mode"] == "offline"
+    assert d["summary"]["integrity_score"] is None
+
+
+def test_llm_with_offline_is_rejected(tmp_path, capfd):
+    """--llm needs the online abstract layer; with --offline it would silently do
+    nothing, so it must error rather than print HEALTHY with no sweep."""
+    from veracite.cli import main
+    bib = tmp_path / "refs.bib"
+    bib.write_text(_ONE_ENTRY, encoding="utf-8")
+    tex = tmp_path / "p.tex"
+    tex.write_text("\\cite{k}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["--bib", str(bib), "--offline", "--llm", "--tex", str(tex), "--no-color"])
+    assert exc.value.code != 0
+    assert "--llm cannot run with --offline" in capfd.readouterr().err

@@ -146,6 +146,12 @@ def main(argv=None):
     if args.llm and not args.tex:
         ap.error("--llm needs citation context: pass --tex PATH with the .tex "
                  "sources (the LLM rates each citation against its surrounding text)")
+    # --llm rates each citation against the record's abstract, which only the online
+    # layer fetches; combined with --offline it would silently do nothing. Reject the
+    # contradiction up front rather than print 'HEALTHY' with the sweep never run.
+    if args.llm and args.offline:
+        ap.error("--llm cannot run with --offline: the relevance rating needs the "
+                 "online layer (it reads each work's abstract). Drop --offline to use --llm")
 
     # .tex is read ONLY when --tex is given -- the manuscript is never opened
     # otherwise. This keeps a default run confidential and removes the surprising
@@ -284,9 +290,18 @@ def main(argv=None):
                        tex_mode=tex_mode, any_findings=any_emitted, integrity=summary)
 
     if args.json:
+        # The JSON report always carries a `summary` block (documented top-level key).
+        # Online it is the integrity roll-up; offline there is no verification, so the
+        # block records the offline mode and finding counts with a null integrity_score
+        # -- an honest, stable shape, never a fabricated 100.
+        json_summary = summary if summary is not None else {
+            "mode": "offline", "checked": 0, "integrity_score": None,
+            "errors": rep.count(Severity.ERROR), "warnings": rep.count(Severity.WARN),
+            "notes": rep.count(Severity.INFO),
+        }
         try:
             with open(args.json, "w", encoding="utf-8") as fh:
-                json.dump(rep.to_json(summary=summary, results=results, statuses=statuses),
+                json.dump(rep.to_json(summary=json_summary, results=results, statuses=statuses),
                           fh, indent=2, ensure_ascii=False)
             print(f"\nJSON report written to {args.json}")
         except OSError as ex:
