@@ -2347,3 +2347,20 @@ def test_arxiv_hit_prefers_published_doi(monkeypatch):
     assert res.arxiv_id == "2210.03347"            # arXiv id kept too
     assert any(f.category == "doi_available" and "published DOI 10.1234/published.1"
                in f.message for f in rep.findings)
+
+
+def test_report_is_stamped_with_veracite_version(tmp_path, capfd):
+    """A report is traceable to the tool revision: the terminal summary names the
+    version and the NDJSON <summary> record carries veracite_version."""
+    import json
+    from veracite import __version__
+    from veracite.cli import main
+    bib = tmp_path / "r.bib"
+    bib.write_text("@article{k, author={Smith, J}, title={A Title Here Now Long},\n"
+                   " journal={J}, year={2020}, volume={1}, pages={1}}\n", encoding="utf-8")
+    out = tmp_path / "rep.ndjson"
+    main(["--bib", str(bib), "--offline", "--no-color", "--json", str(out)])
+    assert f"VeraCite {__version__}" in capfd.readouterr().out
+    summary = [json.loads(l) for l in out.read_text().splitlines()
+               if l.strip() and json.loads(l)["key"] == "<summary>"][0]
+    assert summary["veracite_version"] == __version__

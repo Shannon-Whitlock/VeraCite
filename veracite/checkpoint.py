@@ -109,8 +109,12 @@ def file_record(issues):
 
 
 def summary_record(summary):
-    """The reserved summary record: the integrity roll-up (or offline stub)."""
-    return {"key": SUMMARY_KEY, "summary": summary}
+    """The reserved summary record: the integrity roll-up (or offline stub), stamped
+    with the VeraCite version that produced the report so a saved/shared report is
+    traceable to the exact tool revision (checks and scoring can change between
+    versions)."""
+    from .config import VERSION
+    return {"key": SUMMARY_KEY, "veracite_version": VERSION, "summary": summary}
 
 
 def append_record(path, record):

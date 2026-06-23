@@ -16,7 +16,7 @@ except ImportError:  # pragma: no cover
     from urllib.parse import quote as _urlquote
     HTTP_BACKEND = "urllib"
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 # Fallbacks used when no settings file or environment override is present.
 DEFAULT_SETTINGS = {

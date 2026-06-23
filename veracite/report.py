@@ -353,8 +353,9 @@ class Report:
         key = entry.key
         # An UNCITED entry (--tex mode) is one line and nothing else.
         if key in self._uncited:
+            # No trailing blank line: a skipped entry is one line, so a run of them
+            # reads as a compact list rather than double-spaced.
             print(self._entry_header(entry, progress=progress, uncited=True), file=out)
-            print(file=out)
             return True
         idx = [i for i, f in enumerate(self.findings)
                if i not in self._emitted and f.key == key
@@ -594,8 +595,10 @@ class Report:
                      f"({n_entries} in bib)")
         else:
             scope = f"checked all {n_entries} references in bib (no .tex)"
+        from .config import VERSION
         lines = [bar,
-                 f"{self._c('BIBLIOGRAPHY HEALTH:', _BOLD)} {verdict}",
+                 f"{self._c('BIBLIOGRAPHY HEALTH:', _BOLD)} {verdict}"
+                 f"{self._c(f'   (VeraCite {VERSION})', _DIM)}",
                  f"  {scope}",
                  f"  {counts}"]
         if ne:

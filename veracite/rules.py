@@ -747,7 +747,10 @@ def consistent_arxiv_style(entries, rep):
             s = "other"
         styles.setdefault(s, []).append(e.key)
     if len(styles) > 1:
-        summary = "; ".join(f"{k}: {', '.join(v)}" for k, v in sorted(styles.items()))
+        # Lead with the COUNT per style (like the author_format note), then the full
+        # key list in parentheses so automated correction still has every entry.
+        summary = "; ".join(f"{k}: {len(v)} ({', '.join(v)})"
+                            for k, v in sorted(styles.items()))
         rep.add_file(Severity.INFO, f"arXiv preprints are encoded inconsistently "
                                     f"({summary}). Prefer one style (e.g. eprint).", category="style")
 

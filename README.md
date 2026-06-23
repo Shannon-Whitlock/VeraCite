@@ -289,13 +289,17 @@ integrity roll-up):
  "sources": ["crossref", "inspire"], "canonical_record": {"title": "...", "year": 2009},
  "issues": []}
 {"key": "<file>", "issues": []}
-{"key": "<summary>", "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
+{"key": "<summary>", "veracite_version": "0.1.1",
+ "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
  "unverified": 1, "mismatch": 0, "doi_coverage": 0.94, "pid_coverage": 0.97,
  "integrity_score": 97}}
 ```
 
 Read it line by line (`for line in open(f): json.loads(line)`); the `"<summary>"`
-record holds the metrics, every other non-reserved record is one reference. Under
+record holds the metrics and the `veracite_version` that produced the report (so a
+saved or shared report is traceable to the exact tool revision — the version is also
+printed on the terminal `BIBLIOGRAPHY HEALTH` line). Every other non-reserved record
+is one reference. Under
 `--offline` there is no online verification, so the `"<summary>"` record carries the
 offline mode and finding counts with a null score (`{"mode": "offline",
 "integrity_score": null, ...}`) and each entry appears with `phases.offline = true`,
