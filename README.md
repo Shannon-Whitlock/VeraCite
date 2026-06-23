@@ -1,14 +1,20 @@
 # VeraCite
 
 **A lightweight, auditable tool for checking the accuracy and conformity of
-BibTeX/biblatex bibliographies in scientific articles.**
+BibTeX/biblatex bibliographies in scientific articles — a deterministic check
+against hallucinated and mangled citations.**
 
 VeraCite improves the **veracity** of the bibliographic record in scientific
 papers. Where BibTeX is notoriously tolerant of imperfect entries, VeraCite
 surfaces errors for fast human verification and AI-tool integration, helping
 bibliographic records better satisfy the
 [FAIR](https://www.go-fair.org/fair-principles/) principles (persistent
-identifiers, shared standards, accurate metadata).
+identifiers, shared standards, accurate metadata). Because every check is a rule
+or a comparison against an authoritative record — **never** a language model
+guessing — it is exactly the kind of ground-truth gate an AI writing assistant
+needs: it confirms, against Crossref/arXiv and friends, that a reference is real,
+correctly identified, and accurately transcribed, catching the fabricated DOI,
+the invented paper, and the subtly wrong year or author that LLMs introduce.
 
 VeraCite is for authors, publishers, and AI assistants who want to vet a
 bibliography *before* publication. It checks a `.bib` file along three levels:
@@ -35,15 +41,20 @@ A bibliography is easy to get wrong and tedious to check by hand: a wrong year,
 a mistyped DOI, a page number that doesn't match the published article, a
 preprint that has since appeared in a journal, or a misplaced citation that
 points to the wrong work. These slip through because BibTeX accepts
-them without complaint — and checking each entry against the real record is slow and error prone. VeraCite does that checking for you, and is built to be:
+them without complaint — and checking each entry against the real record is slow and error prone. The same errors, plus outright **fabricated references**, now
+arrive in bulk from LLM-assisted drafting, where a confident-looking citation
+may name a paper that does not exist or attach a real DOI to the wrong work.
+VeraCite does that checking for you — deterministically, against the source of
+record — and is built to be:
 
 - **Simple to run** — one small Python program you run from the command line. No
   account, no website, no setup; it works out of the box and needs no extra
   software installed.
 - **Trustworthy** — it doesn't guess. Every issue it reports comes from an
   explicit rule or a comparison against an authoritative record, so you can see
-  exactly why each was flagged. The optional AI relevance check is **off by
-  default**.
+  exactly why each was flagged — which is also what makes it a sound check *on* an
+  AI assistant's output rather than another source of guesses. The optional AI
+  relevance check is **off by default**.
 - **Standards-based** — it checks your entries against the official BibTeX/biblatex
   rules, standard journal-name abbreviations, and validated identifiers (DOI,
   arXiv, ISBN, ISSN, ORCID).
@@ -309,6 +320,45 @@ run to resume it, never a fabricated score.
 The NDJSON shape is what makes checkpointing cheap and crash-safe: a finished entry
 is one appended line, so an interrupted run leaves every prior line intact and
 loadable (see below).
+
+### Using VeraCite as a verification step for an AI assistant
+
+VeraCite is deliberately **read-only**: it never edits your `.bib` or `.tex`. That
+is what lets it serve as an independent **verification gate** in a
+human-supervised AI editing loop — the checker has to be separate from whatever is
+doing the writing, including an LLM. **Applying** the suggested edits is left to a
+supervised tool (e.g. an AI assistant the author is driving), so the deterministic
+checker and the judgement-applying editor stay cleanly separated. The NDJSON report
+*is* the integration surface, designed to be consumed by a program, not just read:
+
+- **Every finding is grounded, not generated.** A `metadata_mismatch`,
+  `dead_doi`, `id_resolves_wrong_record`, or an `UNVERIFIED` status comes from a
+  rule or a comparison against Crossref/arXiv/INSPIRE/OpenAlex, each with a
+  `verify:` link the agent can check independently. The `confidence` is a
+  deterministic function of which sources agreed — **not** a model output — so an
+  agent can trust it to gate its own edits without compounding hallucination.
+- **Findings route by `group`, not by learning every category.** Each issue
+  carries a `group` of `syntax` / `semantic` / `context`: `syntax` is the
+  written form (safe, mechanical fixes); `semantic` is metadata that should be
+  reconciled against the source of record before editing; `context` needs
+  judgement. An agent can hold three policies instead of ~25 categories.
+- **Fixable findings carry a structured `suggested` patch** —
+  `{"field": ..., "from": ..., "to": ...}`, separated from the prose `message` —
+  so a tool can apply an edit as data rather than parsing English. The record is
+  the canonical reference, so `to` is the value that conforms the bib to it.
+- **The catch is the point.** A hallucinated reference surfaces as `UNVERIFIED`
+  with no findable identifier; a real DOI on the wrong paper as
+  `id_resolves_wrong_record` (status `MISMATCH`); a corrupted DOI/ISBN/arXiv id
+  fails its offline check digit; a subtly-wrong year/venue/author as a
+  `metadata_mismatch` with the registry value to adopt. These are exactly the
+  failure modes LLM-drafted bibliographies introduce.
+
+Schema stability: the entry-record fields (`status`, `confidence`, `phases`,
+`identifiers`, `canonical_record`, `sources`, `issues`) and each issue's
+`severity` / `group` / `category` / `suggested` shape are the supported contract;
+`--list-rules json` enumerates the full category vocabulary, and the
+`veracite_version` on the `"<summary>"` record pins the producing revision so a
+consumer can detect a contract change.
 
 ## Checkpointing and phased resume
 
