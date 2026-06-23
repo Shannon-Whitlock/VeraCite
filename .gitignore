@@ -16,3 +16,6 @@ veracite.json
 *.swp
 # downloaded arXiv corpus -- regenerable via tools/scrape_arxiv_examples.py
 examples/
+# generated run artifacts (the --json report / NDJSON checkpoint)
+report.json
+*.ndjson

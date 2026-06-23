@@ -8,13 +8,16 @@ logic (compare.py) live in their own modules; they are imported here (and
 re-exported) so `resolve_entry` reads as a single straight-line pipeline and so
 existing callers/tests that reference them as `record.X` keep working.
 
-No registry is treated as canonical truth -- the bib and the registry are
-independent transcriptions, and the comparison layer flags *disagreement* for a
-human rather than asserting which side is right.
+The comparison layer flags *disagreement* for a human -- it never rewrites the bib.
+But the authoritative record (Crossref/arXiv) is the canonical reference: a flagged
+discrepancy carries a suggested edit that conforms the bib TO the record (e.g.
+year 2009 -> 2010), and severity follows the discrepancy's effect on the rendered
+citation (a render-affecting field warns; a purely stylistic one is a note). The bib
+value is preferred over the record only in the rare case the record is clearly
+broken.
 """
 
 import re
-import time
 from dataclasses import dataclass, field
 
 from .compare import compare_against_record, compare_sources
@@ -30,16 +33,29 @@ from .compare import (  # noqa: F401  (re-export)
     _given_abbreviates, _is_initial, _journal_equiv, _surname_match)
 
 
+def _clean_url(url):
+    """De-escape a URL pulled from a .bib for use as a clickable verify link. BibTeX
+    URLs routinely carry TeX-escaped specials ('\\_', '\\&', '\\%', '\\#', '\\~{}',
+    '{}' grouping) that are literal in the actual address, so a raw value would print
+    'paper\\_files' instead of 'paper_files'. Strips the backslash before a special,
+    collapses '\\~{}'/'\\~' to '~', and drops empty TeX braces."""
+    url = url.strip()
+    url = re.sub(r"\\~\{\}|\\~", "~", url)
+    url = re.sub(r"\\([_&%#${}])", r"\1", url)
+    url = url.replace("{}", "")
+    return url
+
+
 def verify_url(crossref_doi, arxiv_id, entry):
     """A URL a human can open to check an entry against the source of record: the
     resolvable DOI (redirects to the publisher's page) when there is a real DOI,
-    else the arXiv abstract page, else any explicit url field."""
+    else the arXiv abstract page, else any explicit url field (TeX-de-escaped)."""
     if crossref_doi:
         # The DOI may already be a full doi.org URL; don't prepend a second one.
         return f"https://doi.org/{bare_doi(crossref_doi)}"
     if arxiv_id:
         return f"https://arxiv.org/abs/{arxiv_id}"
-    return entry.get("url", "").strip()
+    return _clean_url(entry.get("url", ""))
 
 
 @dataclass
@@ -96,7 +112,6 @@ def resolve_entry(e, rep, delay, timeout):
     if isbn and book_entry:
         res.isbn = isbn
         book = fetch_isbn(isbn, timeout)
-        time.sleep(delay)
         if book:
             res.sources["isbn"] = book
             if res.record is None:
@@ -138,7 +153,6 @@ def resolve_entry(e, rep, delay, timeout):
     # consistency. Resolved by DOI or arXiv id when one is present.
     if crossref_doi or arxiv_id:
         insp = fetch_inspire(doi=crossref_doi or None, arxiv_id=arxiv_id or None, timeout=timeout)
-        time.sleep(delay)
         if insp:
             res.sources["inspire"] = insp
     # CROSS-SOURCE (Layer 4): compare the authoritative records against each other.
@@ -149,7 +163,6 @@ def resolve_entry(e, rep, delay, timeout):
     # STATUS: retraction + abstract from one OpenAlex call, then chain S2 and
     # arXiv for any abstract still missing (for the LLM layer).
     oa = fetch_openalex(crossref_doi, timeout) if crossref_doi else None
-    time.sleep(delay)
     if oa and oa["is_retracted"]:
         res.retracted = True
         rep.add(Severity.ERROR, e, "marked RETRACTED in OpenAlex / Retraction Watch",
@@ -162,8 +175,6 @@ def resolve_entry(e, rep, delay, timeout):
     # came from arXiv).
     if is_preprint(e) and arxiv_id:
         arx = rec if source == "arxiv" else fetch_arxiv(arxiv_id, timeout)
-        if source != "arxiv":
-            time.sleep(delay)
         pub_doi = (arx or {}).get("published_doi", "")
         jref = (arx or {}).get("journal_ref", "")
         if pub_doi or jref:
@@ -186,16 +197,12 @@ def resolve_entry(e, rep, delay, timeout):
         else:   # comment, reply, response
             rep.add(Severity.INFO, e, f"related {label} exists ({target}){note}",
                     "related", category="related_work")
-    time.sleep(delay)
 
     if not rec.get("abstract"):
         rec["abstract"] = fetch_abstract_s2(crossref_doi, timeout)
-        time.sleep(delay)
     if not rec.get("abstract") and arxiv_id and source != "arxiv":
         arx = fetch_arxiv(arxiv_id, timeout)
         rec["abstract"] = (arx or {}).get("abstract", "")
-        time.sleep(delay)
-    time.sleep(delay)
     return res
 
 
@@ -206,14 +213,12 @@ def resolve_by_found_doi(e, doi, res, rep, delay, timeout):
     with a strongly-matched DOI (see verify._search_doi), so we are not verifying
     against an arbitrary record. Returns True if the record resolved."""
     rec, code = fetch_crossref(doi, timeout)
-    time.sleep(delay)
     if rec is None:
         return False
     res.record, res.source, res.doi = rec, "crossref", doi
     res.sources["crossref"] = rec
     compare_against_record(e, rec, "crossref", rep)
     oa = fetch_openalex(doi, timeout)
-    time.sleep(delay)
     if oa and oa.get("is_retracted"):
         res.retracted = True
         rep.add(Severity.ERROR, e, "marked RETRACTED in OpenAlex / Retraction Watch",
@@ -224,5 +229,43 @@ def resolve_by_found_doi(e, doi, res, rep, delay, timeout):
     # abstract, especially for older papers) so the LLM can rate this entry too.
     if not rec.get("abstract"):
         rec["abstract"] = fetch_abstract_s2(doi, timeout)
-        time.sleep(delay)
     return True
+
+
+def resolve_by_found_arxiv(e, arxiv_id, res, rep, timeout):
+    """Resolve an entry against an arXiv id discovered by title search (the bib
+    omitted both a DOI and an arXiv id). Fetches the arXiv record and updates `res`
+    so the entry is VERIFIED (and its abstract is available to the LLM).
+
+    arXiv records the PUBLISHED version once it is linked (<arxiv:doi>). When that
+    DOI is present it is the stronger, citable identifier, so we resolve the entry
+    against THAT (Crossref -- real venue, proper verify link) and keep the arXiv id
+    alongside. Returns ('doi', published_doi) when a published DOI was used, else
+    ('arxiv', arxiv_id) for an arXiv-only preprint, or (None, '') if nothing
+    resolved -- so the caller can suggest the best identifier to record."""
+    arx = fetch_arxiv(arxiv_id, timeout)
+    if arx is None:
+        return None, ""
+    res.arxiv_id = arxiv_id
+    res.no_id = False
+    res.sources["arxiv"] = arx
+
+    pub_doi = bare_doi((arx.get("published_doi") or "").strip())
+    if pub_doi and DOI_FULL_RE.match(pub_doi):
+        # Prefer the published version: resolve it on Crossref. If that succeeds the
+        # entry verifies against the real venue record (the arXiv hit was the bridge).
+        cr, code = fetch_crossref(pub_doi, timeout)
+        if cr is not None:
+            res.record, res.source, res.doi = cr, "crossref", pub_doi
+            res.sources["crossref"] = cr
+            rep.set_link(e.key, f"https://doi.org/{pub_doi}")
+            compare_against_record(e, cr, "crossref", rep)
+            if not cr.get("abstract"):
+                cr["abstract"] = arx.get("abstract", "")
+            return "doi", pub_doi
+
+    # arXiv-only (no published DOI, or it did not resolve): verify against arXiv.
+    res.record, res.source = arx, "arxiv"
+    rep.set_link(e.key, f"https://arxiv.org/abs/{arxiv_id}")
+    compare_against_record(e, arx, "arxiv", rep)
+    return "arxiv", arxiv_id

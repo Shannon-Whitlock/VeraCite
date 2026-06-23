@@ -3,10 +3,11 @@ that drives the syntax, static, record/status and (optional) LLM layers.
 """
 
 import argparse
-import json
 import os
 import sys
 
+from .checkpoint import (Checkpoint, append_record, compact, entry_record,
+                         file_record, requested_phases, summary_record)
 from .config import HTTP_BACKEND, SETTINGS, load_settings
 from .llm import (LLM_PROVIDERS, collect_tex, find_citation_contexts,
                   find_citation_groups, preflight_provider, resolve_provider)
@@ -15,6 +16,28 @@ from .pipeline import analyze_entry
 from .report import enable_ansi_colors, Report, Severity
 from .rules import run_entry_rules, run_file_rules, syntax_pass
 from .verify import chronological_order, integrity
+
+# A bibliography at or above this many entries is "large": an online run over it
+# can take a long time, so we recommend --json (incremental save + resume).
+LARGE_BIB = 200
+
+# The --json report is an append-only NDJSON log (see checkpoint.py): one record per
+# bib entry, APPENDED after that entry is analyzed. Appending one line is O(1) -- no
+# rewrite of the whole growing report -- so checkpointing after EVERY entry stays
+# cheap even at 10k references, and a crash loses at most the entry in flight. A
+# re-run appends a fresh record for the key (last line wins on load). At the end of a
+# clean run the log is compacted once (one line per key, atomically).
+
+
+def offline_summary_stub(rep):
+    """The stable offline-mode `summary` record: no verification, so a null integrity
+    score and the finding counts -- an honest, parseable shape, never a fabricated
+    100. Used when no online layer ran."""
+    return {
+        "mode": "offline", "checked": 0, "integrity_score": None,
+        "errors": rep.count(Severity.ERROR), "warnings": rep.count(Severity.WARN),
+        "notes": rep.count(Severity.INFO),
+    }
 
 DESCRIPTION = """\
 VeraCite -- a bibliography health checker for LaTeX projects.
@@ -128,8 +151,13 @@ def main(argv=None):
         print_catalog(as_json=(args.list_rules == "json"))
         return 0
 
-    # CLI flags override settings; settings supply the defaults.
-    delay = args.delay if args.delay is not None else SETTINGS.get("request_delay", 0.4)
+    # CLI flags override settings; settings supply the defaults. Pacing is applied
+    # per service in the HTTP layer (http._throttle), which reads request_delay from
+    # SETTINGS -- so a --delay override is written back there to take effect. `delay`
+    # is still passed down for signature/back-compat but the sleeps live in http.py.
+    delay = args.delay if args.delay is not None else SETTINGS.get("request_delay", 0.2)
+    if args.delay is not None:
+        SETTINGS["request_delay"] = args.delay
     timeout = args.timeout if args.timeout is not None else SETTINGS.get("request_timeout", 20)
     roots = [os.getcwd()]
 
@@ -205,6 +233,32 @@ def main(argv=None):
               f"pass --tex to check citations)", file=sys.stderr)
 
     online = not args.offline
+
+    # Resume: if --json points at an existing VeraCite report, load it and reuse the
+    # phases each entry already carries (offline/online/llm). The run then computes,
+    # per entry, only the phases the saved report lacks -- so a job can be done in
+    # phases (offline, then online, then --llm) or simply restarted after a crash,
+    # picking up where it left off. Pick a NEW --json filename to start from scratch.
+    requested = requested_phases(online, args.llm)
+    checkpoint = Checkpoint.load(args.json) if args.json else None
+    if checkpoint:
+        print(f"NOTE: VeraCite is resuming from the existing report {args.json!r} "
+              f"({len(checkpoint.phases_by_key)} saved entries) -- entries already "
+              f"covering the requested checks are reused; only missing checks run. "
+              f"Choose a different --json filename to re-run from scratch.",
+              file=sys.stderr)
+
+    # Large bibliography: an online run over many entries is slow (a few network
+    # calls per entry, paced). Without --json a crash loses everything, so strongly
+    # recommend it -- the report then saves incrementally and the run is resumable.
+    # Warn only; never block (CI/pipes must proceed unattended).
+    if online and len(entries) >= LARGE_BIB and not args.json:
+        print(f"warning: {len(entries)} entries with online checks may take a long "
+              f"time. Strongly recommend '--json report.json' so results are saved "
+              f"incrementally after each entry and the run can resume if it is "
+              f"interrupted (re-running with the same --json file continues it). "
+              f"Proceeding without incremental save ...", file=sys.stderr)
+
     provider = model = None
     if online and args.llm:
         provider_name = args.llm_provider or SETTINGS.get("llm_provider", "claude")
@@ -227,6 +281,17 @@ def main(argv=None):
         print(f"NOTE: --llm sends the sentence(s) around each \\cite from your .tex "
               f"to the LLM provider ({provider_name!r}). Do not use on a confidential "
               f"manuscript.", file=sys.stderr)
+        # --llm makes one model call per cited entry that still needs rating, so a
+        # large bibliography spends real LLM tokens/cost. Make that explicit up front
+        # (and note that resume only rates entries not already rated, so re-running
+        # does not re-spend on completed ones).
+        n_to_rate = sum(1 for k in citedset
+                        if not (checkpoint and checkpoint.has(k, "llm")))
+        print(f"NOTE: --llm uses LLM tokens -- one rating call per cited entry "
+              f"({n_to_rate} to rate{' more' if checkpoint else ''} of "
+              f"{len(citedset)} cited). This costs tokens/credits on the provider; "
+              f"with --json, already-rated entries are not re-rated on resume.",
+              file=sys.stderr)
     if online:
         print(f"Looking up records, retractions, abstracts (HTTP: {HTTP_BACKEND}) ...",
               file=sys.stderr)
@@ -240,6 +305,7 @@ def main(argv=None):
     width = len(str(total))
     any_emitted = False
     results, statuses = {}, {}      # key -> Resolution / (status, confidence)
+    phases_by_key = {}              # key -> set(phases done this run + reused)
     by_key = {e.key: e for e in entries}   # for naming a citation's group-mates
     # Advisory: note any \cite{} group whose members are out of chronological order
     # (offline, from the bib years). Done before the loop so notes attach to the
@@ -247,11 +313,27 @@ def main(argv=None):
     if tex_mode:
         chronological_order(cite_groups, by_key, rep)
     for i, e in enumerate(entries, 1):
-        run_entry_rules(e, rep)                  # offline static checks
+        # In --tex (citations) mode an UNCITED entry is reduced to a single header
+        # line and skipped from ALL further analysis -- no offline rules, no online
+        # lookup, no notes. (Its structural soundness is still covered by the
+        # file-wide syntax_pass, which ran before this loop, so a brace break that
+        # would corrupt parsing of OTHER entries is still caught.) Without --tex
+        # every entry is analyzed, so the .bib can be checked/augmented in full.
+        uncited = tex_mode and e.key not in citedset
+        if uncited:
+            rep.mark_uncited(e.key)
+            phases_by_key[e.key] = set()
+            if args.json:
+                append_record(args.json, entry_record(
+                    e.key, None, None, None, set(), [], verify=None))
+            if args.sort == "entry":
+                any_emitted |= rep.emit_entry(e, skip_notes=args.skipnotes,
+                                              progress=f"[{i:>{width}}/{total}]")
+            continue
+
+        run_entry_rules(e, rep)                  # offline static checks (always fresh)
+        phases_by_key[e.key] = {"offline"}
         analyzed = online and (analyze is None or e.key in citedset)
-        if not analyzed and tex_mode and e.key not in citedset:
-            rep.add(Severity.INFO, e, "not cited in the .tex sources; "
-                    "skipped from record/status/LLM analysis", category="not_cited")
         # A structurally broken entry parsed wrong; comparing its garbled fields
         # against a record yields false mismatches, so skip the rest of this
         # entry's checks (record/status/cross-source/LLM) and point at the syntax
@@ -262,19 +344,67 @@ def main(argv=None):
                     "LLM) are skipped until it parses cleanly", "syntax",
                     category="syntax")
             analyzed = False
-        if analyzed and (not args.key or e.key == args.key):
+
+        # Resume bookkeeping: which phases this entry still needs (only the
+        # requested-and-missing ones), and which prior phases to carry forward
+        # unchanged. The carry-forward runs even when this entry is NOT analyzed
+        # online this run (e.g. an --offline resume over a report that already holds
+        # online/llm results) so the rewritten report never drops earlier work.
+        if checkpoint:
+            to_run = checkpoint.needs(e.key, requested)
+            to_run.discard("offline")            # offline already ran above
+            reuse = (checkpoint.phases_by_key.get(e.key, set()) - to_run) \
+                & {"online", "llm"}
+            if reuse:
+                # Replay the prior findings for the reused phases, and reuse the saved
+                # resolution/status so the score and JSON are complete without
+                # re-resolving.
+                rep.seed_findings(checkpoint.seed_findings_for(e.key, reuse))
+                if e.key in checkpoint.results:
+                    results[e.key] = checkpoint.results[e.key]
+                    st, conf = checkpoint.statuses.get(e.key, ("", 0.0))
+                    statuses[e.key] = (st, conf)
+                    # Restore the header status/link so the reused entry prints its
+                    # saved verdict instead of a bare line.
+                    if st:
+                        rep.set_status(e.key, st, conf)
+                    if checkpoint.links.get(e.key):
+                        rep.set_link(e.key, checkpoint.links[e.key])
+                phases_by_key[e.key] |= reuse
+        else:
+            to_run = set(requested) - {"offline"}
+
+        if analyzed and (not args.key or e.key == args.key) and "online" in to_run:
             # Live progress while the (possibly slow) online lookup runs -- but ONLY
-            # to an interactive terminal, as a transient \r line that the entry's
-            # header then overwrites. When stderr is redirected (a .log file, a
-            # pipe) it is suppressed entirely, so the saved log carries no progress
-            # noise or stray carriage returns; the '[i/N]' counter lives on the
-            # header, which prints to stdout regardless.
+            # to an interactive terminal, as a transient \r line the entry's header
+            # then overwrites. When stderr is redirected it is suppressed, so a saved
+            # log carries no progress noise; the '[i/N]' counter lives on the header,
+            # which prints to stdout regardless.
             if sys.stderr.isatty():
                 print(f"  [{i:>{width}}/{total}] {e.key}\r", end="",
                       file=sys.stderr, flush=True)
+            # The LLM rating needs the freshly-fetched abstract, so it runs in the
+            # same pass as online (only when llm is in to_run); pass no provider for
+            # an online-only phase.
+            run_llm = "llm" in to_run
             analyze_entry(e, results, statuses, rep, delay=delay, timeout=timeout,
-                          provider=provider, model=model, contexts=contexts,
-                          by_key=by_key)
+                          provider=(provider if run_llm else None), model=model,
+                          contexts=contexts, by_key=by_key)
+            phases_by_key[e.key].add("online")
+            if run_llm:
+                phases_by_key[e.key].add("llm")
+
+        # Incremental checkpoint: APPEND this entry's record to the NDJSON log. One
+        # O(1) append per entry, so an interruption loses at most the entry in
+        # flight; a re-run appends a fresh record (last line wins on load). Every
+        # entry gets a line (offline-only entries too), so the log holds the whole
+        # bibliography. The final summary/file records are appended after the loop.
+        if args.json:
+            res = results.get(e.key)
+            st, conf = statuses.get(e.key, (None, None))
+            append_record(args.json, entry_record(
+                e.key, res, st, conf, phases_by_key[e.key],
+                rep.issues_for(e.key), verify=rep.links.get(e.key)))
         if args.sort == "entry":
             any_emitted |= rep.emit_entry(e, skip_notes=args.skipnotes,
                                           progress=f"[{i:>{width}}/{total}]")
@@ -304,25 +434,17 @@ def main(argv=None):
                        tex_mode=tex_mode, any_findings=any_emitted, integrity=summary)
 
     if args.json:
-        # The JSON report always carries a `summary` block (documented top-level key).
-        # Online it is the integrity roll-up; offline there is no verification, so the
-        # block records the offline mode and finding counts with a null integrity_score
-        # -- an honest, stable shape, never a fabricated 100.
-        json_summary = summary if summary is not None else {
-            "mode": "offline", "checked": 0, "integrity_score": None,
-            "errors": rep.count(Severity.ERROR), "warnings": rep.count(Severity.WARN),
-            "notes": rep.count(Severity.INFO),
-        }
-        try:
-            with open(args.json, "w", encoding="utf-8") as fh:
-                json.dump(rep.to_json(summary=json_summary, results=results, statuses=statuses),
-                          fh, indent=2, ensure_ascii=False)
-            print(f"\nJSON report written to {args.json}")
-        except OSError as ex:
-            # The analysis already ran and printed; a bad --json path should not
-            # mask that with a traceback. Report it and let the exit code stand.
-            print(f"\nwarning: could not write JSON report to {args.json}: {ex}",
-                  file=sys.stderr)
+        # Append the file-level findings (duplicates, brace balance, dropped cited
+        # keys -- only known after the loop) and the summary as their reserved
+        # records, then COMPACT the log: rewrite it once, atomically, with one line
+        # per key in bib order (dropping the superseded duplicate lines a resumed or
+        # multi-phase run appended). The summary is the integrity roll-up online, or
+        # the honest offline stub (null score) -- never a fabricated 100.
+        json_summary = summary if summary is not None else offline_summary_stub(rep)
+        append_record(args.json, file_record(rep.issues_for("<file>")))
+        append_record(args.json, summary_record(json_summary))
+        compact(args.json, [e.key for e in entries])
+        print(f"\nJSON report written to {args.json}")
 
     return 1 if rep.count(Severity.ERROR) else 0
 

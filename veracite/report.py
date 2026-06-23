@@ -105,14 +105,13 @@ CATEGORY_GROUP = {
     "title_case": "semantic", "author_format": "semantic",
     "author_completeness": "semantic",
     "record_unresolved": "semantic", "dead_doi": "semantic",
-    "not_cited": "semantic",
     "pid_optional": "semantic", "container_granularity": "semantic",
     # context: the entry's relationship to the manuscript and to the work it points
     # at -- citation order/usage, whether the id resolves to the right paper, whether
     # a published version should be cited instead, and the LLM-relevance ratings.
     "citation_order": "context", "preprint_superseded": "context",
     "id_resolves_wrong_record": "context", "wrong_paper": "context",
-    "llm_relevance": "context", "llm_config": "context",
+    "llm_relevance": "context", "llm_config": "context", "llm_ok": "context",
 }
 
 
@@ -138,7 +137,6 @@ CATEGORY_DOC = {
     "metadata_mismatch": "author/title/year/vol/pages/journal differ from record",
     "record_unresolved": "no authoritative source returned a record for the id",
     "dead_doi": "the recorded DOI does not resolve (Crossref 404)",
-    "not_cited": "entry is not cited in the .tex; skipped from online analysis",
     "pid_optional": "pre-2005 work with no DOI -- not required (reassurance)",
     "container_granularity": "id resolved to the containing volume, not the item",
     "author_completeness": "author list truncated ('and others' / literal 'et al.')",
@@ -148,6 +146,7 @@ CATEGORY_DOC = {
     "pid_missing": "no persistent identifier where one is expected",
     "identifier_format": "malformed DOI/arXiv/ISBN/ISSN/ORCID or year",
     "llm_relevance": "LLM rated the citation weakly relevant (or no abstract)",
+    "llm_ok": "LLM rated the citation relevant (4-5/5) -- a clean-pass note",
     "llm_config": "LLM run misconfigured (e.g. unknown provider)",
     "preprint_superseded": "a published version now exists",
     "related_work": "erratum/correction/comment/reply linked",
@@ -257,6 +256,7 @@ class Report:
         self.status = {}     # citation key -> (status, confidence, detail) for header
         self._emitted = set()  # indices into findings already printed (emit_entry)
         self._superseded = set()  # (key, category) pairs retracted by a later layer
+        self._uncited = set()  # keys reduced to a one-line UNCITED header (--tex mode)
 
     def set_link(self, key, url):
         """Record a URL (publisher/DOI/arXiv page) for an entry, shown beside its
@@ -269,6 +269,11 @@ class Report:
         longer prints as its own finding -- see verify.classify). `detail` is the
         short human reason shown for a non-clean status."""
         self.status[key] = (status, confidence, detail)
+
+    def mark_uncited(self, key):
+        """Mark an entry as UNCITED (--tex mode): its block is just a one-line header
+        saying so, with no findings -- it was skipped from all analysis."""
+        self._uncited.add(key)
 
     def add(self, severity, target, message, layer="static", category="", field="",
             suggested=None):
@@ -289,6 +294,14 @@ class Report:
     def add_file(self, severity, message, layer="static", category=""):
         self.findings.append(Finding(resolve_severity(severity, category),
                                      "<file>", 0, message, layer, category))
+
+    def seed_findings(self, findings):
+        """Pre-load findings rebuilt from a saved report (checkpoint resume), so a
+        replayed run reproduces the prior phases' findings without recomputing them.
+        They are appended as-is (their severity was already resolved when first
+        saved). The driver only seeds the phases it is NOT recomputing this run, so
+        a re-run of one phase naturally replaces that phase's findings."""
+        self.findings.extend(findings)
 
     def count(self, severity):
         return sum(1 for f in self.live_findings() if f.severity is severity)
@@ -338,6 +351,11 @@ class Report:
         block was printed."""
         out = out if out is not None else sys.stdout
         key = entry.key
+        # An UNCITED entry (--tex mode) is one line and nothing else.
+        if key in self._uncited:
+            print(self._entry_header(entry, progress=progress, uncited=True), file=out)
+            print(file=out)
+            return True
         idx = [i for i, f in enumerate(self.findings)
                if i not in self._emitted and f.key == key
                and not self._is_superseded(f)
@@ -361,20 +379,24 @@ class Report:
         print(file=out)   # blank line separates entry blocks
         return True
 
-    def _entry_header(self, entry, status=None, progress=""):
+    def _entry_header(self, entry, status=None, progress="", uncited=False):
         """The block header -- the single identifying line per record:
           [i/N] key  @type  line N  STATUS (conf) -- detail   verify: <url>
         `progress` ('[i/N]', optional) leads it. STATUS is colored by pass/fail. For
         a clean VERIFIED 1.0 only the word shows; a caveat adds '(confidence X)';
         UNVERIFIED/MISMATCH add their cause. The DOI/url (when known) follows after a
         '; ' so no separate verify line is needed. `status` is the
-        (status, confidence, detail) tuple recorded by set_status."""
+        (status, confidence, detail) tuple recorded by set_status. When `uncited`,
+        the line ends in a dim 'UNCITED in .tex; skipped' marker and nothing else."""
         bits = []
         if progress:
             bits.append(self._c(progress, _DIM))
         bits += [self._c(entry.key, _BOLD), self._c(f"@{entry.etype}", _DIM)]
         if entry.lineno:
             bits.append(self._c(f"line {entry.lineno}", _DIM))
+        if uncited:
+            bits.append(self._c("UNCITED in .tex source; skipped from further analysis", _DIM))
+            return "  ".join(bits)
         if status:
             st, conf, detail = (status + ("", ""))[:3] if isinstance(status, tuple) else (status, None, "")
             color = _GREEN if st == "VERIFIED" else (
@@ -589,34 +611,54 @@ class Report:
             d["suggested"] = f.suggested
         return d
 
-    def to_json(self, summary=None, results=None, statuses=None):
+    def issues_for(self, key):
+        """The live findings for one key as a list of issue dicts (the per-entry
+        record's `issues`). Used by the NDJSON checkpoint, which stores each entry's
+        findings inside the entry's own record rather than in a separate flat list."""
+        return [self._finding_dict(f) for f in self.live_findings() if f.key == key]
+
+    def to_json(self, summary=None, results=None, statuses=None, phases_by_key=None):
         """Machine-readable report. Always includes the flat `findings` list (for
         back-compat); each finding carries its `category`, the `group` that category
         rolls up into (syntax/semantic/context), and -- when the check proposes a
         concrete advisory edit -- a structured `suggested` ({field, from?, to}).
         When verification data is supplied, also emits a `summary` block (Layer 6)
         and a per-reference `references` array (Layer 8) with each reference's
-        status, confidence, identifiers, canonical record and issues."""
+        status, confidence, identifiers, canonical record and issues. `phases_by_key`
+        (key -> set of phases computed) is persisted as each reference's `phases`
+        so a later run can resume only the phases an entry still lacks."""
         live = self.live_findings()
         out = {"findings": [self._finding_dict(f) for f in live]}
         if summary is not None:
             out["summary"] = summary
         if results is not None and statuses is not None:
+            phases_by_key = phases_by_key or {}
             by_key = {}
             for f in live:
                 by_key.setdefault(f.key, []).append(self._finding_dict(f))
+            # Emit a reference per entry that was analyzed in ANY phase. Online
+            # entries come from `results`; an offline-only entry has no resolution
+            # but still records its `phases` (so a later online run can resume it),
+            # appearing with a null status/record -- honest, not a fabricated verdict.
+            # Order follows the analysis order (results first, then any offline-only
+            # keys) so the array is stable across incremental rewrites.
+            keys = list(results)
+            keys += [k for k in phases_by_key if k not in results]
             refs = []
-            for key, res in results.items():
-                status, conf = statuses.get(key, ("", 0.0))
-                rec = res.record or {}
+            for key in keys:
+                res = results.get(key)
+                status, conf = statuses.get(key, (None, None))
+                rec = (res.record if res else None) or {}
                 refs.append({
                     "key": key,
                     "status": status,
                     "confidence": conf,
-                    "identifiers": {"doi": res.doi or None,
-                                    "arxiv": res.arxiv_id or None,
-                                    "isbn": res.isbn or None},
-                    "sources": sorted(res.sources),
+                    "phases": sorted(phases_by_key.get(key, set())),
+                    "verify": self.links.get(key) or None,
+                    "identifiers": {"doi": (res.doi if res else "") or None,
+                                    "arxiv": (res.arxiv_id if res else "") or None,
+                                    "isbn": (res.isbn if res else "") or None},
+                    "sources": sorted(res.sources) if res else [],
                     "canonical_record": {k: rec.get(k) for k in
                                          ("title", "year", "journal", "volume",
                                           "number", "pages")} if rec else None,

@@ -583,8 +583,17 @@ def arxiv_consistency(e, rep):
                     category="identifier_format")
     if "arxiv" in j.lower() and not re.match(r"^arXiv:\d{4}\.\d{4,5}$", j.strip()) \
             and not ARXIV_OLD_RE.search(j):
-        rep.add(Severity.INFO, e, f"arXiv journal field not canonical 'arXiv:XXXX.XXXXX': {j!r}",
-                category="style", field="journal")
+        # The canonical journal string is the bare 'arXiv:<id>' -- no 'preprint'
+        # word, no surrounding text. When the id is recoverable, the suggested edit
+        # carries the exact before -> after, so the message stays terse and does not
+        # repeat the value/template; otherwise it names the offending value itself.
+        if id_journal:
+            rep.add(Severity.INFO, e, "arXiv journal field not in canonical form",
+                    category="style", field="journal",
+                    suggested={"field": "journal", "from": j, "to": f"arXiv:{id_journal}"})
+        else:
+            rep.add(Severity.INFO, e, f"arXiv journal field not in canonical form "
+                    f"'arXiv:XXXX.XXXXX': {j!r}", category="style", field="journal")
 
 
 @rule

@@ -56,12 +56,14 @@ def fetch_crossref(doi, timeout):
     if code != 200 or not data:
         return None, code
     msg = data.get("message", {})
-    authors, given = [], {}
+    authors, authors_display, given = [], [], {}
     for a in (msg.get("author") or []):
-        surname = fold_surname(a.get("family") or a.get("name") or "")
+        raw = clean_tex(a.get("family") or a.get("name") or "").strip()
+        surname = fold_surname(raw)
         if not surname:
             continue
         authors.append(surname)
+        authors_display.append(raw)          # original surname, for the message
         # keep the first given-name token for given-name verification; Crossref
         # carries structured names, unlike arXiv's last-token-only folding.
         g = clean_tex(a.get("given") or "").strip().split()
@@ -75,6 +77,7 @@ def fetch_crossref(doi, timeout):
             break
     return Record(
         authors=authors,
+        authors_display=authors_display,
         given=given,
         year=year,
         volume=str(msg.get("volume", "") or ""),
@@ -100,6 +103,65 @@ def fetch_arxiv(arxiv_id, timeout):
     return _ARXIV_CACHE[arxiv_id]
 
 
+def _parse_arxiv_entry(entry_xml):
+    """Parse one Atom <entry> block from the arXiv API into a Record. Returns None if
+    it has neither a title nor authors. Shared by the id fetch and the title search."""
+    title_m = re.search(r"<title>(.*?)</title>", entry_xml, re.S)
+    summary_m = re.search(r"<summary>(.*?)</summary>", entry_xml, re.S)
+    authors = re.findall(r"<author>\s*<name>(.*?)</name>", entry_xml, re.S)
+    year_m = re.search(r"<published>(\d{4})", entry_xml)
+    # arXiv records the published version once it is linked: a DOI in
+    # <arxiv:doi> and/or a citation string in <arxiv:journal_ref>.
+    pub_doi_m = re.search(r"<arxiv:doi[^>]*>(.*?)</arxiv:doi>", entry_xml, re.S)
+    jref_m = re.search(r"<arxiv:journal_ref[^>]*>(.*?)</arxiv:journal_ref>", entry_xml, re.S)
+    if not title_m and not authors:
+        return None
+    arx_surnames = [a.split()[-1] for a in authors if a.split()]
+    return Record(
+        authors=[fold_surname(s) for s in arx_surnames],
+        authors_display=arx_surnames,
+        year=int(year_m.group(1)) if year_m else None,
+        title=re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else "",
+        journal="arXiv",
+        abstract=re.sub(r"\s+", " ", summary_m.group(1)).strip() if summary_m else "",
+        published_doi=pub_doi_m.group(1).strip() if pub_doi_m else "",
+        journal_ref=re.sub(r"\s+", " ", jref_m.group(1)).strip() if jref_m else "",
+    )
+
+
+# arXiv id as it appears in an <id> URL, e.g. http://arxiv.org/abs/2210.03347v2.
+_ARXIV_ID_IN_URL = re.compile(r"arxiv\.org/abs/([\w.\-/]+?)(v\d+)?$", re.I)
+
+
+def search_arxiv(title, timeout):
+    """Search arXiv by title and return [(arxiv_id, Record), ...] for the top hits,
+    so a missing-id entry can be resolved when the work lives on arXiv (common for
+    ML/physics). Recall is bounded by arXiv's title index; the CALLER is responsible
+    for confirming each candidate against the bib (title + first author) before
+    trusting it -- this just returns candidates."""
+    # arXiv's query parser wants 'ti:word+word' -- field-prefixed, words joined by
+    # '+', and NOT percent-quoted (an encoded ':' or space breaks the search). Reduce
+    # the title to bare word tokens so punctuation (e.g. the ':' in 'Pix2Struct:')
+    # cannot be mistaken for a field separator.
+    words = re.findall(r"[A-Za-z0-9]+", clean_tex(title))
+    if len(words) < 3:
+        return []
+    q = "ti:" + "+".join(words)
+    txt = http_get_text(endpoint("arxiv_search", query=q), timeout)
+    if not txt:
+        return []
+    out = []
+    for entry_xml in re.findall(r"<entry>(.*?)</entry>", txt, re.S):
+        id_m = re.search(r"<id>\s*(\S+?)\s*</id>", entry_xml)
+        rec = _parse_arxiv_entry(entry_xml)
+        if not id_m or rec is None:
+            continue
+        m = _ARXIV_ID_IN_URL.search(id_m.group(1))
+        if m:
+            out.append((m.group(1), rec))
+    return out
+
+
 def _fetch_arxiv(arxiv_id, timeout):
     """Uncached arXiv fetch. arXiv throttles rapid requests, so a single timeout
     is retried once before giving up."""
@@ -110,25 +172,8 @@ def _fetch_arxiv(arxiv_id, timeout):
         txt = http_get_text(url, timeout)
     if not txt:
         return None
-    title_m = re.search(r"<entry>.*?<title>(.*?)</title>", txt, re.S)
-    summary_m = re.search(r"<summary>(.*?)</summary>", txt, re.S)
-    authors = re.findall(r"<author>\s*<name>(.*?)</name>", txt, re.S)
-    year_m = re.search(r"<published>(\d{4})", txt)
-    # arXiv records the published version once it is linked: a DOI in
-    # <arxiv:doi> and/or a citation string in <arxiv:journal_ref>.
-    pub_doi_m = re.search(r"<arxiv:doi[^>]*>(.*?)</arxiv:doi>", txt, re.S)
-    jref_m = re.search(r"<arxiv:journal_ref[^>]*>(.*?)</arxiv:journal_ref>", txt, re.S)
-    if not title_m and not authors:
-        return None
-    return Record(
-        authors=[fold_surname(a.split()[-1]) for a in authors if a.split()],
-        year=int(year_m.group(1)) if year_m else None,
-        title=re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else "",
-        journal="arXiv",
-        abstract=re.sub(r"\s+", " ", summary_m.group(1)).strip() if summary_m else "",
-        published_doi=pub_doi_m.group(1).strip() if pub_doi_m else "",
-        journal_ref=re.sub(r"\s+", " ", jref_m.group(1)).strip() if jref_m else "",
-    )
+    entry_m = re.search(r"<entry>(.*?)</entry>", txt, re.S)
+    return _parse_arxiv_entry(entry_m.group(1) if entry_m else txt)
 
 
 def fetch_openalex(doi, timeout):
@@ -172,14 +217,17 @@ def fetch_inspire(doi=None, arxiv_id=None, timeout=20):
     md = data.get("metadata", {}) if isinstance(data, dict) else {}
     if not md:
         return None
-    authors, given = [], {}
+    authors, authors_display, given = [], [], {}
     for a in (md.get("authors") or []):
         # INSPIRE stores 'full_name' as 'Last, First'.
         full = a.get("full_name") or a.get("name") or ""
-        surname = fold_surname(full.split(",")[0] if "," in full else full.split()[-1] if full.split() else "")
+        raw = clean_tex(full.split(",")[0] if "," in full
+                        else full.split()[-1] if full.split() else "").strip()
+        surname = fold_surname(raw)
         if not surname:
             continue
         authors.append(surname)
+        authors_display.append(raw)
         if "," in full:
             g = clean_tex(full.split(",", 1)[1]).strip().split()
             if g:
@@ -189,6 +237,7 @@ def fetch_inspire(doi=None, arxiv_id=None, timeout=20):
     titles = md.get("titles") or [{}]
     return Record(
         authors=authors,
+        authors_display=authors_display,
         given=given,
         year=int(year) if str(year).isdigit() else None,
         volume=str(pub.get("journal_volume", "") or ""),
@@ -220,9 +269,11 @@ def fetch_isbn(isbn, timeout):
     items = (gb or {}).get("items") or []
     if code == 200 and items:
         v = items[0].get("volumeInfo", {})
-        authors = [fold_surname(a.split()[-1]) for a in v.get("authors", []) if a.split()]
+        gb_surnames = [a.split()[-1] for a in v.get("authors", []) if a.split()]
         year = (v.get("publishedDate", "") or "")[:4]
-        return Record(authors=authors, year=int(year) if year.isdigit() else None,
+        return Record(authors=[fold_surname(s) for s in gb_surnames],
+                      authors_display=gb_surnames,
+                      year=int(year) if year.isdigit() else None,
                       title=v.get("title", ""), journal=v.get("publisher", ""))
     return None
 

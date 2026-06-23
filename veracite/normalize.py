@@ -210,6 +210,14 @@ def split_authors(field):
     return [fold_surname(_surname_token(a)) for a in _author_tokens(field)]
 
 
+def author_surnames_display(field):
+    """The original, human-readable surnames for each author (same order and
+    filtering as split_authors), for showing in a finding message instead of the
+    folded matching key. Keyed lookups still use split_authors' folded form; this
+    is display-only, so 'Ali Furkan Biten' shows as 'Biten', not 'biten'."""
+    return [clean_tex(_surname_token(a)).strip() for a in _author_tokens(field)]
+
+
 def shouted_surnames(field):
     """Surnames written in ALL-CAPS in an author field ('CHEN', 'ZHANG'), the
     SHOUTING convention some publishers export. A surname is 'shouted' if it has

@@ -2,10 +2,15 @@
 
 The DOI/arXiv id already establishes identity, so individual field disagreements
 (author, title, year/volume/pages, journal) are metadata discrepancies a human
-should check -- warnings, not errors. The one true error is the case where the
-first author AND the title both differ strongly (the id likely points elsewhere).
-Also compares authoritative sources against each other (cross-source conflicts)
-and suggests fields the record carries that the entry omits (parity).
+should check -- not errors. The authoritative record is the canonical reference:
+each flagged discrepancy carries a suggested edit that conforms the bib TO the
+record (year 2009 -> 2010), and SEVERITY follows render-impact -- a field that
+changes the rendered citation (author/title/year/journal/volume/issue/pages) warns;
+a purely stylistic difference (e.g. an abbreviated given name) is a note. The one
+true error is the case where the first author AND the title both differ strongly
+(the id likely points elsewhere). Also compares authoritative sources against each
+other (cross-source conflicts) and suggests fields the record carries that the entry
+omits (parity).
 """
 
 import html
@@ -13,8 +18,8 @@ import json
 import os
 import re
 
-from .normalize import (bib_given_names, clean_tex, deaccent,
-                        is_container_granularity, is_preprint, norm_pages,
+from .normalize import (author_surnames_display, bib_given_names, clean_tex,
+                        deaccent, is_container_granularity, is_preprint, norm_pages,
                         split_authors, title_is_miscased)
 from .report import Severity
 from .titles import title_is_shortened, title_key, title_overlap
@@ -89,6 +94,12 @@ def _compare_authors(e, rec, source, rep):
     bib_authors = split_authors(e.get("author", ""))
     rec_authors = rec.get("authors", [])
     truncated = "others" in e.get("author", "").lower()
+    # Folded key -> original surname, so a message shows 'Biten'/'Furkan Biten'
+    # rather than the folded matching key 'biten'/'furkanbiten'. Display only;
+    # all comparison below stays on the folded keys.
+    display = dict(zip(rec_authors, rec.get("authors_display") or []))
+    display.update(zip(bib_authors, author_surnames_display(e.get("author", ""))))
+    show = lambda k: display.get(k) or k
     # An 'and others' truncation is faithful -- not lossy -- when the authoritative
     # record enumerates no more names than the bib already carries (a collaboration
     # the record holds as a single name, or a list the bib already gives in full).
@@ -112,14 +123,16 @@ def _compare_authors(e, rec, source, rep):
 
     if first_differs:
         rep.add(Severity.WARN, e, f"[{source}] first author differs: "
-                f"bib={bib_authors[0]!r} vs {source}={rec_authors[0]!r}",
+                f"bib={show(bib_authors[0])!r} vs {source}={show(rec_authors[0])!r}",
                 "record", category="metadata_mismatch")
     if bib_only:
         rep.add(Severity.WARN, e, f"[{source}] author(s) in bib not in record: "
-                + ", ".join(sorted(bib_only)), "record", category="metadata_mismatch")
+                + ", ".join(sorted(show(a) for a in bib_only)), "record",
+                category="metadata_mismatch")
     if rec_only and not truncated:
         rep.add(Severity.WARN, e, f"[{source}] author(s) in record missing from bib: "
-                + ", ".join(sorted(rec_only)), "record", category="metadata_mismatch")
+                + ", ".join(sorted(show(a) for a in rec_only)), "record",
+                category="metadata_mismatch")
     if not truncated and not bib_only and not rec_only and not first_differs \
             and bib_authors != rec_authors:
         rep.add(Severity.WARN, e, f"[{source}] same authors but in a different order "
@@ -127,7 +140,7 @@ def _compare_authors(e, rec, source, rep):
     initials = [a for a in bib_authors if len(a) <= 1]
     if initials and not truncated:
         rep.add(Severity.INFO, e, f"[{source}] author surname(s) reduced to initials "
-                f"({', '.join(initials)}); check name parsing", "record",
+                f"({', '.join(show(a) for a in initials)}); check name parsing", "record",
                 category="metadata_mismatch")
 
     # Given-name check (Crossref only -- arXiv folds names to a last token). For a
@@ -145,10 +158,10 @@ def _compare_authors(e, rec, source, rep):
                 continue
             if _given_abbreviates(bg, rg):
                 if bg != rg:
-                    abbreviated.append(f"{surname} ({bg!r}->{rg!r})")
+                    abbreviated.append(f"{show(surname)} ({bg!r}->{rg!r})")
             elif not _is_initial(bg) and deaccent(bg).lower() != deaccent(rg).lower():
                 rep.add(Severity.WARN, e, f"[{source}] given name differs for "
-                        f"{surname!r}: bib={bg!r} vs {source}={rg!r}",
+                        f"{show(surname)!r}: bib={bg!r} vs {source}={rg!r}",
                         "record", category="metadata_mismatch")
         # Abbreviations are collapsed into one note per entry (they were noisy at
         # one line per author); the record's full names are advisory, not errors.
@@ -261,44 +274,38 @@ _SOFT_FIELDS = [
     ("pages", "pages", lambda v: norm_pages(str(v or ""))),
 ]
 
-# The locator group: the soft fields that together place an article within a
-# journal. A locator the bib leaves empty is co-located with a sibling locator
-# mismatch (see field_diffs / compare_against_record) rather than reported as a
-# separate parity note, so all the related facts read on one line.
-_LOCATOR_FIELDS = {"volume", "number", "pages"}
 
+def _soft_field_diffs(e, rec):
+    """Per-field bib-vs-record disagreements on the soft fields (year/volume/issue/
+    pages), as (field, label, bib_value, record_value) using the ORIGINAL values --
+    so each can be emitted as its own finding with a concrete 'bib -> record'
+    suggested edit. A field only counts when BOTH sides supply a value and their
+    NORMALIZED forms differ (so '1--2' vs '1-2' is not a difference). The record is
+    the canonical reference: record_value is the proposed value."""
+    out = []
+    for key, label, norm in _SOFT_FIELDS:
+        bibraw = str(e.get(key, "") or "").strip()
+        recraw = str(rec.get(key, "") or "").strip()
+        if bibraw and recraw and norm(bibraw) != norm(recraw):
+            out.append((key, label, bibraw, recraw))
+    return out
 
-def field_diffs(left, right, lname, rname, pages_substring_ok=False,
-                report_left_missing=None):
+def field_diffs(left, right, lname, rname, pages_substring_ok=False):
     """The soft bibliographic fields (year/volume/issue/pages) on which two records
     disagree, as formatted '<label> (<lname>=<lv> vs <rname>=<rv>)' strings. Both
     sides must supply a value for a field to count (a field one source omits is not
     a conflict). When `pages_substring_ok`, a page value contained in the other
-    (a range vs one of its endpoints) is not treated as a difference -- used for
-    cross-source comparison, where neither side is the bib being checked.
-
-    `report_left_missing`, when given, is a set of field keys for which a value the
-    RIGHT side supplies but the LEFT leaves empty is also surfaced (as
-    '<label> (<lname>=(empty) vs <rname>=<rv>)'). Used only for bib-vs-record on the
-    locator group: it co-locates a missing locator with its sibling locator
-    mismatch -- the same true facts on one line -- instead of a separate parity
-    note, so a reader sees the whole locator picture at once (e.g. a 'volume=475.x'
-    mismatch alongside 'number=(empty) vs 2229'). The set of keys actually reported
-    this way is also returned, so the caller can suppress the duplicate parity note.
-    Returns (diffs, reported_missing_keys)."""
-    out, reported_missing = [], set()
+    (a range vs one of its endpoints) is not treated as a difference. Used for
+    CROSS-SOURCE comparison (record vs record), where neither side is the bib; the
+    bib-vs-record path uses _soft_field_diffs, which carries per-field suggestions."""
+    out = []
     for key, label, norm in _SOFT_FIELDS:
         lv, rv = norm(left.get(key)), norm(right.get(key))
-        if lv and rv:
-            if lv == rv:
-                continue
+        if lv and rv and lv != rv:
             if key == "pages" and pages_substring_ok and (lv in rv or rv in lv):
                 continue
             out.append(f"{label} ({lname}={lv} vs {rname}={rv})")
-        elif rv and not lv and report_left_missing and key in report_left_missing:
-            out.append(f"{label} ({lname}=(empty) vs {rname}={rv})")
-            reported_missing.add(key)
-    return out, reported_missing
+    return out
 
 
 def compare_against_record(e, rec, source, rep):
@@ -325,7 +332,8 @@ def compare_against_record(e, rec, source, rep):
         rep.withdraw(e.key, "title_case")
         rep.add(Severity.INFO, e, f"[{source}] title casing differs from the record; "
                 f"adopt the record's casing:\n        bib:    {btitle[:90]}\n"
-                f"        {source}: {atitle[:90]}", "record", category="title_case")
+                f"        {source}: {atitle[:90]}", "record", category="title_case",
+                field="title", suggested={"field": "title", "from": btitle, "to": atitle})
     if bt and at and bt != at:
         if title_is_shortened(btitle, atitle):
             rep.add(Severity.INFO, e, f"[{source}] title is a shortened form of the "
@@ -352,10 +360,12 @@ def compare_against_record(e, rec, source, rep):
                 rep.add(Severity.WARN, e, f"[{source}] title differs from record (overlap {overlap:.0%}):\n"
                         f"        bib:    {btitle[:90]}\n"
                         f"        {source}: {atitle[:90]}", "record",
-                        category="metadata_mismatch")
+                        category="metadata_mismatch", field="title",
+                        suggested={"field": "title", "from": btitle, "to": atitle})
             else:
                 rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%})",
-                        "record", category="metadata_mismatch")
+                        "record", category="metadata_mismatch", field="title",
+                        suggested={"field": "title", "from": btitle, "to": atitle})
 
     # The single genuine wrong-paper error: identity-level fields ALL point
     # elsewhere, so the id itself is probably wrong (copy-paste). Both the first
@@ -377,19 +387,26 @@ def compare_against_record(e, rec, source, rep):
     # the volume differs AND the number is absent. We only co-locate when there is
     # already a real locator mismatch; an entry that merely omits 'number' with no
     # other conflict keeps its benign parity note rather than gaining a warning.
-    diffs, _ = field_diffs(e, rec, "bib", source)
+    # Soft bibliographic fields (year/volume/issue/pages): one finding PER field, so
+    # each carries a concrete 'bib -> record' suggested edit (the record is the
+    # canonical reference; the suggestion leans toward conforming the bib to it) and
+    # its own severity. All four appear in a rendered citation, so a differing value
+    # is render-affecting -> WARN.
     folded_missing = set()
-    if any(d.split(" ")[0] in ("volume", "issue", "pages") for d in diffs):
-        diffs, folded_missing = field_diffs(e, rec, "bib", source,
-                                            report_left_missing=_LOCATOR_FIELDS)
-    if diffs:
-        rep.add(Severity.WARN, e, f"[{source}] differs from record: " + "; ".join(diffs),
-                "record", category="metadata_mismatch")
+    for fld, label, bibval, recval in _soft_field_diffs(e, rec):
+        # The before -> after lives in the suggested tail, so the prose stays terse
+        # ('year differs') rather than repeating 'bib=X vs crossref=Y'.
+        rep.add(Severity.WARN, e, f"[{source}] {label} differs",
+                "record", category="metadata_mismatch",
+                field=fld, suggested={"field": fld, "from": bibval, "to": recval})
 
     bj, aj = clean_tex(e.get("journal", "")).lower(), clean_tex(rec.get("journal", "")).lower()
     if bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
-        rep.add(Severity.WARN, e, f"[{source}] journal differs: bib={e.get('journal', '')!r} "
-                f"vs {source}={rec.get('journal', '')!r}", "record", category="metadata_mismatch")
+        # Journal renders in the citation -> WARN, with the record's name suggested.
+        rep.add(Severity.WARN, e, f"[{source}] journal differs", "record",
+                category="metadata_mismatch", field="journal",
+                suggested={"field": "journal", "from": e.get("journal", ""),
+                           "to": rec.get("journal", "")})
 
     _suggest_parity(e, rec, source, rep, skip=folded_missing)
 
@@ -410,9 +427,9 @@ def compare_sources(e, records, rep):
             # Data conflicts -> WARN (one finding listing all disagreeing fields).
             # A page value contained in the other (range vs an endpoint) is not a
             # conflict here, since neither side is the bib being checked.
-            data, _ = field_diffs(ra, rb, sa, sb, pages_substring_ok=True)
+            data = field_diffs(ra, rb, sa, sb, pages_substring_ok=True)
             if data:
-                rep.add(Severity.WARN, e, f"sources disagree: " + "; ".join(data),
+                rep.add(Severity.WARN, e, "sources disagree: " + "; ".join(data),
                         "record", category="source_conflict")
             # Journals: a full title vs its abbreviation (or any two forms
             # _journal_equiv accepts) is NOT a discrepancy -- both are valid, so it

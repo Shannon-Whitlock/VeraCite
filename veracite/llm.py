@@ -329,9 +329,11 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
     """Rate a single cited entry. Severity policy (advisory): a clear wrong-paper
     flag is an ERROR; a group-misfit (the reference does not fit the group it is
     co-cited in) is a WARN even if its standalone relevance is high; otherwise
-    relevance <=3 is a WARN; relevance 4-5 with no group issue is silent. `by_key`
-    lets the prompt name the co-cited references. This is the per-entry unit the
-    interleaved run loop calls."""
+    relevance <=3 is a WARN; relevance 4-5 with no group issue leaves a 'context OK
+    N/5' NOTE. An LLM call costs tokens, so it ALWAYS leaves exactly one line in the
+    report (clean pass, weak relevance, wrong paper, or an unavailable/unusable
+    rating) rather than vanishing silently. `by_key` lets the prompt name the
+    co-cited references. This is the per-entry unit the interleaved run loop calls."""
     if not rec or not (rec.get("abstract") or "").strip():
         rep.add(Severity.INFO, entry, "[llm] skipped: no abstract available for rating",
                 "llm", category="llm_relevance")
@@ -353,6 +355,10 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
                 f"only){tail}", "llm", category="wrong_paper")
         return
     if not isinstance(rel, int):
+        # The call was made (tokens spent) but the model gave no usable rating --
+        # record that rather than vanish silently.
+        rep.add(Severity.INFO, entry, "[llm] no usable relevance rating returned",
+                "llm", category="llm_relevance")
         return
     # When the standalone relevance is already weak (<=3), a group anomaly (the
     # reference does not fit the works it is co-cited with) lowers the score by a
@@ -368,4 +374,9 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
         rep.add(Severity.WARN, entry, f"[llm] relevance rated {adjusted}/5 (model "
                 f"opinion from the abstract and cited context only -- verify, do not "
                 f"treat as authoritative){note}{tail}", "llm", category="llm_relevance")
-    # relevance 4-5 with no penalty: no finding (silent, by design).
+        return
+    # relevance 4-5 with no problem: still leave ONE note recording the result, so an
+    # LLM call (which costs tokens) always shows in the report rather than vanishing
+    # silently. It is a note (reassurance), hidden by --skipnotes like other notes.
+    rep.add(Severity.INFO, entry, f"[llm] context OK {adjusted}/5{tail}",
+            "llm", category="llm_ok")

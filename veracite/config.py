@@ -32,7 +32,8 @@ DEFAULT_SETTINGS = {
     # Generic by default; set it to your paper's topic for sharper ratings.
     "document_context": "a research paper",
     # Network pacing defaults (a CLI flag, when given, overrides these).
-    "request_delay": 0.4,     # seconds between API calls
+    "request_delay": 0.2,     # min seconds between requests to the SAME service
+                              # (per-host, time-based; arXiv is paced at 3s, see http.py)
     "request_timeout": 20,    # per-request HTTP timeout, seconds
     # Project-specific proper nouns / package names that must stay capitalized
     # in titles; an unprotected occurrence is flagged. Extend per project.
@@ -66,6 +67,7 @@ DEFAULT_SETTINGS = {
         "pid_missing": "warning",         # no persistent identifier where one is expected
         "identifier_format": "warning",   # malformed DOI/arXiv/ISBN/ISSN/ORCID
         "llm_relevance": "warning",       # LLM rated the citation weakly relevant
+        "llm_ok": "note",                 # LLM rated the citation relevant (4-5/5) -- clean-pass note
         "llm_config": "warning",          # LLM run misconfigured (e.g. unknown provider)
         "preprint_superseded": "warning", # a published version now exists
         "related_work": "warning",        # erratum/correction/comment/reply linked
@@ -83,7 +85,6 @@ DEFAULT_SETTINGS = {
         "style": "note",                  # casing, punctuation, dashes, month, etc.
         "citation_order": "note",         # a \cite{} group is not in chronological order
         "encoding": "note",               # non-ASCII / mojibake
-        "not_cited": "note",              # entry not cited in the .tex; skipped online
         "pid_optional": "note",           # pre-2005 work legitimately has no DOI
         "container_granularity": "note",  # id resolved to the containing volume, not the item
         "parity_suggestion": "note",      # record has data the bib could adopt
@@ -95,6 +96,7 @@ DEFAULT_SETTINGS = {
         "crossref_work": "https://api.crossref.org/works/{doi}",
         "crossref_search": "https://api.crossref.org/works?query.bibliographic={query}&rows=12&select=DOI,title,author,issued,container-title,type",
         "arxiv": "http://export.arxiv.org/api/query?id_list={id}",
+        "arxiv_search": "http://export.arxiv.org/api/query?search_query={query}&max_results=5",
         "openalex_work": "https://api.openalex.org/works/https://doi.org/{doi}",
         "semanticscholar_paper": "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract",
         "inspire_doi": "https://inspirehep.net/api/doi/{doi}",

@@ -170,6 +170,17 @@ def test_bare_doi_unescapes_bibtex_escapes():
     assert bare_doi("10.1103/PhysRevA.88.052108") == "10.1103/PhysRevA.88.052108"
 
 
+def test_verify_url_unescapes_bibtex_specials():
+    # A url field carries TeX-escaped specials ('\_', '\&', ...) that are literal in
+    # the real address; the verify link must de-escape them so it is clickable.
+    from veracite.record import _clean_url
+    assert _clean_url(r"http://papers.nips.cc/paper\_files/x.html") \
+        == "http://papers.nips.cc/paper_files/x.html"
+    assert _clean_url(r"https://e.com/a\&b\%c\#d") == "https://e.com/a&b%c#d"
+    assert _clean_url(r"https://e.com/~{}u") == "https://e.com/~u"
+    assert _clean_url("https://clean.com/p") == "https://clean.com/p"
+
+
 def test_and_others_flagged_as_truncation():
     # 'and others' is valid, but it discards the dropped names. For good record-
     # keeping the full list should live in the .bib (the style truncates), so the
@@ -221,6 +232,24 @@ def test_surname_match_particles_only():
     assert record._surname_match("vandeveerdonk", "veerdonk")
     assert not record._surname_match("han", "chan")          # not a particle
     assert not record._surname_match("son", "johnson")
+
+
+def test_author_mismatch_message_shows_readable_names_not_folded_keys():
+    # The WARN stands (we conform to Crossref), but the message must show the
+    # original, cased surnames -- not the internal folded matching keys. Crossref's
+    # mis-split 'Furkan Biten' (for 'Ali Furkan Biten') should read 'Furkan Biten',
+    # and the bib's 'Biten' should read 'Biten', not 'biten'/'furkanbiten'.
+    e = _entry("@article{k,\n author={Ali Furkan Biten and Ruben Tito},\n"
+               " title={A Study},\n year={2019},\n doi={10.1/x}\n}\n")
+    rec = {"authors": ["furkanbiten", "tito"],
+           "authors_display": ["Furkan Biten", "Tito"], "given": {},
+           "title": "A Study", "year": "2019"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    msgs = [f.message for f in rep.findings if "author" in f.message]
+    assert any("bib='Biten' vs crossref='Furkan Biten'" in m for m in msgs)
+    # No folded key (lowercase, spaceless) leaks into any author message.
+    assert not any("furkanbiten" in m or "'biten'" in m for m in msgs)
 
 
 def test_is_initial_recognizes_initials_not_names():
@@ -474,6 +503,38 @@ def test_arxiv_id_not_mined_from_conference_doi():
     assert normalize.extract_arxiv_id("10.48550/arXiv.2103.16313") == "2103.16313"
 
 
+def _arxiv_journal_notes(bib):
+    """Run the static rules over one entry and return its arXiv-journal-canonical
+    notes as Findings (so .suggested can be inspected)."""
+    entries, _ = parse_bib(bib)
+    rep = Report(color=False)
+    run_static(entries, rep)
+    return [f for f in rep.findings if "canonical form" in f.message]
+
+
+def test_arxiv_journal_canonical_is_bare_id_not_preprint_prose():
+    # 'arXiv preprint arXiv:2207.14255' is non-canonical: the canonical journal
+    # value is the BARE 'arXiv:2207.14255' (no 'preprint' word). The note must say
+    # exactly that via a concrete suggested edit.
+    bib = ("@article{k, author={A. One}, title={A Title Long Enough}, year={2022},\n"
+           " eprint={2207.14255}, journal={arXiv preprint arXiv:2207.14255}}\n")
+    notes = _arxiv_journal_notes(bib)
+    assert len(notes) == 1
+    assert notes[0].suggested == {"field": "journal",
+                                  "from": "arXiv preprint arXiv:2207.14255",
+                                  "to": "arXiv:2207.14255"}
+    # The message is terse: the value lives in the suggested edit, not repeated in
+    # the prose (the '-> ' tail is rendered from `suggested`, not stored here).
+    assert notes[0].message == "arXiv journal field not in canonical form"
+
+
+def test_arxiv_journal_bare_canonical_is_silent():
+    # The canonical form itself raises no note.
+    bib = ("@article{k, author={A. One}, title={A Title Long Enough}, year={2022},\n"
+           " eprint={2207.14255}, journal={arXiv:2207.14255}}\n")
+    assert _arxiv_journal_notes(bib) == []
+
+
 def test_clean_tex_decodes_entities_and_tex_amp():
     assert normalize.clean_tex("Science &amp; Justice") == normalize.clean_tex("Science \\& Justice")
 
@@ -536,6 +597,27 @@ def test_idmatched_author_diff_is_warning_not_error():
     # a metadata warning, never a wrong_paper/id_resolves_wrong_record error.
     assert Severity.ERROR not in [f.severity for f in rep.findings]
     assert any(f.category == "metadata_mismatch" for f in rep.findings)
+
+
+def test_metadata_mismatch_suggests_conforming_to_record():
+    # The record is canonical: a discrepancy is flagged for a human (WARN, not an
+    # auto-edit) but its suggested edit points the bib AT the record (2009 -> 2010).
+    # Render-affecting fields (year) warn; a stylistic given-name abbreviation notes.
+    e = _entry("@article{k,\n author={Amo, A.},\n title={A Study Of Things},\n"
+               " journal={Nature Physics},\n year={2009},\n volume={5},\n pages={805},\n"
+               " doi={10.1/x}\n}\n")
+    rec = {"authors": ["amo"], "given": {"amo": "alberto"}, "title": "A Study Of Things",
+           "journal": "Nature Physics", "year": "2010", "volume": "5", "pages": "805",
+           "doi": "10.1/x"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    year = [f for f in rep.findings if f.category == "metadata_mismatch"
+            and "year" in f.message]
+    assert len(year) == 1 and year[0].severity is Severity.WARN          # renders -> WARN
+    assert year[0].suggested == {"field": "year", "from": "2009", "to": "2010"}
+    # The abbreviated given name does not change the rendered citation -> a note.
+    assert not any(f.severity is Severity.WARN and "given name" in f.message
+                   for f in rep.findings)
 
 
 def test_first_author_and_title_both_differ_is_error():
@@ -634,9 +716,14 @@ def test_llm_low_relevance_is_warning():
     assert [(f.severity, f.category) for f in rep.findings] == [(Severity.WARN, "llm_relevance")]
 
 
-def test_llm_high_relevance_is_silent():
-    assert _rate('{"relevance": 4, "wrong_paper": false, "verdict": "x", "issue": ""}').findings == []
-    assert _rate('{"relevance": 5, "wrong_paper": false, "verdict": "x", "issue": ""}').findings == []
+def test_llm_high_relevance_leaves_clean_pass_note():
+    # An LLM call costs tokens, so even a clean 4-5/5 leaves one 'context OK' note
+    # (a note, hidden by --skipnotes) rather than vanishing silently.
+    for rel in (4, 5):
+        rep = _rate(f'{{"relevance": {rel}, "wrong_paper": false, "verdict": "", "issue": ""}}')
+        assert [(f.severity, f.category) for f in rep.findings] \
+            == [(Severity.INFO, "llm_ok")]
+        assert f"context OK {rel}/5" in rep.findings[0].message
 
 
 def test_group_misfit_drops_low_relevance_by_one():
@@ -648,10 +735,11 @@ def test_group_misfit_drops_low_relevance_by_one():
 
 
 def test_group_misfit_ignored_when_relevance_high():
-    # A high standalone relevance is NOT penalised by a group flag (silent).
+    # A high standalone relevance is NOT penalised by a group flag: no warning, just
+    # the clean-pass note recording the call.
     rep = _rate('{"relevance": 5, "wrong_paper": false, "group_misfit": true, '
                 '"verdict": "x", "issue": ""}')
-    assert rep.findings == []
+    assert [(f.severity, f.category) for f in rep.findings] == [(Severity.INFO, "llm_ok")]
 
 
 def test_prompt_lists_cocited_group():
@@ -1196,7 +1284,7 @@ def test_cli_unwritable_json_warns_not_crashes(tmp_path, capfd):
     p.write_text(_ONE_ENTRY, encoding="utf-8")
     bad = tmp_path / "no_such_dir" / "out.json"   # parent does not exist
     rc = main(["--bib", str(p), "--offline", "--no-color", "--json", str(bad)])
-    assert "could not write JSON report" in capfd.readouterr().err
+    assert "could not write checkpoint" in capfd.readouterr().err
     assert not bad.exists()
 
 
@@ -1806,12 +1894,11 @@ def test_zero_overlap_title_downranked_for_container_doi():
     assert any("containing book/volume" in f.message for f in rep.findings)
 
 
-def test_missing_locator_co_located_with_sibling_mismatch():
-    # When a locator field the bib leaves empty has a value in the record AND there
-    # is a real sibling locator mismatch (e.g. volume packs volume.number, number
-    # blank), the missing locator is folded into the SAME metadata_mismatch line --
-    # both facts on one line -- and not also emitted as a parity note. VeraCite
-    # asserts only the observed facts (volume differs; issue absent), not WHY.
+def test_locator_mismatch_is_per_field_with_record_suggestion():
+    # Each soft-field disagreement is its OWN finding, leaning toward the canonical
+    # record: the differing volume is a WARN carrying a 'bib -> record' suggested
+    # edit (475.2229 -> 475), and the omitted number is a parity note pointing at
+    # the record's value. Both directional toward Crossref.
     e = _entry('@article{k, author={Bondar, D.}, title={Koopman wave functions},\n'
                ' journal={Proc R Soc A}, volume={475.2229}, number={}, pages={20180879},\n'
                ' year={2019}, doi={10.1098/rspa.2018.0879}}\n')
@@ -1820,14 +1907,13 @@ def test_missing_locator_co_located_with_sibling_mismatch():
            "journal": "Proc R Soc A", "doi": "10.1098/rspa.2018.0879"}
     rep = Report(color=False)
     record.compare_against_record(e, rec, "crossref", rep)
-    mm = [f for f in rep.findings if f.category == "metadata_mismatch"]
-    assert len(mm) == 1
-    # Both true facts on the one line.
-    assert "volume (bib=475.2229 vs crossref=475)" in mm[0].message
-    assert "issue (bib=(empty) vs crossref=2229)" in mm[0].message
-    # The redundant 'record has number ... the entry omits' parity note is gone.
-    assert not any(f.category == "parity_suggestion" and "number" in f.message
-                   for f in rep.findings)
+    vol = [f for f in rep.findings if f.category == "metadata_mismatch"
+           and "volume" in f.message]
+    assert len(vol) == 1 and vol[0].severity is Severity.WARN
+    assert vol[0].suggested == {"field": "volume", "from": "475.2229", "to": "475"}
+    # The omitted number is offered as a parity suggestion pointing at the record.
+    assert any(f.category == "parity_suggestion" and "number '2229'" in f.message
+               for f in rep.findings)
 
 
 def test_omitted_locator_without_mismatch_stays_a_parity_note():
@@ -1846,9 +1932,10 @@ def test_omitted_locator_without_mismatch_stays_a_parity_note():
                for f in rep.findings)
 
 
-def test_genuine_volume_mismatch_unchanged():
-    # A genuinely wrong volume (number present and correct) is still a plain
-    # metadata_mismatch; nothing is folded, no empty-locator text appears.
+def test_genuine_volume_mismatch_suggests_record_value():
+    # A genuinely wrong volume (number present and correct) is a WARN whose
+    # suggested edit conforms the bib to the record (99 -> 12); no empty-locator
+    # text, and no parity note for the already-present number.
     e = _entry('@article{k, author={Smith, Jane}, title={A Study}, journal={J},\n'
                ' volume={99}, number={3}, pages={5}, year={2020}, doi={10.1/x}}\n')
     rec = {"authors": ["smith"], "given": {"smith": "jane"}, "title": "A Study",
@@ -1856,8 +1943,10 @@ def test_genuine_volume_mismatch_unchanged():
            "journal": "J", "doi": "10.1/x"}
     rep = Report(color=False)
     record.compare_against_record(e, rec, "crossref", rep)
-    mm = [f for f in rep.findings if f.category == "metadata_mismatch"]
-    assert any("volume (bib=99 vs crossref=12)" in f.message for f in mm)
+    vol = [f for f in rep.findings if f.category == "metadata_mismatch"
+           and "volume" in f.message]
+    assert len(vol) == 1
+    assert vol[0].suggested == {"field": "volume", "from": "99", "to": "12"}
     assert not any("(empty)" in f.message for f in rep.findings)
 
 
@@ -2055,8 +2144,8 @@ def test_unclosed_paren_string_recovers_at_next_entry():
 
 # --- JSON report shape & --offline/--llm guard -----------------------------
 
-def test_offline_json_has_summary_block_with_null_score(tmp_path):
-    """The documented `summary` top-level key must exist offline too, but with an
+def test_offline_json_has_summary_record_with_null_score(tmp_path):
+    """The NDJSON report carries a reserved <summary> record even offline, with an
     honest null integrity_score -- never a fabricated 100 from zero verified."""
     import json
     from veracite.cli import main
@@ -2064,10 +2153,15 @@ def test_offline_json_has_summary_block_with_null_score(tmp_path):
     bib.write_text(_ONE_ENTRY, encoding="utf-8")
     out = tmp_path / "rep.json"
     main(["--bib", str(bib), "--offline", "--no-color", "--json", str(out)])
-    d = json.loads(out.read_text())
-    assert set(["findings", "summary", "references"]) <= set(d)
-    assert d["summary"]["mode"] == "offline"
-    assert d["summary"]["integrity_score"] is None
+    recs = {json.loads(l)["key"]: json.loads(l)
+            for l in out.read_text().splitlines() if l.strip()}
+    assert "<summary>" in recs and "<file>" in recs
+    summary = recs["<summary>"]["summary"]
+    assert summary["mode"] == "offline"
+    assert summary["integrity_score"] is None
+    # The single entry appears as its own record with the offline phase set.
+    entry = [r for k, r in recs.items() if k not in ("<summary>", "<file>")][0]
+    assert entry["phases"]["offline"] is True and entry["phases"]["online"] is False
 
 
 def test_llm_with_offline_is_rejected(tmp_path, capfd):
@@ -2082,3 +2176,174 @@ def test_llm_with_offline_is_rejected(tmp_path, capfd):
         main(["--bib", str(bib), "--offline", "--llm", "--tex", str(tex), "--no-color"])
     assert exc.value.code != 0
     assert "--llm cannot run with --offline" in capfd.readouterr().err
+
+
+def test_uncited_entry_is_single_line_and_not_analyzed(tmp_path, capfd):
+    """In --tex mode an uncited entry is reduced to one UNCITED header line: no
+    offline rules run for it, so its style/structural problems neither print nor
+    gate the verdict. An uncited @inproceedings missing 'booktitle' (an ERROR when
+    analyzed) must NOT flip the run to NEEDS ATTENTION."""
+    from veracite.cli import main
+    bib = tmp_path / "r.bib"
+    bib.write_text(
+        "@article{cited, author={Smith, J}, title={A Cited Study Here}, journal={J},\n"
+        " year={2020}, volume={1}, pages={1}, doi={10.1/a}}\n"
+        "@inproceedings{uncited, author={Doe, J}, title={UPPERCASE BAD TITLE}, year={2019}}\n",
+        encoding="utf-8")
+    tex = tmp_path / "m.tex"
+    tex.write_text("\\cite{cited}\n", encoding="utf-8")
+    rc = main(["--bib", str(bib), "--tex", str(tex), "--offline", "--no-color"])
+    out = capfd.readouterr().out
+    assert "uncited  @inproceedings  line 3  UNCITED in .tex source" in out
+    # The uncited entry's would-be findings are absent.
+    assert "missing_field" not in out and "title_case" not in out
+    assert rc == 0          # the uncited entry's error does not gate the verdict
+
+
+def test_no_tex_analyzes_every_entry(tmp_path, capfd):
+    """Without --tex, every entry is analyzed -- the same entry's structural error
+    now appears and gates the verdict, so the .bib can be checked in full."""
+    from veracite.cli import main
+    bib = tmp_path / "r.bib"
+    bib.write_text(
+        "@inproceedings{uncited, author={Doe, J}, title={A Fine Title Here}, year={2019}}\n",
+        encoding="utf-8")
+    rc = main(["--bib", str(bib), "--offline", "--no-color"])
+    out = capfd.readouterr().out
+    assert "missing_field" in out and "booktitle" in out
+    assert rc != 0          # analyzed -> the error gates the verdict
+
+
+# --- per-service request pacing (http._throttle) ---------------------------
+
+def test_throttle_paces_per_service_and_credits_elapsed_time(monkeypatch):
+    """The HTTP throttle waits only the remainder of a service's interval, counts
+    time already elapsed, and treats each service independently -- so a Crossref-only
+    entry never pays an arXiv delay and a slow service spaces out across work."""
+    import time
+    from veracite import http
+    from veracite.config import SETTINGS
+    monkeypatch.setitem(SETTINGS, "request_delay", 0.2)
+    cr = "https://api.crossref.org/works/x"
+    ax = "http://export.arxiv.org/api/query?id=1"
+
+    # Three same-service calls: first free, two waits of ~0.2s -> ~0.4s total.
+    http.reset_throttle()
+    t0 = time.monotonic()
+    for _ in range(3):
+        http._throttle(cr)
+    assert 0.35 <= time.monotonic() - t0 <= 0.7
+
+    # arXiv has its own 3s interval, independent of Crossref's timer.
+    http.reset_throttle()
+    http._throttle(ax)                       # arms arXiv only
+    t0 = time.monotonic()
+    http._throttle(cr)                       # different service -> no wait
+    assert time.monotonic() - t0 < 0.1
+
+    # Enough time already elapsed since the last call -> proceed immediately.
+    http.reset_throttle()
+    http._throttle(cr)
+    time.sleep(0.25)                         # > 0.2 interval
+    t0 = time.monotonic()
+    http._throttle(cr)
+    assert time.monotonic() - t0 < 0.1
+    http.reset_throttle()
+
+
+def test_throttle_only_runs_for_real_requests(monkeypatch):
+    """A run that makes no HTTP call sleeps not at all: the pacing lives in the GET
+    helpers, so a mocked/offline path is instant (no scattered per-entry sleeps)."""
+    import time
+    from veracite import http
+    http.reset_throttle()
+    # No _throttle calls -> no time spent.
+    t0 = time.monotonic()
+    assert time.monotonic() - t0 < 0.05
+
+
+# --- arXiv title-search fallback for entries missing a DOI/arXiv id ---------
+
+def test_search_arxiv_id_requires_title_and_author_match(monkeypatch):
+    """The arXiv fallback returns an id only when the title is similar AND the first
+    author surname matches -- a same-title different-author hit is rejected."""
+    from veracite import verify
+    from veracite.models import Record
+    e = _entry("@inproceedings{k, author={Lee, Kenton and Joshi, M},\n"
+               " title={Pix2Struct: Screenshot Parsing as Pretraining},\n"
+               " booktitle={ICML}, year={2023}}\n")
+
+    # _search_arxiv_id imports search_arxiv from .sources, so patch it there.
+    import veracite.sources as src
+    # Right title, right first author -> returns the id.
+    monkeypatch.setattr(src, "search_arxiv", lambda t, to: [
+        ("2210.03347", Record(authors=["lee"], authors_display=["Lee"],
+                              title="Pix2Struct: Screenshot Parsing as Pretraining"))])
+    assert verify._search_arxiv_id(e, 5) == "2210.03347"
+
+    # Right title, WRONG first author -> rejected (no false match).
+    monkeypatch.setattr(src, "search_arxiv", lambda t, to: [
+        ("9999.99999", Record(authors=["smith"], authors_display=["Smith"],
+                              title="Pix2Struct: Screenshot Parsing as Pretraining"))])
+    assert verify._search_arxiv_id(e, 5) == ""
+
+
+def test_pid_check_resolves_missing_id_via_arxiv(monkeypatch):
+    """An article with no DOI and no arXiv id, but findable on arXiv by title, is
+    resolved and verified (not left UNVERIFIED), and flags the eprint to add."""
+    from veracite import verify, record as rec_mod
+    from veracite.models import Record
+    from veracite.report import Report
+
+    e = _entry("@inproceedings{k, author={Lee, Kenton},\n"
+               " title={Pix2Struct Screenshot Parsing as Pretraining},\n"
+               " booktitle={ICML}, year={2023}}\n")
+    res = rec_mod.Resolution()        # no doi / arxiv id
+    rep = Report(color=False)
+
+    # Crossref DOI search finds nothing; arXiv title search finds the paper.
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "")
+    monkeypatch.setattr(verify, "_search_arxiv_id", lambda e, t: "2210.03347")
+    monkeypatch.setattr(rec_mod, "fetch_arxiv", lambda i, t: Record(
+        authors=["lee"], authors_display=["Lee"],
+        title="Pix2Struct Screenshot Parsing as Pretraining", year=2022,
+        abstract="abs"))
+
+    strongest = verify.pid_check(e, res, rep, 0, 5, offline=False)
+    assert strongest == "arxiv"
+    assert res.arxiv_id == "2210.03347" and res.record is not None
+    assert any(f.category == "doi_available" and "on arXiv" in f.message
+               for f in rep.findings)
+    # The classify step then treats it as resolved (VERIFIED), not UNVERIFIED.
+    status, _ = verify.classify(e, res, rep)
+    assert status == "VERIFIED"
+
+
+def test_arxiv_hit_prefers_published_doi(monkeypatch):
+    """When the arXiv record links a PUBLISHED version (its <arxiv:doi>), the entry
+    is resolved against THAT DOI (Crossref) and the DOI -- not the bare preprint id
+    -- is what gets suggested. The arXiv id is kept alongside."""
+    from veracite import verify, record as rec_mod
+    from veracite.models import Record
+    from veracite.report import Report
+
+    e = _entry("@inproceedings{k, author={Lee, Kenton},\n"
+               " title={A Findable Paper Title Here}, booktitle={ICML}, year={2023}}\n")
+    res = rec_mod.Resolution()
+    rep = Report(color=False)
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "")
+    monkeypatch.setattr(verify, "_search_arxiv_id", lambda e, t: "2210.03347")
+    # arXiv record carries a published DOI; Crossref resolves it.
+    monkeypatch.setattr(rec_mod, "fetch_arxiv", lambda i, t: Record(
+        authors=["lee"], authors_display=["Lee"], title="A Findable Paper Title Here",
+        year=2022, abstract="abs", published_doi="10.1234/published.1"))
+    monkeypatch.setattr(rec_mod, "fetch_crossref", lambda d, t: (Record(
+        authors=["lee"], authors_display=["Lee"], title="A Findable Paper Title Here",
+        year=2023, journal="ICML"), 200))
+
+    strongest = verify.pid_check(e, res, rep, 0, 5, offline=False)
+    assert strongest == "doi"
+    assert res.doi == "10.1234/published.1"        # published DOI used
+    assert res.arxiv_id == "2210.03347"            # arXiv id kept too
+    assert any(f.category == "doi_available" and "published DOI 10.1234/published.1"
+               in f.message for f in rep.findings)

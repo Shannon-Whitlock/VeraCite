@@ -132,7 +132,6 @@ def pid_check(e, res, rep, delay, timeout, offline):
         # though the bib omitted it. A strong match resolves the record.
         if not offline:
             found = _search_doi(e, timeout)
-            time_sleep(delay)
             if found:
                 from .record import resolve_by_found_doi
                 resolved = resolve_by_found_doi(e, found, res, rep, 0, timeout)
@@ -140,6 +139,26 @@ def pid_check(e, res, rep, delay, timeout, offline):
                 rep.add(Severity.WARN, e, f"DOI not recorded in the entry but {verb}: "
                         f"{found} (add it)", category="doi_available", field="doi")
                 return "doi" if resolved else strongest
+            # No DOI -- many works (esp. ML/physics) live on arXiv with no DOI. Try
+            # to resolve the entry by an arXiv TITLE search so it can still be
+            # verified and a citable identifier suggested. If arXiv links a PUBLISHED
+            # version (its <arxiv:doi>), that DOI is preferred and suggested instead
+            # of the bare preprint id.
+            arxiv_id = _search_arxiv_id(e, timeout)
+            if arxiv_id:
+                from .record import resolve_by_found_arxiv
+                kind, ident = resolve_by_found_arxiv(e, arxiv_id, res, rep, timeout)
+                if kind == "doi":
+                    rep.add(Severity.WARN, e, f"no identifier in the entry, but the "
+                            f"work is on arXiv ({arxiv_id}) with a published DOI "
+                            f"{ident}; record the DOI (add it)", category="doi_available",
+                            field="doi")
+                    return "doi"
+                if kind == "arxiv":
+                    rep.add(Severity.WARN, e, f"no DOI, but the work is on arXiv "
+                            f"({ident}); record its eprint/arXiv id to make it "
+                            f"verifiable", category="doi_available", field="eprint")
+                    return "arxiv"
         # No DOI found. Only a MODERN article is expected to have one -- a pre-2005
         # work is not penalized for lacking a DOI.
         if modern:
@@ -210,10 +229,30 @@ def _search_doi(e, timeout):
     return ""
 
 
-def time_sleep(seconds):
-    import time
-    if seconds:
-        time.sleep(seconds)
+def _search_arxiv_id(e, timeout):
+    """arXiv title search for an entry that omits a DOI AND an arXiv id; return an
+    arXiv id only on a strong match -- the title must be similar AND the first-author
+    surname must match (particle-aware). No year/journal gate: an arXiv preprint
+    predates publication and carries no journal, so title+author is the identity
+    here (the same hardening as _search_doi, minus the venue corroboration that does
+    not apply to a preprint). Returns '' when no confident match is found."""
+    from .compare import _surname_match               # avoid import cycle
+    from .sources import search_arxiv
+    title = clean_tex(e.get("title", "")).strip()
+    if len(title.split()) < 4:
+        return ""
+    bib_first = (split_authors(e.get("author", "")) or [""])[0]
+    collab = is_collaboration(e.get("author", ""))
+    for arxiv_id, rec in search_arxiv(title, timeout):
+        if not title_similar(title, rec.get("title", "")):
+            continue
+        # First-author surname must match (skipped for a collaboration author).
+        rec_first = rec.authors[0] if rec.authors else ""
+        if not collab and bib_first and rec_first \
+                and not _surname_match(bib_first, rec_first):
+            continue
+        return arxiv_id
+    return ""
 
 
 # --- advisory: chronological order within a \cite{} group ------------------

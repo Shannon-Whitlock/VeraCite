@@ -19,6 +19,10 @@ class Record:
     empty so a source that does not carry one simply leaves it blank; this is the
     contract the comparison/verification layers read."""
     authors: list = field(default_factory=list)   # folded surname keys, in order
+    # The authors' original, human-readable surnames (same order as `authors`), kept
+    # only for display in a finding message -- matching uses the folded `authors`.
+    # A source may leave this empty, in which case the folded key is shown instead.
+    authors_display: list = field(default_factory=list)
     given: dict = field(default_factory=dict)      # surname -> first given token
     year: object = None                            # int, or None if unknown
     volume: str = ""

@@ -189,12 +189,18 @@ Checks run in layers, syntax first.
    keys/DOIs; and file-wide consistency. Uncited entries are noted.
 
 2. **Record** (online) — resolve each entry by DOI (Crossref) or arXiv id and
-   flag **disagreement** with the record. The id already establishes identity, so
-   a field that disagrees (title, author, given name, year/volume/pages, journal)
-   is a **warning** to verify, not a wrong-paper claim — name folding handles
-   suffixes (`Jr`/`III`), particles, collaborations, and abbreviated given names
-   so these don't misfire. A journal name matches the record when it is a known
-   abbreviation (a small curated physics table in `veracite/data/`) or a valid
+   flag **disagreement** with the record. The authoritative record is the
+   **canonical reference**: VeraCite never rewrites your `.bib`, but each flagged
+   field carries a **suggested edit that conforms the bib to the record** (e.g.
+   `year (suggested: '2009' -> '2010')`), so the fix direction is always toward the
+   registry — unless the record itself is clearly broken. **Severity follows
+   render-impact:** a field that changes the rendered citation (title, author,
+   year, journal, volume, issue, pages) is a **warning**; a purely stylistic
+   difference (an abbreviated given name, casing) is a **note**. None is a
+   wrong-paper claim — name folding handles suffixes (`Jr`/`III`), particles,
+   collaborations, and abbreviated given names so these don't misfire, and findings
+   show the original, readable names. A journal name matches the record when it is a
+   known abbreviation (a small curated physics table in `veracite/data/`) or a valid
    ISO-4 abbreviation (period-insensitive, so `Phys. Rev. B` and `Phys Rev B` both
    match `Physical Review B`); only a genuinely non-standard journal string warns.
    The one identity **error** is when the first author *and* the title both differ
@@ -221,10 +227,16 @@ Checks run in layers, syntax first.
    (sources disagree, or only arXiv confirms). **UNVERIFIED** — could not confirm:
    no identifier, no record returned, or a DOI that did not resolve (also an error).
    **MISMATCH** — it resolved but the record's identity disagrees (the id may point
-   at a different paper). If a bib omits a DOI, VeraCite **searches** Crossref (title
-   + first author, corroborated by journal or ±1-year) and, on a strong match,
-   reports the DOI to add and uses it to verify. A post-2005 article with no findable
-   DOI is flagged; pre-2005 work is not penalized; arXiv ids and ISBNs count as PIDs.
+   at a different paper). If an entry carries **no identifier at all** (no DOI and no
+   arXiv id), VeraCite **searches** for one — first Crossref (title + first author,
+   corroborated by journal or ±1-year), then, failing that, **arXiv by title**
+   (title + first-author surname; common for ML/physics works cited by venue only).
+   On a strong match it verifies the entry and reports the identifier to add; when an
+   arXiv hit links a **published DOI** (its `<arxiv:doi>`), that DOI is preferred and
+   suggested instead of the bare preprint id. This search is a last resort: an entry
+   that **already** carries a DOI or arXiv id is resolved against *that* and the
+   search never runs. A post-2005 article with no findable identifier is flagged;
+   pre-2005 work is not penalized; arXiv ids and ISBNs count as PIDs.
 
 6. **Integrity score** (online) — a summary roll-up: counts of
    verified (and how many carry a caveat), unverified, mismatch, DOI coverage over eligible (post-2005)
@@ -237,9 +249,12 @@ Checks run in layers, syntax first.
    and flags a clear **wrong paper**. For a grouped citation (`\cite{a,b,c}`) it also
    sees the co-cited references and drops a low-relevance (≤3) odd-one-out a further
    point, surfacing an inappropriate citation hidden in a list of relevant ones. A
-   wrong-paper flag is an error; relevance ≤3 a warning; 4–5 silent. Findings are
-   worded as tentative, abstract-only opinions to verify, never authoritative
-   judgements. The provider is pluggable (`llm.py`), but **for now the only
+   wrong-paper flag is an error; relevance ≤3 a warning; **4–5 leaves a `[llm]
+   context OK N/5` note**. Because an LLM call costs tokens, every rated citation
+   always shows exactly one line in the report (clean pass, weak, wrong paper, or
+   rating-unavailable) rather than vanishing silently; the clean-pass note is hidden
+   by `--skipnotes` like any other note. Findings are worded as tentative,
+   abstract-only opinions to verify, never authoritative judgements. The provider is pluggable (`llm.py`), but **for now the only
    supported backend is Claude Code** (the `claude` CLI, using your existing login),
    and it defaults to **Claude Haiku** for token efficiency — fast and inexpensive
    for a per-citation rating. **Privacy:** `--llm` sends those cited sentences to the
@@ -257,31 +272,77 @@ style choice, not a standard.
 
 ## Machine-readable report (`--json`)
 
-`--json FILE` writes a JSON report with a `findings` list (every finding), a
-`summary` block (the integrity-score metrics), and a per-reference `references`
-array — each with its `status`, `confidence`, `identifiers`, the matched
-`canonical_record`, the `sources` that resolved it, and its `issues`:
+`--json FILE` writes the report as **NDJSON** (newline-delimited JSON): one
+self-contained JSON record per line. Most lines are one bibliography **entry**,
+keyed by its citation key and carrying everything about it — which `phases` have
+been computed (see [Checkpointing](#checkpointing-and-phased-resume)), its
+verification `status`/`confidence`, the `verify` link, its `identifiers`, the
+matched `canonical_record`, the `sources` that resolved it, and its `issues` (that
+entry's findings). Two reserved records close the file: `"<file>"` (file-level
+findings — duplicates, brace balance, dropped cited keys) and `"<summary>"` (the
+integrity roll-up):
 
-```json
-{
-  "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
-              "unverified": 1, "mismatch": 0,
-              "doi_coverage": 0.94, "pid_coverage": 0.97, "integrity_score": 97},
-  "references": [
-    {"key": "amo2009", "status": "VERIFIED", "confidence": 1.0,
-     "identifiers": {"doi": "10.1038/nature07640", "arxiv": null, "isbn": null},
-     "sources": ["crossref", "inspire"], "canonical_record": {"title": "...", ...},
-     "issues": []}
-  ],
-  "findings": [ ... ]
-}
+```jsonc
+{"key": "amo2009", "phases": {"offline": true, "online": true, "llm": false},
+ "status": "VERIFIED", "confidence": 1.0, "verify": "https://doi.org/10.1038/nphys1364",
+ "identifiers": {"doi": "10.1038/nphys1364", "arxiv": null, "isbn": null},
+ "sources": ["crossref", "inspire"], "canonical_record": {"title": "...", "year": 2009},
+ "issues": []}
+{"key": "<file>", "issues": []}
+{"key": "<summary>", "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
+ "unverified": 1, "mismatch": 0, "doi_coverage": 0.94, "pid_coverage": 0.97,
+ "integrity_score": 97}}
 ```
 
-All three top-level keys (`summary`, `references`, `findings`) are always present.
-Under `--offline` there is no online verification, so the `summary` records the
-offline mode and finding counts with a null score
-(`{"mode": "offline", "integrity_score": null, "errors": …, "warnings": …, "notes": …}`)
-and `references` is empty — a stable shape to parse, never a fabricated score.
+Read it line by line (`for line in open(f): json.loads(line)`); the `"<summary>"`
+record holds the metrics, every other non-reserved record is one reference. Under
+`--offline` there is no online verification, so the `"<summary>"` record carries the
+offline mode and finding counts with a null score (`{"mode": "offline",
+"integrity_score": null, ...}`) and each entry appears with `phases.offline = true`,
+the rest `false`, and a null `status`/`canonical_record` — enough for a later online
+run to resume it, never a fabricated score.
+
+The NDJSON shape is what makes checkpointing cheap and crash-safe: a finished entry
+is one appended line, so an interrupted run leaves every prior line intact and
+loadable (see below).
+
+## Checkpointing and phased resume
+
+For a large bibliography an online run can take a long time (a few paced network
+calls per entry), so a crash partway through should not throw the work away. When
+you pass `--json report.ndjson`, VeraCite **appends each entry's record as it
+finishes** — an O(1) write, so checkpointing after every entry stays cheap even at
+10k references and a crash loses at most the entry in flight. It can then **resume**
+from that file:
+
+```bash
+python -m veracite --bib refs.bib --offline --json report.ndjson   # phase 1: fast, no network
+python -m veracite --bib refs.bib          --json report.ndjson   # phase 2: resume, resolve online
+python -m veracite --bib refs.bib --tex p/ --json report.ndjson --llm  # phase 3: add LLM ratings
+```
+
+Point VeraCite at an **existing** report and it loads it, replays the work already
+saved, and runs each entry **only for the checks it does not yet have** — so a job
+can be built up in phases or simply restarted after an interruption. A re-run
+appends a fresh record per entry (the **last line for a key wins** on load); at the
+end of a clean run the file is **compacted** once — rewritten atomically with one
+line per key in bibliography order. A partial line from a crash mid-write is simply
+skipped on load. It prints a NOTE that it is resuming; **choose a different `--json`
+filename to run from scratch.** The update rule per entry:
+
+- **offline** (the static/syntax checks) always re-runs — it is cheap and needs no
+  network.
+- the **online** layer runs only for entries not already resolved online; an
+  already-resolved entry is reused (its record, status and findings), no network.
+- **`--llm`** rates only entries not already rated. Because the rating needs the
+  work's abstract — an LLM input that is not persisted — rating an entry also
+  re-runs its online layer; an entry already rated is reused, spending no tokens.
+
+VeraCite also **warns up front** when a run looks expensive: a bibliography of 200+
+entries run online without `--json` prints a recommendation to add it (so the run
+is saved and resumable), and `--llm` prints how many entries it will rate (it uses
+LLM tokens). Both are warnings only — the run proceeds, so scripts and CI are
+unaffected.
 
 ## Configuration
 
@@ -298,7 +359,7 @@ Recognized keys (all optional):
   "document_context": "a paper on <your topic>",
   "protected_terms": ["Rydberg", "Yb", "Pulser"],
   "severity": {"preprint_superseded": "error", "biblatex_validity": "note"},
-  "request_delay": 0.4,
+  "request_delay": 0.2,
   "request_timeout": 20,
   "endpoints": {"crossref_work": "https://api.crossref.org/works/{doi}"}
 }
@@ -317,7 +378,13 @@ Recognized keys (all optional):
 - `severity` re-ranks any finding category to `error`/`warning`/`note`.
 - `protected_terms` is the project's must-stay-capitalized title terms.
 - `request_delay`/`request_timeout` set API pacing; `--delay`/`--timeout`
-  override them.
+  override them. Pacing is **per service and time-based**: each external service
+  has a minimum interval (`request_delay`, default 0.2 s; arXiv is paced at 3 s) and
+  a request waits only the *remainder* of that interval — time already spent on
+  other services or the rest of the pipeline counts, and a service whose interval
+  has elapsed proceeds immediately. So an entry resolved by Crossref never pays an
+  arXiv delay, and arXiv's slow limit spaces out across many entries rather than
+  blocking each one. Only a real outbound request ever waits.
 - `endpoints` repoints the external API URLs if a service moves.
 
 ## Layout
