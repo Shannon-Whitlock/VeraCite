@@ -24,8 +24,8 @@ record, each with clear descriptions of every issue and an overall **0–100
 integrity score**.
 
 VeraCite **never modifies your bibliography or your LaTeX** — it only *flags*
-issues, with the offending line and (where possible) a suggested fix, for a human
-author to inspect and correct. Every finding carries a stable rule **category**
+issues, with the offending line and (where possible) a suggested fix, for an author
+to inspect and correct. Every finding carries a stable rule **category**
 and, for online checks, a `verify:` link, so the report is auditable rather than
 a black box.
 
@@ -51,15 +51,10 @@ them without complaint — and checking each entry against the real record is sl
   submission. Unless you opt in, it **never reads your manuscript and sends
   nothing to any AI service**, so it is safe to run on confidential drafts.
 
-(If you already know tools like
-[refchecker](https://github.com/markrussinovich/refchecker): VeraCite sits between
-a plain syntax linter and a heavyweight fabrication-detection service — deeper
-than the first, lighter and more author-focused than the second.)
-
 ### Auditable by design
 
 VeraCite's checks are not arbitrary or hidden in model weights. Every rule is a
-small, deterministic piece of Python or generated data that a publisher or
+small, deterministic piece of Python or generated data that an author, publisher or
 developer can read, correct, and extend. The four places to look:
 
 | What | Where | How to inspect / extend |
@@ -244,9 +239,12 @@ Checks run in layers, syntax first.
    point, surfacing an inappropriate citation hidden in a list of relevant ones. A
    wrong-paper flag is an error; relevance ≤3 a warning; 4–5 silent. Findings are
    worded as tentative, abstract-only opinions to verify, never authoritative
-   judgements. The provider is pluggable (`llm.py`). **Privacy:** `--llm` sends those
-   cited sentences to the provider, so it is off by default and prints a warning — do
-   not use it on a confidential manuscript.
+   judgements. The provider is pluggable (`llm.py`), but **for now the only
+   supported backend is Claude Code** (the `claude` CLI, using your existing login),
+   and it defaults to **Claude Haiku** for token efficiency — fast and inexpensive
+   for a per-citation rating. **Privacy:** `--llm` sends those cited sentences to the
+   provider, so it is off by default and prints a warning — do not use it on a
+   confidential manuscript.
 
 Identifier formats (DOI, arXiv, **ISBN**, **ISSN**, **ORCID**) are checked offline
 by their check digits. An entry with a structural **syntax error** is reported, and
@@ -308,10 +306,14 @@ Recognized keys (all optional):
 
 - `contact_email` is added to the User-Agent (Crossref/OpenAlex "polite pool");
   may also be set with `VERACITE_CONTACT_EMAIL`.
-- `llm_models` pins the model used per provider. The default is a specific,
-  pinned model id (for reproducible ratings); if that model is ever retired,
-  `--llm` will report `rating unavailable: claude CLI failed (model '...')` —
-  set `llm_models` to a current id to fix it, no code change needed.
+- `llm_provider` selects the `--llm` backend. For now the only supported provider
+  is `claude` (Claude Code, via the `claude` CLI and your existing login).
+- `llm_models` pins the model used per provider. The default is **Claude Haiku**
+  (`claude-haiku-4-5-20251001`) — chosen for token efficiency, ample for a
+  per-citation relevance rating. It is a specific, pinned id for reproducible
+  ratings; if that model is ever retired, `--llm` will report `rating unavailable:
+  claude CLI failed (model '...')` — set `llm_models` to a current id to fix it, no
+  code change needed. Point it at a larger model (e.g. Sonnet) for tougher calls.
 - `severity` re-ranks any finding category to `error`/`warning`/`note`.
 - `protected_terms` is the project's must-stay-capitalized title terms.
 - `request_delay`/`request_timeout` set API pacing; `--delay`/`--timeout`
@@ -335,7 +337,12 @@ tests/           pytest suite + .bib fixtures
   `openlibrary.org` / `googleapis.com` (ISBN). All optional and degrade
   gracefully — a source that fails to respond is reported as "could not retrieve",
   never a crash, and `--offline` skips them all.
-- For `--llm` with the default provider: the `claude` CLI on `PATH`.
+- For `--llm` with the default provider: the [`claude`
+  CLI](https://docs.claude.com/en/docs/claude-code) on `PATH`, **logged in** (run
+  `claude` once and sign in; it needs a Claude account). `--llm` probes the
+  provider before the run and, if it is missing or not logged in, stops up front
+  with how to fix it rather than failing per entry. Everything except `--llm`
+  works with no account.
 
 ## Known limitations
 

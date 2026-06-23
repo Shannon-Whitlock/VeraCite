@@ -162,7 +162,7 @@ def _provider_claude_cli(prompt, model, timeout):
     # too -- subprocess.run does not consult PATHEXT for a bare 'claude' on Windows.
     exe = shutil.which("claude")
     if not exe:
-        return {"error": "claude CLI not found on PATH"}
+        return {"error": "claude CLI not found on PATH", "fatal": True}
     # Run from a neutral temp directory (portable; not the hardcoded POSIX '/tmp')
     # so the CLI does not pick up project-local config from the current directory.
     try:
@@ -171,19 +171,43 @@ def _provider_claude_cli(prompt, model, timeout):
             capture_output=True, text=True, timeout=timeout,
             cwd=tempfile.gettempdir())
     except (FileNotFoundError, OSError) as ex:
-        return {"error": f"could not run claude CLI: {ex}"}
+        return {"error": f"could not run claude CLI: {ex}", "fatal": True}
     except subprocess.TimeoutExpired:
         return {"error": f"claude CLI timed out after {timeout}s"}
+    # The CLI reports an error two ways: a non-zero exit, OR exit 0 with a JSON
+    # body carrying "is_error": true (this is how "Not logged in" arrives -- the
+    # process succeeds, the request did not). Detect both, and surface the CLI's
+    # own human message (its JSON "result", e.g. 'Not logged in - Please run
+    # /login') rather than a raw exit code or the whole JSON blob.
+    payload = None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        payload = None
+    if isinstance(payload, dict) and payload.get("is_error"):
+        msg = str(payload.get("result") or "").strip() or "the CLI reported an error"
+        return {"error": msg, "fatal": _is_auth_error(msg)}
     if proc.returncode != 0:
         # Surface the CLI's own message (e.g. an unknown/retired model id), trimmed
         # to one line so a stale pinned default is diagnosable, not a silent failure.
         detail = (proc.stderr or proc.stdout or "").strip().splitlines()
         reason = detail[-1] if detail else f"exit code {proc.returncode}"
-        return {"error": f"claude CLI failed (model {model!r}): {reason}"}
-    try:
-        return json.loads(proc.stdout).get("result", proc.stdout)
-    except json.JSONDecodeError:
-        return proc.stdout
+        return {"error": f"claude CLI failed (model {model!r}): {reason}",
+                "fatal": _is_auth_error(reason)}
+    if isinstance(payload, dict):
+        return payload.get("result", proc.stdout)
+    return proc.stdout
+
+
+def _is_auth_error(message):
+    """Whether a provider error message means 'cannot authenticate' -- the user is
+    not logged in or has no account/credentials. These are not worth retrying per
+    entry: the run should stop and tell the user how to fix it once."""
+    m = message.lower()
+    return any(s in m for s in ("not logged in", "/login", "please run /login",
+                                "log in", "unauthorized", "authentication",
+                                "not authenticated", "no api key", "api key",
+                                "invalid api key", "credit balance"))
 
 
 # name -> provider callable. Add another LLM backend by registering it here.
@@ -284,6 +308,21 @@ def resolve_provider(provider_name, rep):
                      f"known: {', '.join(sorted(LLM_PROVIDERS))}", "llm",
                      category="llm_config")
     return provider
+
+
+def preflight_provider(provider, model, timeout=30):
+    """Cheaply probe the provider once before the run, so a fatal setup problem --
+    most commonly 'not logged in' / no account -- is reported up front instead of as
+    a confusing per-entry warning repeated for every cited reference. Returns None
+    when the provider looks usable, or a short, actionable error string when it is
+    clearly unusable (a 'fatal' error: missing CLI, or an auth failure). A transient
+    or ambiguous failure returns None so the run still proceeds and per-entry
+    handling applies -- we only block on errors we are confident are fatal."""
+    reply = provider("ping: reply with the single character 1", model, timeout)
+    if isinstance(reply, dict) and reply.get("error"):
+        if reply.get("fatal"):
+            return reply["error"]
+    return None
 
 
 def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):

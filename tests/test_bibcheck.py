@@ -667,6 +667,70 @@ def test_prompt_lists_cocited_group():
     assert "co-cited" in prompt and "sib1" in prompt
 
 
+# --- LLM provider availability: 'not logged in' must be actionable, up front --
+
+def test_auth_error_classifier():
+    from veracite.llm import _is_auth_error
+    assert _is_auth_error("Not logged in · Please run /login")
+    assert _is_auth_error("Invalid API key")
+    assert _is_auth_error("Your credit balance is too low")
+    # a model-id error is NOT an auth error -- it should not be treated as fatal-auth.
+    assert not _is_auth_error("model 'claude-x' not found")
+    assert not _is_auth_error("relevance rated 3/5")
+
+
+def test_preflight_passes_when_provider_replies():
+    from veracite.llm import preflight_provider
+    ok = lambda prompt, model, timeout: '{"relevance": 5}'
+    assert preflight_provider(ok, "model") is None
+
+
+def test_preflight_blocks_on_fatal_error():
+    from veracite.llm import preflight_provider
+    not_logged_in = lambda prompt, model, timeout: {
+        "error": "Not logged in · Please run /login", "fatal": True}
+    assert preflight_provider(not_logged_in, "model") == "Not logged in · Please run /login"
+
+
+def test_preflight_ignores_non_fatal_error():
+    # A transient/ambiguous error (no 'fatal' flag) must NOT block the run -- only
+    # clearly-fatal setup problems abort; per-entry handling covers the rest.
+    from veracite.llm import preflight_provider
+    flaky = lambda prompt, model, timeout: {"error": "could not parse model JSON"}
+    assert preflight_provider(flaky, "model") is None
+
+
+def test_cli_llm_not_logged_in_aborts_up_front(tmp_path, capfd, monkeypatch):
+    """A user not logged in to Claude must get one actionable error before the run,
+    not a cryptic per-entry warning after the whole online pass."""
+    from veracite import cli
+    monkeypatch.setattr(cli, "preflight_provider",
+                        lambda provider, model, timeout=30: "Not logged in · Please run /login")
+    bib = tmp_path / "refs.bib"
+    bib.write_text(_ONE_ENTRY, encoding="utf-8")
+    tex = tmp_path / "p.tex"
+    tex.write_text("\\cite{k}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["--bib", str(bib), "--tex", str(tex), "--llm", "--no-color"])
+    assert exc.value.code != 0
+    err = capfd.readouterr().err
+    assert "is not available" in err and "Not logged in" in err
+    assert "sign in" in err          # actionable guidance is present
+
+
+def test_cli_unknown_llm_provider_aborts(tmp_path, capfd):
+    from veracite.cli import main
+    bib = tmp_path / "refs.bib"
+    bib.write_text(_ONE_ENTRY, encoding="utf-8")
+    tex = tmp_path / "p.tex"
+    tex.write_text("\\cite{k}\n", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["--bib", str(bib), "--tex", str(tex), "--llm",
+              "--llm-provider", "gpt4", "--no-color"])
+    assert exc.value.code != 0
+    assert "unknown --llm provider" in capfd.readouterr().err
+
+
 # --- advisory: chronological order within a \cite group --------------------
 
 class _YE:

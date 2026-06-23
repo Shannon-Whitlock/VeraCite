@@ -9,7 +9,7 @@ import sys
 
 from .config import HTTP_BACKEND, SETTINGS, load_settings
 from .llm import (LLM_PROVIDERS, collect_tex, find_citation_contexts,
-                  find_citation_groups, resolve_provider)
+                  find_citation_groups, preflight_provider, resolve_provider)
 from .parser import parse_bib
 from .pipeline import analyze_entry
 from .report import enable_ansi_colors, Report, Severity
@@ -210,6 +210,20 @@ def main(argv=None):
         provider_name = args.llm_provider or SETTINGS.get("llm_provider", "claude")
         model = SETTINGS.get("llm_models", {}).get(provider_name, "")
         provider = resolve_provider(provider_name, rep)
+        if provider is None:
+            ap.error(f"unknown --llm provider {provider_name!r}; known: "
+                     f"{', '.join(sorted(LLM_PROVIDERS))}")
+        # Probe the provider once up front. A fatal setup problem -- most often the
+        # user is not logged in to Claude / has no account -- otherwise surfaces as a
+        # baffling per-entry warning repeated for every cited reference, after the
+        # whole online pass has already run. Fail fast with actionable guidance.
+        print(f"Checking the {provider_name!r} LLM provider ...", file=sys.stderr)
+        fatal = preflight_provider(provider, model, timeout=args.timeout or 30)
+        if fatal:
+            hint = ("" if provider_name != "claude" else
+                    " -- run 'claude' once and sign in (it needs a logged-in Claude "
+                    "account/CLI), or drop --llm to skip the relevance ratings")
+            ap.error(f"--llm provider {provider_name!r} is not available: {fatal}{hint}")
         print(f"NOTE: --llm sends the sentence(s) around each \\cite from your .tex "
               f"to the LLM provider ({provider_name!r}). Do not use on a confidential "
               f"manuscript.", file=sys.stderr)
