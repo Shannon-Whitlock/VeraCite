@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VeraCite &middot; bibliography check</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<main>
+  <header>
+    <h1>VeraCite</h1>
+    <p class="tagline">A deterministic check for hallucinated and mangled
+    citations. Paste a BibTeX bibliography and VeraCite verifies each entry against
+    the authoritative record (Crossref, arXiv, OpenAlex).</p>
+  </header>
+
+  <section class="controls">
+    <label for="bib">Your <code>.bib</code> (online check, no LLM)</label>
+    <textarea id="bib" spellcheck="false" aria-describedby="limits"></textarea>
+    <p id="limits" class="note">Demo limits: up to <strong>10 entries</strong>,
+    verified against <strong>Crossref&nbsp;and&nbsp;arXiv</strong> (the AI relevance
+    sweep is off, and the slower cross-source/ISBN checks the full tool runs are
+    skipped here for speed). A run takes a few seconds. Nothing you paste is
+    stored.</p>
+    <div class="buttons">
+      <button id="check" type="button">Check bibliography</button>
+      <button id="sample" type="button" class="ghost">Reset to sample</button>
+    </div>
+  </section>
+
+  <section id="result" hidden></section>
+
+  <footer>
+    <p>VeraCite never edits your bibliography &mdash; it only flags issues with the
+    offending line and, where possible, a suggested fix.
+    <a href="https://github.com/Shannon-Whitlock/veracite">Source on GitHub</a>.</p>
+  </footer>
+</main>
+<script src="app.js"></script>
+</body>
+</html>
