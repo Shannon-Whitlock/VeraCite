@@ -10,18 +10,17 @@
 <main>
   <header>
     <h1>VeraCite</h1>
-    <p class="tagline">A deterministic check for broken and hallucinated citations. Paste a BibTeX bibliography and VeraCite verifies each entry against
-    the authoritative record (Crossref, arXiv, OpenAlex).</p>
+    <p class="tagline">A lightweight, auditable tool for checking the accuracy and conformity of BibTeX/biblatex bibliographies in scientific articles — a deterministic check against hallucinated and mangled citations. Paste a BibTeX bibliography and VeraCite verifies each entry against the authoritative record (Crossref, arXiv, OpenAlex).</p>
   </header>
 
   <section class="controls">
-    <label for="bib">Your <code>.bib</code> (online check, no LLM)</label>
+    <label for="bib">Your <code>.bib</code> (Max 10 records - online check, no LLM)</label>
     <textarea id="bib" spellcheck="false" aria-describedby="limits"></textarea>
     <p id="limits" class="note">Demo limits: up to <strong>10 entries</strong>,
     verified against <strong>Crossref&nbsp;and&nbsp;arXiv</strong> (the AI relevance
     sweep is off, and the slower cross-source/ISBN checks the full tool runs are
     skipped here for speed). A run takes a few seconds. Nothing you paste is
-    stored.</p>
+    stored. Download <a href="https://github.com/Shannon-Whitlock/veracite">VeraCite</a> for local use: </p>
     <div class="buttons">
       <button id="check" type="button">Check bibliography</button>
       <button id="sample" type="button" class="ghost">Reset to sample</button>
