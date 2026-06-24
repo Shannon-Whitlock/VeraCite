@@ -46,17 +46,27 @@ button.ghost { background: transparent; color: var(--accent); }
 
 .entry {
   background: var(--card); border: 1px solid var(--border); border-radius: 10px;
-  padding: .85rem 1rem; margin-bottom: .8rem;
+  padding: .85rem 1rem; margin-bottom: .8rem; border-left: 4px solid var(--border);
+}
+/* An entry VeraCite could not verify, or whose id may point elsewhere, is a problem
+   to act on -- flag it with a red tint and a bold red left edge so it stands out from
+   the verified ones at a glance. */
+.entry-UNVERIFIED, .entry-MISMATCH {
+  background: #fdecea; border-color: #f3c0bb; border-left-color: var(--error);
 }
 .entry h3 { margin: 0 0 .15rem; font: 600 .95rem var(--mono); }
 .entry .status { font-size: .82rem; color: var(--muted); margin-bottom: .5rem; }
 .entry .status a { color: var(--accent); }
+.status-gloss { color: var(--error); font-weight: 600; cursor: help;
+  border-bottom: 1px dotted currentColor; }
+.entry-VERIFIED .status-gloss { color: var(--muted); }
+.status .conf { color: var(--muted); }
 .badge { display: inline-block; font-size: .72rem; font-weight: 700;
   padding: .05rem .45rem; border-radius: 999px; vertical-align: middle;
   margin-right: .4rem; }
 .badge.VERIFIED { background: #e4f3ea; color: var(--ok); }
-.badge.UNVERIFIED { background: #f1f1f1; color: var(--note); }
-.badge.MISMATCH { background: #fdecea; color: var(--error); }
+.badge.UNVERIFIED { background: #fbe0dd; color: var(--error); cursor: help; }
+.badge.MISMATCH { background: #fdecea; color: var(--error); cursor: help; }
 
 ul.issues { list-style: none; margin: 0; padding: 0; }
 ul.issues li { font: 13px/1.5 var(--mono); padding: .15rem 0; }

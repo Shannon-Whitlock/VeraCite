@@ -185,19 +185,46 @@ function render(data) {
   show(parts.join("\n"));
 }
 
+// A short, honest gloss per status -- shown next to the badge, with a longer
+// explanation on hover (title=). Deliberately does NOT assert hallucination: an
+// UNVERIFIED "no record found" looks exactly like a fabricated citation, but a real
+// but unindexed paper (older, conference, thesis, non-English) lands here too, so we
+// describe the signal and leave the judgement to the reader.
+const STATUS_HINT = {
+  UNVERIFIED: {
+    gloss: "could not verify",
+    tip: "No matching record was found in Crossref or arXiv. This is what a " +
+         "fabricated (“hallucinated”) citation looks like — but a real paper that " +
+         "is simply not indexed (older work, a conference paper, a thesis, a " +
+         "non-English venue) can also land here, as can a title typo. Verify it by " +
+         "hand before trusting or discarding it.",
+  },
+  MISMATCH: {
+    gloss: "identifier may point to a different paper",
+    tip: "The identifier resolved, but the record’s author and title both differ " +
+         "from the entry — the DOI/arXiv id may have been copied from the wrong work.",
+  },
+  VERIFIED: { gloss: "", tip: "" },
+};
+
 function entryBlock(key, status, conf, verify, issues) {
-  const badge = status ? `<span class="badge ${esc(status)}">${esc(status)}</span>` : "";
-  const confTxt = (conf != null) ? ` (confidence ${conf})` : "";
+  const badge = status
+    ? `<span class="badge ${esc(status)}" title="${esc((STATUS_HINT[status]||{}).tip||"")}">${esc(status)}</span>`
+    : "";
+  const hint = STATUS_HINT[status] || {};
+  const gloss = hint.gloss
+    ? ` <span class="status-gloss" title="${esc(hint.tip)}">— ${esc(hint.gloss)}</span>` : "";
+  const confTxt = (conf != null) ? ` <span class="conf">(confidence ${conf})</span>` : "";
   const link = verify ? ` &middot; <a href="${esc(verify)}" target="_blank" rel="noopener">verify</a>` : "";
   const statusLine = (status || verify)
-    ? `<div class="status">${badge}${esc(status || "")}${confTxt}${link}</div>` : "";
+    ? `<div class="status status-${esc(status || "none")}">${badge}${gloss}${confTxt}${link}</div>` : "";
   let body;
   if (issues.length) {
     body = `<ul class="issues">${issues.map(issueLine).join("")}</ul>`;
   } else {
     body = `<div class="clean">✓ no problems found</div>`;
   }
-  return `<div class="entry"><h3>${esc(key)}</h3>${statusLine}${body}</div>`;
+  return `<div class="entry entry-${esc(status || "none")}"><h3>${esc(key)}</h3>${statusLine}${body}</div>`;
 }
 
 function issueLine(f) {
