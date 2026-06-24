@@ -80,7 +80,7 @@ async function runCheck() {
   if (!raw.trim()) { show(`<div class="banner err">Paste a .bib first.</div>`); return; }
   const btn = $("#check");
   btn.disabled = true; btn.textContent = "Checking…";
-  show(`<p class="spinner">Resolving records against Crossref / arXiv… this can take a few seconds.</p>`);
+  const stop = startProgress();
   try {
     const resp = await fetch("check.cgi", {
       method: "POST",
@@ -99,8 +99,43 @@ async function runCheck() {
   } catch (e) {
     show(`<div class="banner err">Could not reach the checker: ${esc(String(e))}</div>`);
   } finally {
+    stop();
     btn.disabled = false; btn.textContent = "Check bibliography";
   }
+}
+
+// An indeterminate progress display while check.cgi runs. The CGI returns one
+// response (no streaming), so this is an animated bar + an elapsed-time counter and
+// rotating status lines that reflect the phases the check actually goes through --
+// reassurance that work is happening, not a frozen page. Returns a stop() to clear
+// the timers when the response arrives.
+function startProgress() {
+  // Messages roughly track the layers; later ones explain why a run can take longer
+  // (a dead/missing DOI triggers a slower title search that recovers the real one).
+  const phases = [
+    "Parsing the bibliography…",
+    "Resolving records against Crossref and arXiv…",
+    "Checking for retractions (OpenAlex)…",
+    "Recovering missing or dead DOIs by title search… (this is the slow part)",
+    "Almost there — finishing the integrity score…",
+  ];
+  show(`<div class="progress">
+    <div class="bar"><span></span></div>
+    <p class="phase" id="phase">${phases[0]}</p>
+    <p class="elapsed" id="elapsed">0s</p>
+  </div>`);
+  const t0 = Date.now();
+  const elapsed = $("#elapsed");
+  const phaseEl = $("#phase");
+  const tick = setInterval(() => {
+    if (elapsed) elapsed.textContent = Math.round((Date.now() - t0) / 1000) + "s";
+  }, 250);
+  let i = 0;
+  const advance = setInterval(() => {
+    i = Math.min(i + 1, phases.length - 1);
+    if (phaseEl) phaseEl.textContent = phases[i];
+  }, 4000);
+  return () => { clearInterval(tick); clearInterval(advance); };
 }
 
 function render(data) {

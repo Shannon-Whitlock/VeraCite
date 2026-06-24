@@ -105,10 +105,10 @@ def test_truncated_false_at_exactly_max(monkeypatch):
 
 
 def test_fast_mode_suppresses_slow_sources(monkeypatch):
-    """fast=True must not call the SUPPRESSED sources: INSPIRE, the Crossref related/
-    title search, Semantic Scholar, and the no-identifier DOI/arXiv title searches.
-    (OpenAlex and ISBN are KEPT in fast mode -- see the separate test below.) Any call
-    to a suppressed source blows up so the test catches it."""
+    """fast=True must not call the SUPPRESSED sources: INSPIRE, the Crossref related-
+    works (errata) lookup, and the Semantic Scholar abstract. (OpenAlex, ISBN, and the
+    need-to-basis title searches are KEPT in fast mode -- see the separate tests.) Any
+    call to a suppressed source blows up so the test catches it."""
     from veracite import record, verify
     boom = lambda *a, **k: (_ for _ in ()).throw(AssertionError("suppressed source called"))
     from veracite.models import Record
@@ -119,15 +119,16 @@ def test_fast_mode_suppresses_slow_sources(monkeypatch):
     monkeypatch.setattr(record, "fetch_inspire", boom)
     monkeypatch.setattr(record, "fetch_related", boom)
     monkeypatch.setattr(record, "fetch_abstract_s2", boom)
-    monkeypatch.setattr(verify, "_search_doi", boom)
-    monkeypatch.setattr(verify, "_search_arxiv_id", boom)
-    # OpenAlex is kept (capped); give it a harmless stub so the run completes.
+    # Kept-but-capped sources: harmless stubs so the run completes (the id-less entry
+    # would invoke the title searches, which are kept in fast mode).
     monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "")
+    monkeypatch.setattr(verify, "_search_arxiv_id", lambda *a, **k: "")
 
     bib = ("@article{a, author={Smith, J}, title={A Paper With A Findable Title}, "
            "year={2020}, doi={10.1/a}}\n"
            "@misc{b, author={Doe, J}, title={An Entry With No Identifier At All}, "
-           "year={2019}}\n")  # would trigger the title search if fast mode didn't skip it
+           "year={2019}}\n")
     out = check_bib_text(bib, fast=True)        # must not raise
     assert out["fast"] is True
     assert {r["key"] for r in out["references"]} == {"a", "b"}
@@ -150,8 +151,9 @@ def test_fast_mode_keeps_openalex_and_caps_its_timeout(monkeypatch):
     monkeypatch.setattr(record, "fetch_openalex", fake_openalex)
     bib = ("@article{a, author={Smith, J}, title={A Retracted Looking Paper Title}, "
            "year={2020}, doi={10.1/a}}\n")
-    out = check_bib_text(bib, fast=True, timeout=8)   # core timeout 8
-    # OpenAlex ran (retraction surfaced) and was called with the capped timeout, not 8.
+    # Core timeout well above AUX_TIMEOUT so the clamp is observable (min(30, AUX)).
+    out = check_bib_text(bib, fast=True, timeout=30)
+    # OpenAlex ran (retraction surfaced) and was called with the capped timeout, not 30.
     assert seen["timeout"] == AUX_TIMEOUT
     assert "retraction" in {f["category"] for f in out["findings"]}
 

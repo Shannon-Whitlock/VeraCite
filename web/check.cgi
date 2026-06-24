@@ -19,11 +19,10 @@ import sys
 # parse, so the public endpoint can't be handed a huge body.
 MAX_BODY_BYTES = 64 * 1024
 MAX_ENTRIES = 10
-# Per-request HTTP timeout. Short on purpose: fast mode keeps only Crossref/arXiv id
-# lookups, which answer in well under a second, so a longer wait only means a hung
-# host we would rather report as unreachable. The whole request must finish inside
-# the shared-host CGI limit (~120 s on OVH), so each call has to be bounded tightly.
-HTTP_TIMEOUT = 8
+# Per-request HTTP timeout for the core sources. The whole request must finish inside
+# the shared-host CGI limit (~120 s on OVH); fast mode's per-call caps (this, plus
+# webcheck.AUX_TIMEOUT for the slower need-to-basis sources) keep it there.
+HTTP_TIMEOUT = 10
 
 
 def _send(obj, status="200 OK"):

@@ -111,7 +111,13 @@ def pid_check(e, res, rep, delay, timeout, offline):
     works, and accepts arXiv/ISBN as sufficient for preprints/books. Returns the
     name of the strongest present identifier ('doi'/'arxiv'/'isbn') or ''."""
     has_doi = bool(res.doi)
-    strongest = "doi" if has_doi else "arxiv" if res.arxiv_id else "isbn" if res.isbn else ""
+    # A recorded DOI that did NOT resolve (Crossref 404) is no better than a missing
+    # one for verification: the entry is still UNVERIFIED. So treat a dead DOI as "no
+    # usable DOI" here and let the title search below try to recover the real one --
+    # the same fallback an entry with no DOI field gets. (The dead_doi error is still
+    # reported by the record layer; this only adds a 'found the real DOI' suggestion.)
+    usable_doi = has_doi and not res.dead_doi
+    strongest = "doi" if usable_doi else "arxiv" if res.arxiv_id else "isbn" if res.isbn else ""
 
     if is_book(e):
         if not (res.isbn or has_doi):
@@ -120,7 +126,7 @@ def pid_check(e, res, rep, delay, timeout, offline):
         return strongest
 
     if is_article_like(e):
-        if has_doi:
+        if usable_doi:
             return strongest
         if res.arxiv_id:
             # arXiv-only: the arXiv id is a sufficient PID. (A linked published
@@ -159,8 +165,14 @@ def pid_check(e, res, rep, delay, timeout, offline):
                             f"({ident}); record its eprint/arXiv id to make it "
                             f"verifiable", category="doi_available", field="eprint")
                     return "arxiv"
-        # No DOI found. Only a MODERN article is expected to have one -- a pre-2005
-        # work is not penalized for lacking a DOI.
+        # No DOI found by search. A dead-DOI entry already carries the dead_doi
+        # error and DOES have a DOI recorded (just unresolvable), so don't also tell
+        # it "no DOI recorded" -- that would be a false, duplicate finding. The
+        # pid_missing/pid_optional note is only for an entry with no DOI field at all.
+        if has_doi:
+            return strongest
+        # Only a MODERN article is expected to have one -- a pre-2005 work is not
+        # penalized for lacking a DOI.
         if modern:
             rep.add(Severity.WARN, e, "no DOI recorded for a post-2005 article "
                     "(none found in Crossref either)", category="pid_missing")

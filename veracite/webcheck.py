@@ -13,20 +13,28 @@ shared host can `import veracite` and call it with no extra dependencies.
 low-value for a quick demo, while keeping the ones that pull their weight. Measured
 per-call latencies drove the split:
 
-  KEPT (fast or high-value):
+  KEPT (fast, high-value, or only-when-needed):
     * Crossref / arXiv id lookup -- sub-second; the core resolution.
     * OpenAlex (~0.5-2 s) -- adds RETRACTION detection, a real error worth catching;
       runs only for an entry that has a DOI.
     * OpenLibrary/ISBN (~2-11 s, but only for @book entries with an ISBN, which are
       rare in a typical bibliography) -- the only way a book verifies.
+    * Crossref/arXiv TITLE SEARCH -- the fallback that recovers a missing OR dead DOI.
+      It runs on a NEED-TO basis only: pid_check invokes it solely for an entry with
+      no usable DOI (none recorded, or the recorded one returned 404), so a clean-DOI
+      entry never pays for it. Worth keeping because "found the real DOI" is exactly
+      what a user expects after a dead-DOI error.
 
   SUPPRESSED (slow and/or useless without the LLM):
     * INSPIRE-HEP -- ~10 s EVERY call and effectively always times out for our
       queries (no usable record returned); pure dead weight.
-    * Crossref bibliographic TITLE SEARCH -- the no-identifier auto-DOI-find and the
-      related-works (errata) lookup, ~7 s each, miss-heavy.
+    * Crossref related-works (errata) lookup -- a ~7 s title search, miss-heavy.
     * Semantic Scholar abstract -- only feeds the LLM relevance sweep, which the demo
       never runs, so it is cost with no benefit here.
+
+  All KEPT-but-slower sources (OpenAlex, ISBN, the title searches) are bounded by a
+  short AUX_TIMEOUT, so one slow host abandons just its own check rather than dragging
+  the request toward the CGI time limit.
 
 Without this split a 5-entry bibliography that fans out to every source took over a
 minute -- past the ~120 s hard limit a CGI request gets on shared hosting (the 504
@@ -50,12 +58,16 @@ DEFAULT_MAX_ENTRIES = 10
 # Per-request HTTP timeout for the kept core sources (Crossref/arXiv id lookups),
 # which answer in well under a second -- so a longer wait only ever means a hung host
 # we would rather report as unreachable.
-DEFAULT_WEB_TIMEOUT = 8
+DEFAULT_WEB_TIMEOUT = 10
 
-# A tighter timeout for the KEPT-but-slower auxiliary sources (OpenAlex, OpenLibrary):
-# valuable enough to run, but capped so one slow host abandons just its own check
-# rather than dragging the whole request toward the CGI time limit.
-AUX_TIMEOUT = 3
+# Per-call timeout for the KEPT-but-slower auxiliary sources (OpenAlex, OpenLibrary,
+# and the no-identifier/dead-DOI title search). It must be generous enough to let a
+# real call SUCCEED -- the Crossref bibliographic title search legitimately takes ~7 s,
+# so a tighter cap would kill the very DOI recovery we want. The safety margin is the
+# OVERALL budget, not this single cap: these run on a need-to basis (only for an entry
+# with no usable DOI), so even a worst case of ~10 such entries x ~10 s stays under the
+# ~120 s CGI ceiling, while a typical bibliography triggers only a few.
+AUX_TIMEOUT = 10
 
 
 def _fast_source_patches(aux_timeout):
@@ -85,9 +97,13 @@ def _fast_source_patches(aux_timeout):
         (record, "fetch_inspire", lambda *a, **k: None),
         (record, "fetch_related", lambda *a, **k: []),
         (record, "fetch_abstract_s2", lambda *a, **k: ""),
-        (verify, "_search_doi", lambda e, t: ""),
-        (verify, "_search_arxiv_id", lambda *a, **k: ""),
-        # Kept but time-capped: retraction (OpenAlex) and book/ISBN resolution.
+        # Kept but time-capped: retraction (OpenAlex), book/ISBN resolution, and the
+        # no-identifier / dead-DOI title search that recovers a missing or wrong DOI.
+        # The searches run on a need-to basis only -- pid_check invokes them solely for
+        # an entry that has no usable DOI (none recorded, or the recorded one is dead),
+        # so a clean-DOI entry never pays for them.
+        (verify, "_search_doi", capped(verify._search_doi)),
+        (verify, "_search_arxiv_id", capped(verify._search_arxiv_id)),
         (record, "fetch_openalex", capped(record.fetch_openalex)),
         (record, "fetch_isbn", capped(record.fetch_isbn)),
     ]

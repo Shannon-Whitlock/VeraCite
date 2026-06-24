@@ -71,3 +71,21 @@ ul.issues li { font: 13px/1.5 var(--mono); padding: .15rem 0; }
 footer { margin-top: 2.5rem; color: var(--muted); font-size: .85rem; }
 footer a, .tagline a { color: var(--accent); }
 .spinner { color: var(--muted); }
+
+/* Indeterminate progress while check.cgi runs. */
+.progress { padding: 1.25rem 1.25rem 1.5rem; background: var(--card);
+  border: 1px solid var(--border); border-radius: 10px; }
+.progress .bar { height: 6px; border-radius: 999px; background: #eee;
+  overflow: hidden; margin-bottom: .9rem; }
+.progress .bar span { display: block; height: 100%; width: 35%; border-radius: 999px;
+  background: var(--accent); animation: indeterminate 1.3s ease-in-out infinite; }
+@keyframes indeterminate {
+  0%   { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+.progress .phase { margin: 0; font-size: .95rem; }
+.progress .elapsed { margin: .25rem 0 0; color: var(--muted); font-size: .82rem;
+  font-variant-numeric: tabular-nums; }
+@media (prefers-reduced-motion: reduce) {
+  .progress .bar span { animation: none; width: 100%; opacity: .5; }
+}

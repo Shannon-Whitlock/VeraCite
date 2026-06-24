@@ -1597,6 +1597,39 @@ def test_pre2005_missing_doi_with_none_found_is_not_warned(monkeypatch):
     assert not any(f.severity is Severity.WARN for f in rep.findings)
 
 
+def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
+    # A recorded DOI that 404'd (dead_doi) should fall through to the title search
+    # just like a missing DOI, and recover/suggest the real DOI.
+    from veracite import verify, record
+    e = _SE(year="2010")
+    res = record.Resolution()
+    res.doi, res.dead_doi = "10.1/dead", True       # recorded but unresolvable
+    rep = Report(color=False)
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "10.1111/right")
+    monkeypatch.setattr(record, "fetch_crossref",
+                        lambda doi, t: ({"authors": ["gneiting"], "given": {},
+                                         "title": e.get("title"), "year": 2010,
+                                         "journal": "Journal of Stats", "abstract": "x"}, 200))
+    monkeypatch.setattr(record, "fetch_openalex", lambda doi, t: None)
+    verify.pid_check(e, res, rep, 0, 1, offline=False)
+    assert res.doi == "10.1111/right"
+    assert any(f.category == "doi_available" and "found" in f.message for f in rep.findings)
+
+
+def test_dead_doi_search_fails_does_not_emit_pid_missing(monkeypatch):
+    # When the dead-DOI fallback search finds nothing, do NOT also say "no DOI
+    # recorded" -- a DOI IS recorded (just dead); the dead_doi error already covers it.
+    from veracite import verify, record
+    e = _SE(year="2010")
+    res = record.Resolution()
+    res.doi, res.dead_doi = "10.1/dead", True
+    rep = Report(color=False)
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "")          # none found
+    monkeypatch.setattr(verify, "_search_arxiv_id", lambda e, t: "")
+    verify.pid_check(e, res, rep, 0, 1, offline=False)
+    assert not any(f.category == "pid_missing" for f in rep.findings)
+
+
 # --- _search_doi robustness to stylistic variation -------------------------
 
 def test_title_similar_handles_accents_greek_and_subtitle():

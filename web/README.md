@@ -38,18 +38,23 @@ the ones that earn their latency and drops the rest:
 | Source | Fast mode | Why |
 |--------|-----------|-----|
 | Crossref, arXiv (id lookup) | **kept** | the core resolution, sub-second |
-| OpenAlex (retraction) | **kept**, capped at `AUX_TIMEOUT` (3 s) | adds retraction detection — a real error |
+| OpenAlex (retraction) | **kept**, capped at `AUX_TIMEOUT` (10 s) | adds retraction detection — a real error |
 | OpenLibrary (ISBN) | **kept**, capped, books only | the only way an `@book` verifies; self-limiting |
+| Crossref/arXiv **title search** (recover a missing or dead DOI) | **kept**, capped | fires only when an entry has no usable DOI; "found the real DOI" is what a user expects after a dead-DOI error |
 | INSPIRE-HEP | dropped | ~10 s/call and returns nothing usable for these queries |
-| Crossref title search (auto-find DOI, errata) | dropped | ~7 s/call, miss-heavy |
+| Crossref related-works (errata) | dropped | a ~7 s title search, miss-heavy |
 | Semantic Scholar (abstract) | dropped | only feeds the `--llm` sweep, which the demo never runs |
 
-The kept-but-slower sources (OpenAlex, OpenLibrary) are bounded by a separate short
-`AUX_TIMEOUT`, so one slow host abandons just its own check instead of dragging the
-request. Net effect: a typical run is a few seconds and a worst-case 10-entry all-DOI
-bibliography stays under ~10 s, while the demo still catches the things that matter
-(wrong year/author/volume, a dead or fabricated DOI, a retraction, an unverifiable
-entry). Pass `fast=False` to `check_bib_text` for the full multi-source CLI check.
+The kept-but-slower sources (OpenAlex, OpenLibrary, the title searches) are bounded by
+a short `AUX_TIMEOUT`, so one slow host abandons just its own check instead of dragging
+the request. The title searches run on a **need-to basis** — only for an entry with no
+usable DOI (none recorded, or the recorded one is dead) — so a clean-DOI entry never
+pays for them. Net effect: a typical run is a few seconds; a run that has to recover
+several missing/dead DOIs is slower (each title search is ~7 s) but still well under
+the ~120 s CGI ceiling, while the demo catches what matters (wrong metadata, a dead or
+fabricated DOI, a retraction, an unverifiable entry) and recovers the real DOI when one
+is wrong or missing. Pass `fast=False` to `check_bib_text` for the full multi-source
+CLI check.
 
 ## Deploy to OVH shared "Web Hosting"
 
