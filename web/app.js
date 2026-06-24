@@ -1,17 +1,19 @@
 "use strict";
 
-// A small sample bibliography: mostly correct, with a few planted errors VeraCite's
+// A small sample bibliography: mostly correct, with a few planted problems VeraCite's
 // ONLINE check catches against the real record, so a first visitor sees a meaningful
-// report in one click. Every entry carries a DOI or arXiv id so the demo's fast mode
-// (Crossref + arXiv only) resolves them all quickly.
+// report in one click.
 //   - einstein1935  : clean, correct DOI (the EPR paper) -> VERIFIED
 //   - shor1999      : correct DOI, but a deliberately WRONG year (1997 vs the
 //                     record's 1999) -> metadata_mismatch, the subtle kind of error
 //   - maldacena1998 : clean, correct DOI -> VERIFIED
 //   - vaswani2017   : the "Attention Is All You Need" preprint by arXiv id only
 //                     -> resolves via arXiv; truncated author list is noted
-//   - higgs1964     : a FABRICATED DOI (real paper, invented identifier)
-//                     -> dead_doi (an error)
+//   - higgs1964     : a real paper with a FABRICATED DOI -> dead_doi error, and the
+//                     real DOI is recovered by title search (VERIFIED, low confidence)
+//   - nakamura2021  : a HALLUCINATED reference -- plausible authors, a real journal,
+//                     a believable title, but the paper does not exist -> UNVERIFIED,
+//                     no record found (the LLM-fabrication catch)
 const SAMPLE = `@article{einstein1935,
   author  = {Einstein, A. and Podolsky, B. and Rosen, N.},
   title   = {Can Quantum-Mechanical Description of Physical Reality Be Considered Complete?},
@@ -58,6 +60,15 @@ const SAMPLE = `@article{einstein1935,
   volume  = {13},
   pages   = {508--509},
   doi     = {10.1103/PhysRevLett.99.999999}
+}
+
+@article{nakamura2021,
+  author  = {Nakamura, Kenji and Rossi, Elena and Patel, Arjun},
+  title   = {Variational Quantum Embeddings for Few-Shot Molecular Property Prediction},
+  journal = {Nature Machine Intelligence},
+  year    = {2021},
+  volume  = {3},
+  pages   = {612--620}
 }
 `;
 

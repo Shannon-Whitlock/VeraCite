@@ -17,6 +17,10 @@ import sys
 
 # Bound the request: a 10-entry .bib is a few KB; reject anything larger before we
 # parse, so the public endpoint can't be handed a huge body.
+# Bump this whenever check.cgi or the demo behaviour changes, so the live response's
+# "build" field tells us at a glance whether the server is running current code.
+BUILD = "2026-06-24-doi-recovery"
+
 MAX_BODY_BYTES = 64 * 1024
 MAX_ENTRIES = 10
 # Per-request HTTP timeout for the core sources. The whole request must finish inside
@@ -101,6 +105,11 @@ def main():
         report = check_bib_text(raw, max_entries=MAX_ENTRIES, timeout=HTTP_TIMEOUT)
     except Exception as ex:
         _send({"error": f"check failed: {ex}"}, status="500 Internal Server Error")
+    # Build marker: lets us confirm from the live response WHICH code is deployed (so a
+    # stale upload / cached .pyc is obvious). Bump BUILD when changing behavior.
+    import veracite
+    report["build"] = BUILD
+    report["veracite_path"] = os.path.dirname(os.path.abspath(veracite.__file__))
     _send(report)
 
 

@@ -43,9 +43,13 @@ def classify(e, res, rep):
     fcats = {f.category for f in _entry_findings(rep, e.key)}
     n_sources = len(res.sources)
 
-    if res.dead_doi:
-        # A DOI that does not resolve -- the dead_doi ERROR finding (record.py)
-        # already carries the severity; here it just sets the status.
+    if res.dead_doi and res.record is None:
+        # A DOI that does not resolve AND nothing recovered it -- still unverified.
+        # The dead_doi ERROR finding (record.py) carries the severity; here it just
+        # sets the status. (When the title search DID recover a matching record, we
+        # fall through to the resolved path below: the work is verified via the
+        # corrected DOI, just at reduced confidence -- the recorded DOI is the defect,
+        # flagged by dead_doi, not the paper's identity.)
         status, conf = "UNVERIFIED", 0.0
         detail = "the recorded DOI does not resolve"
     elif res.record is None and (res.doi or res.arxiv_id or res.isbn):
@@ -71,7 +75,13 @@ def classify(e, res, rep):
         soft = "metadata_mismatch" in fcats
         conflict = "source_conflict" in fcats
         arxiv_only = set(res.sources) <= {"arxiv"}
-        if soft:
+        if res.dead_doi:
+            # Verified, but only after the recorded DOI 404'd and a title search
+            # recovered the real one. The paper is confirmed; the identifier as
+            # written is broken (the dead_doi ERROR + the doi_available fix say how),
+            # so confidence is capped low to reflect "right paper, wrong DOI on file".
+            conf, detail = 0.6, "verified via a corrected DOI; the recorded one is dead"
+        elif soft:
             conf, detail = 0.75, "right paper, but a field differs from the record"
         elif conflict:
             conf, detail = 0.70, "right paper, but authoritative sources disagree on a field"
@@ -140,10 +150,26 @@ def pid_check(e, res, rep, delay, timeout, offline):
             found = _search_doi(e, timeout)
             if found:
                 from .record import resolve_by_found_doi
+                # Capture the recorded (dead) DOI BEFORE resolve_by_found_doi overwrites
+                # res.doi with the one just found, so the suggested edit's `from` is the
+                # value being replaced, not the replacement.
+                old_doi = res.doi
                 resolved = resolve_by_found_doi(e, found, res, rep, 0, timeout)
-                verb = "found and verified" if resolved else "found"
-                rep.add(Severity.WARN, e, f"DOI not recorded in the entry but {verb}: "
-                        f"{found} (add it)", category="doi_available", field="doi")
+                state = "verified" if resolved else "unverified"
+                if res.dead_doi:
+                    # The entry HAS a DOI, but it 404'd (the dead_doi error above). So
+                    # this is a REPLACEMENT, not an addition -- word it as the fix for
+                    # that error and carry the old->new edit so a tool can apply it.
+                    msg = (f"the correct DOI appears to be {found} ({state}) -- "
+                           f"replace the dead one above with it")
+                    suggested = {"field": "doi", "from": old_doi, "to": found}
+                else:
+                    # No DOI was recorded; this is something to ADD.
+                    msg = (f"no DOI in the entry; the correct one appears to be "
+                           f"{found} ({state}) -- add it")
+                    suggested = {"field": "doi", "to": found}
+                rep.add(Severity.WARN, e, msg, category="doi_available", field="doi",
+                        suggested=suggested)
                 return "doi" if resolved else strongest
             # No DOI -- many works (esp. ML/physics) live on arXiv with no DOI. Try
             # to resolve the entry by an arXiv TITLE search so it can still be

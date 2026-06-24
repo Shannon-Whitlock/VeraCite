@@ -1582,7 +1582,10 @@ def test_found_doi_resolves_and_upgrades_status(monkeypatch):
     monkeypatch.setattr(record, "fetch_openalex", lambda doi, t: None)
     verify.pid_check(e, res, rep, 0, 1, offline=False)
     assert res.record is not None and res.doi == "10.1111/right"
-    assert any(f.category == "doi_available" and "found" in f.message for f in rep.findings)
+    # Missing-DOI case: the finding suggests ADDING the found DOI (a `to`, no `from`).
+    da = [f for f in rep.findings if f.category == "doi_available"]
+    assert da and "add it" in da[0].message and "10.1111/right" in da[0].message
+    assert da[0].suggested == {"field": "doi", "to": "10.1111/right"}
     status, _ = verify.classify(e, res, rep)
     assert status == "VERIFIED"   # no longer UNVERIFIED
 
@@ -1599,7 +1602,8 @@ def test_pre2005_missing_doi_with_none_found_is_not_warned(monkeypatch):
 
 def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
     # A recorded DOI that 404'd (dead_doi) should fall through to the title search
-    # just like a missing DOI, and recover/suggest the real DOI.
+    # just like a missing DOI, and recover the real DOI -- worded as a REPLACEMENT of
+    # the dead one (old->new), with the entry upgraded to VERIFIED at low confidence.
     from veracite import verify, record
     e = _SE(year="2010")
     res = record.Resolution()
@@ -1613,7 +1617,14 @@ def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
     monkeypatch.setattr(record, "fetch_openalex", lambda doi, t: None)
     verify.pid_check(e, res, rep, 0, 1, offline=False)
     assert res.doi == "10.1111/right"
-    assert any(f.category == "doi_available" and "found" in f.message for f in rep.findings)
+    da = [f for f in rep.findings if f.category == "doi_available"]
+    # Replacement wording + the old->new edit (from the DEAD doi, not the new one).
+    assert da and "replace the dead one" in da[0].message
+    assert da[0].suggested == {"field": "doi", "from": "10.1/dead", "to": "10.1111/right"}
+    # The work is now verified via the corrected DOI -- not left UNVERIFIED -- but at a
+    # reduced confidence flagging "right paper, wrong DOI on file".
+    status, conf = verify.classify(e, res, rep)
+    assert status == "VERIFIED" and conf == 0.6
 
 
 def test_dead_doi_search_fails_does_not_emit_pid_missing(monkeypatch):
