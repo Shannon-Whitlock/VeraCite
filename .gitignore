@@ -19,3 +19,4 @@ examples/
 # generated run artifacts (the --json report / NDJSON checkpoint)
 report.json
 *.ndjson
+web/counter.txt

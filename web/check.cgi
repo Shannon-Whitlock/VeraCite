@@ -11,22 +11,66 @@ The Crossref/arXiv lookups happen here, server-side, so there is no browser CORS
 problem -- exactly as the VeraCite CLI makes them.
 """
 
+import datetime
 import json
 import os
 import sys
 
-# Bound the request: a 10-entry .bib is a few KB; reject anything larger before we
-# parse, so the public endpoint can't be handed a huge body.
 # Bump this whenever check.cgi or the demo behaviour changes, so the live response's
 # "build" field tells us at a glance whether the server is running current code.
-BUILD = "2026-06-24-doi-recovery"
+BUILD = "2026-06-24-usage-counter"
 
+# A tiny per-day usage counter -- a plain text file next to this script, one
+# "YYYY-MM-DD<TAB>count" line per date. It stores ONLY a date and a tally: no IP, no
+# bibliography, nothing personal, so it keeps the tool's "nothing you paste is stored"
+# promise. A failed counter write never affects the check (see _bump_counter).
+COUNTER_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "counter.txt")
+
+# Bound the request: a 10-entry .bib is a few KB; reject anything larger before we
+# parse, so the public endpoint can't be handed a huge body.
 MAX_BODY_BYTES = 64 * 1024
 MAX_ENTRIES = 10
 # Per-request HTTP timeout for the core sources. The whole request must finish inside
 # the shared-host CGI limit (~120 s on OVH); fast mode's per-call caps (this, plus
 # webcheck.AUX_TIMEOUT for the slower need-to-basis sources) keep it there.
 HTTP_TIMEOUT = 10
+
+
+def _bump_counter():
+    """Increment today's tally in COUNTER_FILE, concurrency-safe and best-effort.
+
+    The file is "YYYY-MM-DD<TAB>count" lines. We hold an exclusive lock for the whole
+    read-modify-write so two simultaneous requests can't lose a count or corrupt the
+    file, then rewrite atomically (write a temp file, os.replace). ANY failure (no
+    write permission, no fcntl, a torn line) is swallowed -- counting must never break
+    a check or leak an error to the user."""
+    try:
+        import fcntl
+        today = datetime.date.today().isoformat()
+        # Open for read+write, creating if absent; lock before touching the contents.
+        fd = os.open(COUNTER_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            existing = os.read(fd, 1 << 20).decode("utf-8", "replace")
+            counts = {}
+            for line in existing.splitlines():
+                if "\t" in line:
+                    d, n = line.split("\t", 1)
+                    try:
+                        counts[d] = int(n)
+                    except ValueError:
+                        pass
+            counts[today] = counts.get(today, 0) + 1
+            body = "".join(f"{d}\t{counts[d]}\n" for d in sorted(counts))
+            tmp = COUNTER_FILE + f".tmp{os.getpid()}"
+            with open(tmp, "w", encoding="utf-8") as t:
+                t.write(body)
+            os.replace(tmp, COUNTER_FILE)        # atomic swap
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    except Exception:
+        pass                                     # never let counting break the check
 
 
 def _send(obj, status="200 OK"):
@@ -105,6 +149,7 @@ def main():
         report = check_bib_text(raw, max_entries=MAX_ENTRIES, timeout=HTTP_TIMEOUT)
     except Exception as ex:
         _send({"error": f"check failed: {ex}"}, status="500 Internal Server Error")
+    _bump_counter()              # count one completed check (best-effort; never raises)
     # Build marker: lets us confirm from the live response WHICH code is deployed (so a
     # stale upload / cached .pyc is obvious). Bump BUILD when changing behavior.
     import veracite

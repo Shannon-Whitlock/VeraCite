@@ -11,6 +11,8 @@ web/
   app.js          posts the bib to check.cgi and renders the JSON
   style.css       styling
   check.cgi       the Python CGI endpoint (stdlib only) -> veracite.check_bib_text
+  stats.cgi       shows the per-day usage counter (aggregate counts only)
+  counter.txt     created at runtime by check.cgi; one "date<TAB>count" line per day
 ```
 
 ## How it works
@@ -114,6 +116,40 @@ Test the endpoint directly:
 ```bash
 curl -X POST --data-binary @../tests/fixtures/<some>.bib https://yoursite/check.cgi
 ```
+
+## Usage tracking (per-day counter)
+
+Each completed check increments a tally in `counter.txt` (created automatically next
+to `check.cgi`), one `YYYY-MM-DD<TAB>count` line per day. It records **only a date and
+a count** — no IP, no bibliography, nothing personal — so it keeps the tool's "nothing
+you paste is stored" promise. The write is locked (`flock`) and atomic, and a failure
+to write never affects the check.
+
+View the numbers at **`https://yoursite/stats.cgi`** (human-readable) or
+`stats.cgi?json` (machine-readable: `{"total": N, "by_day": {...}}`).
+
+Two deployment notes:
+
+- **Writability.** `counter.txt` is written by the web user, so the directory must be
+  writable. On OVH shared hosting `www/` already is; if the counter stays at zero,
+  check the directory's permissions. (A read-only directory just means no counting —
+  the checks still work.)
+- **Keep the numbers private (optional).** `stats.cgi` is a public URL and exposes
+  only aggregate counts, but if you'd rather not show them, restrict that one file with
+  an `.htaccess` Basic-Auth block:
+
+  ```apache
+  <Files "stats.cgi">
+    AuthType Basic
+    AuthName "stats"
+    AuthUserFile /homez.NNNN/youruser/.htpasswd
+    Require valid-user
+  </Files>
+  ```
+
+  (create `.htpasswd` with `htpasswd`), or simply rename `stats.cgi` to something
+  unguessable. Remember to `chmod 755 stats.cgi` after uploading (OVH resets it to
+  604, same as `check.cgi`).
 
 ## If your OVH plan forbids CGI
 
