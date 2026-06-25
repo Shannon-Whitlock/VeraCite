@@ -91,9 +91,10 @@ class Finding:
 CATEGORY_GROUP = {
     # syntax: written form, checkable offline without a source of record
     "syntax": "syntax", "missing_entry_header": "syntax", "style": "syntax",
+    "identifier_placement": "syntax",
     "biblatex_validity": "syntax", "encoding": "syntax", "duplicate": "syntax",
     "duplicate_field": "syntax", "duplicate_field_conflict": "syntax",
-    "dropped_field": "syntax", "identifier_format": "syntax",
+    "dropped_field": "syntax", "misplaced_field": "syntax", "identifier_format": "syntax",
     # semantic: content / metadata / identity, often needs the source of record
     "metadata_mismatch": "semantic", "source_conflict": "semantic",
     "parity_suggestion": "semantic", "missing_field": "semantic",
@@ -102,14 +103,15 @@ CATEGORY_GROUP = {
     "missing_recommended": "semantic", "pid_missing": "semantic",
     "doi_available": "semantic", "retraction": "semantic",
     "related_work": "semantic",
-    "title_case": "semantic", "author_format": "semantic",
-    "author_completeness": "semantic",
+    "title_case": "semantic", "title_style": "semantic", "author_format": "semantic",
+    "author_completeness": "semantic", "author_truncated_marker": "syntax",
     "record_unresolved": "semantic", "dead_doi": "semantic",
     "pid_optional": "semantic", "container_granularity": "semantic",
     # context: the entry's relationship to the manuscript and to the work it points
     # at -- citation order/usage, whether the id resolves to the right paper, whether
     # a published version should be cited instead, and the LLM-relevance ratings.
     "citation_order": "context", "preprint_superseded": "context",
+    "preprint_version": "context",
     "id_resolves_wrong_record": "context", "wrong_paper": "context",
     "llm_relevance": "context", "llm_config": "context", "llm_ok": "context",
 }
@@ -139,7 +141,8 @@ CATEGORY_DOC = {
     "dead_doi": "the recorded DOI does not resolve (Crossref 404)",
     "pid_optional": "pre-2005 work with no DOI -- not required (reassurance)",
     "container_granularity": "id resolved to the containing volume, not the item",
-    "author_completeness": "author list truncated ('and others' / literal 'et al.')",
+    "author_completeness": "malformed author truncation (literal 'et al.' / bare 'al.')",
+    "author_truncated_marker": "author list ends in the valid 'and others' marker",
     "author_format": "author names malformed (ALL-CAPS, 'and' glued, mixed forms)",
     "source_conflict": "two authoritative sources disagree on data",
     "doi_available": "a DOI exists in Crossref but the entry omits it",
@@ -149,18 +152,22 @@ CATEGORY_DOC = {
     "llm_ok": "LLM rated the citation relevant (4-5/5) -- a clean-pass note",
     "llm_config": "LLM run misconfigured (e.g. unknown provider)",
     "preprint_superseded": "a published version now exists",
+    "preprint_version": "bib year matches one arXiv version, not the record's (pin it)",
     "related_work": "erratum/correction/comment/reply linked",
     "duplicate": "duplicate citation key or DOI (two entries collide)",
     "duplicate_field": "a field repeated within ONE entry, values agree (benign)",
     "duplicate_field_conflict": "repeated field with DIFFERING values (data dropped)",
     "dropped_field": "a field outside the entry, silently dropped",
+    "misplaced_field": "a value in the wrong field (e.g. a year in 'journal')",
     "missing_field": "biber-mandatory field absent (e.g. title, journal)",
-    "missing_locator": "published article lacks volume/pages (valid, but add it)",
+    "missing_locator": "article omits volume/pages -- not mandatory, advisory only",
+    "identifier_placement": "an identifier sits in the url, not a structured doi/eprint field",
     "entrytype_suggestion": "the @type looks wrong for the entry's data",
     "datamodel_recommended": "mandatory in biblatex's datamodel but biber tolerates absent",
     "missing_recommended": "field biber doesn't require but we advise (year)",
     "biblatex_validity": "field invalid under biblatex datamodel",
     "title_case": "title looks miscased (mostly UPPERCASE)",
+    "title_style": "title matches the record but punctuation/wording deviates",
     "style": "casing, punctuation, dashes, month, etc.",
     "citation_order": "a \\cite{} group is not in chronological order",
     "encoding": "non-ASCII / mojibake / invisible characters",
@@ -188,6 +195,72 @@ def _preview(s, width=42):
     return s[:head] + "..." + s[-(width - 3 - head):]
 
 
+# Characters that are brace-protection / quoting noise, not content: a leading '{'
+# on a bib title vs none on the record must NOT count as the divergence point (it
+# would defeat the difference-aware window). Skipped from BOTH ends before the
+# common prefix/suffix is measured.
+_EDGE_NOISE = "{}\"' \t"
+
+
+def _diff_span(a, b):
+    """The index where strings `a` and `b` first diverge and where their common
+    suffix begins (as offsets from each end). Returns (prefix_len, a_suffix_len,
+    b_suffix_len) so a caller can window each string around the part that actually
+    changed. Leading/trailing brace/quote/space noise is stepped over so a '{'
+    wrapper on one side is not mistaken for a real difference at index 0."""
+    # Advance past a leading run of edge-noise that differs only in wrapping.
+    p = 0
+    while (p < len(a) and p < len(b) and a[p] == b[p]):
+        p += 1
+    # If we stalled at the very start on pure wrapping noise, skip the noise on each
+    # side and retry the prefix match from there.
+    if p == 0:
+        ia = ib = 0
+        while ia < len(a) and a[ia] in _EDGE_NOISE:
+            ia += 1
+        while ib < len(b) and b[ib] in _EDGE_NOISE:
+            ib += 1
+        while ia < len(a) and ib < len(b) and a[ia] == b[ib]:
+            ia += 1
+            ib += 1
+        p = min(ia, ib)
+    sa, sb = len(a), len(b)
+    while sa > p and sb > p and a[sa - 1] == b[sb - 1]:
+        sa -= 1
+        sb -= 1
+    # Step back over trailing wrapping noise so a '}' on one side is not the suffix.
+    while sa > p and sb > p and a[sa - 1] in _EDGE_NOISE and b[sb - 1] in _EDGE_NOISE:
+        sa -= 1
+        sb -= 1
+    return p, len(a) - sa, len(b) - sb
+
+
+def _preview_pair(frm, to, width=42):
+    """Preview a (from, to) pair so the part that DIFFERS stays visible. A naive
+    middle-elision can hide a mid-string change (e.g. one word in a long title that
+    is otherwise identical), making 'from' and 'to' look the same on screen. Center
+    each value's elision window on the divergence point instead. Falls back to plain
+    middle-elision when the strings share little, or are short."""
+    frm, to = str(frm), str(to)
+    if len(frm) <= width and len(to) <= width:
+        return frm, to
+    pre, _, _ = _diff_span(frm, to)
+    # Only worth centering when there is a real shared prefix to elide past; with
+    # little in common, the plain middle-elision is already representative.
+    if pre <= width // 3:
+        return _preview(frm, width), _preview(to, width)
+
+    def window(s):
+        if len(s) <= width:
+            return s
+        # Keep a little context before the divergence, then run to the end (the
+        # tail is itself elided by _preview if still too long).
+        ctx = max(0, pre - width // 3)
+        head = "..." if ctx > 0 else ""
+        return head + _preview(s[ctx:], width - len(head))
+    return window(frm), window(to)
+
+
 def format_suggested(suggested):
     """Render a structured `suggested` ({field, from?, to}) as the advisory prose
     tail ' (suggested: 'from' -> 'to')', or ' (suggested: 'to')' when there is no
@@ -197,10 +270,12 @@ def format_suggested(suggested):
     Returns '' when there is nothing to suggest."""
     if not suggested or "to" not in suggested:
         return ""
-    to = _preview(suggested["to"])
     if "from" in suggested:
-        return f" (suggested: {_preview(suggested['from'])!r} -> {to!r})"
-    return f" (suggested: {to!r})"
+        # Difference-aware so a mid-string change (one word in a long title) stays
+        # visible rather than being elided away.
+        frm, to = _preview_pair(suggested["from"], suggested["to"])
+        return f" (suggested: {frm!r} -> {to!r})"
+    return f" (suggested: {_preview(suggested['to'])!r})"
 
 
 # User-facing severity labels accepted in the settings file.
@@ -236,7 +311,19 @@ def resolve_severity(default, category):
 SUPERSEDES = {
     "author_completeness": ("static", "record layer",
         "the authoritative record lists no more authors than the bib already has, "
+        "so an 'et al.'/'al.' truncation is faithful, not lossy"),
+    "author_truncated_marker": ("static", "record layer",
+        "the authoritative record lists no more authors than the bib already has, "
         "so an 'and others' truncation is faithful, not lossy"),
+    "missing_locator": ("static", "record layer",
+        "the record's parity_suggestion names the exact volume/pages to add, so the "
+        "generic 'missing locator' note would state the same fact twice"),
+    "identifier_placement": ("static", "record layer",
+        "the online 'doi_available' finding reports the SAME url DOI (and confirms it "
+        "resolved), so the offline placement nudge would state the same fact twice"),
+    "entrytype_suggestion": ("static", "record layer",
+        "the entry RESOLVED to a real journal record, disproving the offline "
+        "'looks like a web item' guess -- it is a genuine @article"),
     "title_case": ("static", "record layer",
         "the record carries the canonical casing, so the offline 'looks miscased' "
         "guess is replaced by 'adopt the record's casing'"),
@@ -442,16 +529,19 @@ class Report:
         keytag = (self._c(f.key, _BOLD) + " ") if with_key else ""
         return f"    {self._c(f'[{tag}]', color)}{pad} {keytag}{code}{loc}: {msg}"
 
-    def emit_remaining(self, out=None, skip_notes=False):
+    def emit_remaining(self, out=None, skip_notes=False, only_key=None):
         """Print any findings not yet emitted by emit_entry -- the file-level group
         (<file> syntax, cross-entry rules) plus any entry never visited by the
         driver -- under a 'file-level' header. Each line keeps its key (with_key)
-        since there is no per-entry header here. Returns True if anything printed."""
+        since there is no per-entry header here. Returns True if anything printed.
+        When `only_key` is set (--key), restrict to that key plus the reserved
+        <file> record, so a focused run shows just the asked-about entry."""
         out = out if out is not None else sys.stdout
         rest = [i for i, f in enumerate(self.findings)
                 if i not in self._emitted
                 and not self._is_superseded(f)
-                and not (skip_notes and f.severity is Severity.INFO)]
+                and not (skip_notes and f.severity is Severity.INFO)
+                and (only_key is None or f.key in (only_key, "<file>"))]
         for i, f in enumerate(self.findings):
             self._emitted.add(i)
         if not rest:
@@ -462,16 +552,18 @@ class Report:
         print(file=out)
         return True
 
-    def emit_by_severity(self, out=None, skip_notes=False):
+    def emit_by_severity(self, out=None, skip_notes=False, only_key=None):
         """Triage view (`--sort=severity`): every live finding as one flat, global
         list grouped by severity (errors, then warnings, then notes), each group in
         bibtex-key order. Every line is self-contained (carries its key), so the
         whole block parses without per-entry headers. Marks all findings emitted.
+        When `only_key` is set (--key), restrict to that key plus the <file> record.
         Returns True if anything printed."""
         out = out if out is not None else sys.stdout
         live = [f for f in self.findings
                 if not self._is_superseded(f)
-                and not (skip_notes and f.severity is Severity.INFO)]
+                and not (skip_notes and f.severity is Severity.INFO)
+                and (only_key is None or f.key in (only_key, "<file>"))]
         for i in range(len(self.findings)):
             self._emitted.add(i)
         if not live:
@@ -630,6 +722,7 @@ class Report:
         status, confidence, identifiers, canonical record and issues. `phases_by_key`
         (key -> set of phases computed) is persisted as each reference's `phases`
         so a later run can resume only the phases an entry still lacks."""
+        from .checkpoint import canonical_record as _canonical_record  # lazy: cycle
         live = self.live_findings()
         out = {"findings": [self._finding_dict(f) for f in live]}
         if summary is not None:
@@ -662,9 +755,7 @@ class Report:
                                     "arxiv": (res.arxiv_id if res else "") or None,
                                     "isbn": (res.isbn if res else "") or None},
                     "sources": sorted(res.sources) if res else [],
-                    "canonical_record": {k: rec.get(k) for k in
-                                         ("title", "year", "journal", "volume",
-                                          "number", "pages")} if rec else None,
+                    "canonical_record": _canonical_record(rec, conf),
                     "issues": by_key.get(key, []),
                 })
             out["references"] = refs

@@ -41,7 +41,11 @@ def _extract_relations(msg):
     for upd in (msg.get("updated-by") or []):
         kind = (upd.get("type") or "").lower()
         if kind in _UPDATE_TYPES:
-            rels.append((kind, upd.get("id", "")))
+            # An `updated-by` entry carries the target DOI under the key `DOI`
+            # (uppercase), not `id` -- reading `id` lost the target, so the
+            # correction was parsed but silently dropped (its empty target failed
+            # the truthiness filter in fetch_related). Accept either key.
+            rels.append((kind, upd.get("DOI") or upd.get("id", "")))
     return rels
 
 
@@ -110,6 +114,11 @@ def _parse_arxiv_entry(entry_xml):
     summary_m = re.search(r"<summary>(.*?)</summary>", entry_xml, re.S)
     authors = re.findall(r"<author>\s*<name>(.*?)</name>", entry_xml, re.S)
     year_m = re.search(r"<published>(\d{4})", entry_xml)
+    # <updated> is the date of the LATEST version (vN); <published> is v1. When a
+    # later version appeared in a different year, the bib may cite either -- so the
+    # version year span lets the comparison treat a bib year that matches ANY
+    # version as a 'pin the version', not a wrong year.
+    updated_m = re.search(r"<updated>(\d{4})", entry_xml)
     # arXiv records the published version once it is linked: a DOI in
     # <arxiv:doi> and/or a citation string in <arxiv:journal_ref>.
     pub_doi_m = re.search(r"<arxiv:doi[^>]*>(.*?)</arxiv:doi>", entry_xml, re.S)
@@ -121,6 +130,7 @@ def _parse_arxiv_entry(entry_xml):
         authors=[fold_surname(s) for s in arx_surnames],
         authors_display=arx_surnames,
         year=int(year_m.group(1)) if year_m else None,
+        updated_year=int(updated_m.group(1)) if updated_m else None,
         title=re.sub(r"\s+", " ", title_m.group(1)).strip() if title_m else "",
         journal="arXiv",
         abstract=re.sub(r"\s+", " ", summary_m.group(1)).strip() if summary_m else "",
@@ -200,15 +210,19 @@ def fetch_abstract_s2(doi, timeout):
     return strip_tags(data.get("abstract")) if code == 200 and data else ""
 
 
-def fetch_inspire(doi=None, arxiv_id=None, timeout=20):
-    """Resolve a physics reference against INSPIRE-HEP by DOI or arXiv id. Returns
-    a normalized record (same shape as fetch_crossref) or None. INSPIRE is the
-    authoritative database for high-energy/condensed-matter physics, used as a
-    second authoritative source for cross-source consistency."""
+def fetch_inspire(doi=None, arxiv_id=None, recid=None, timeout=20):
+    """Resolve a physics reference against INSPIRE-HEP by DOI, arXiv id, or INSPIRE
+    record id (the 'literature/<recid>' in an inspirehep.net URL). Returns a
+    normalized record (same shape as fetch_crossref) or None. INSPIRE is the
+    authoritative database for high-energy/condensed-matter physics: a second source
+    for cross-source consistency, and the only one that resolves a thesis/proceedings
+    cited by its INSPIRE recid alone (no DOI/arXiv id)."""
     if doi:
         url = endpoint("inspire_doi", doi=doi)
     elif arxiv_id:
         url = endpoint("inspire_arxiv", id=arxiv_id)
+    elif recid:
+        url = endpoint("inspire_recid", recid=recid)
     else:
         return None
     data, code = http_get_json(url, timeout)
@@ -235,7 +249,9 @@ def fetch_inspire(doi=None, arxiv_id=None, timeout=20):
     pub = (md.get("publication_info") or [{}])[0]
     year = pub.get("year") or (md.get("earliest_date") or "")[:4]
     titles = md.get("titles") or [{}]
+    doc_types = md.get("document_type") or []
     return Record(
+        document_type=(doc_types[0] if doc_types else ""),
         authors=authors,
         authors_display=authors_display,
         given=given,

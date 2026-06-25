@@ -14,9 +14,10 @@ from .config import SETTINGS
 from .datamodel import (DM_ENTRYTYPES, FIELD_ALIASES, legal_fields,
                         mandatory_slots)
 from .identifiers import isbn_valid, issn_valid, orcid_valid
-from .normalize import (ARXIV_OLD_RE, DOI_FULL_RE, bare_doi, extract_arxiv_id,
-                        is_book_series_doi, is_collaboration, is_preprint,
-                        norm_pages, shouted_surnames, split_authors,
+from .normalize import (ARXIV_OLD_RE, DOI_FULL_RE, bare_doi, clean_tex,
+                        extract_arxiv_id, extract_doi_from_url, extract_isbn,
+                        has_etal_marker, is_book_series_doi, is_collaboration,
+                        is_preprint, norm_pages, shouted_surnames, split_authors,
                         title_is_miscased)
 from .parser import FIELD_DECL, _blank_comments, field_occurrences
 from .report import Severity
@@ -69,17 +70,84 @@ _SUSPICIOUS_CHARS = {
 
 # --- per-entry rules -------------------------------------------------------
 
+def _nonempty(val):
+    """True if a field value has real content. A value that is only braces/whitespace
+    ('{ }', '{}', '  ') is EMPTY even though it is a non-empty string -- de-TeX it
+    first so a whitespace-only brace group ('title={{ }}') counts as missing, not
+    present. Catches a mandatory field that was left blank but brace-wrapped."""
+    return bool(clean_tex(val).strip())
+
+
 def _has_field(e, name):
     """True if the entry supplies `name` or a legacy alias of it (so 'journal'
-    satisfies 'journaltitle', 'school' satisfies 'institution', etc.)."""
-    if e.get(name).strip():
+    satisfies 'journaltitle', 'school' satisfies 'institution', etc.). A field whose
+    content is only braces/whitespace does NOT count as supplied."""
+    if _nonempty(e.get(name)):
         return True
     # An alias maps a legacy name -> canonical; accept either direction.
     canon = FIELD_ALIASES.get(name, name)
-    if e.get(canon).strip():
+    if _nonempty(e.get(canon)):
         return True
-    return any(e.get(legacy).strip()
+    return any(_nonempty(e.get(legacy))
                for legacy, c in FIELD_ALIASES.items() if c == canon)
+
+
+# URL path segments that mark a press release / news / grey-literature page rather
+# than a journal article, plus a bare document file (a slide deck or PDF served off
+# a personal/corporate site). These are positive, low-false-positive web-item
+# signals: a real article's URL points at a publisher/DOI landing page, not a
+# '/newsroom/' path or a raw .pdf. A publisher PDF still lives under a DOI/host
+# path, so requiring the .pdf to be the LAST segment keeps 'doi.org/.../paper.pdf'
+# style links (rare) from over-matching while catching '.../speech/Name_3.pdf'.
+_WEB_SOURCE_RE = re.compile(
+    r"/(?:newsroom|news|press|press-release|blog|events?|media|"
+    r"announcements?|stories|insights)/", re.I)
+_WEB_DOC_RE = re.compile(r"\.(?:pdf|pptx?|key)(?:[?#].*)?$", re.I)
+# Well-known BLOG / grey-literature HOSTS -- never journals, so an @article pointing
+# at one is mis-typed regardless of any 'journal' label it carries (a Medium post
+# with journal={Medium} is still a blog post, not a journal article). High-confidence
+# hosts only, so a real publisher host is never matched.
+_WEB_HOST_RE = re.compile(
+    r"//(?:[\w.-]+\.)?(?:medium\.com|substack\.com|wordpress\.com|blogspot\.|"
+    r"hpcwire\.com|eetimes\.|thequantuminsider\.com|quantumcomputingreport\.com)/",
+    re.I)
+
+
+def _is_web_source_url(url):
+    """True when a url is a clear web/press/grey source (a news/press/blog/events
+    path, a bare slide/PDF document, or a known blog host) rather than a journal-
+    article landing page. Used to catch a press release or blog post mis-typed as
+    @article even when it fills the 'journal' field with a site/platform label."""
+    u = url.strip()
+    if not u:
+        return False
+    return bool(_WEB_SOURCE_RE.search(u) or _WEB_DOC_RE.search(u)
+                or _WEB_HOST_RE.search(u))
+
+
+# A thesis/dissertation repository host, path, or filename. These hold doctoral and
+# masters theses, not journal articles, so an @article pointing at one is mis-typed
+# -- the biblatex type is @thesis. Kept to high-confidence markers so an ordinary
+# article url never matches: known thesis hosts (theses.fr is the French national
+# portal; tel.* is HAL's thesis server; ethos is the British Library; ProQuest/PQDT
+# host dissertations); explicit /thesis//dissertation/ path words; the 'ETD'
+# (Electronic Thesis/Dissertation) marker institutional repositories use in their
+# handles (e.g. UT Austin '.../ETD-UT-2012-05-5053/...'); and a 'thesis'/
+# 'dissertation' FILENAME (e.g. 'LIANG-DISSERTATION.pdf').
+_THESIS_URL_RE = re.compile(
+    r"theses\.fr|tel\.archives-ouvertes|ethos\.bl\.uk|pqdtopen|proquest\.com/.*dissertation"
+    r"|/thesis/|/theses/|/dissertation[s]?/|diss\."
+    r"|\bETD[-_/]"
+    r"|[-_/](?:thesis|dissertation)\.[a-z]+(?:[?#]|$)",
+    re.I)
+
+
+def _is_thesis_url(url):
+    """True when a url points at a thesis/dissertation repository or page -- a PhD/
+    MSc thesis mis-typed as @article should be @thesis. Deterministic, high-
+    confidence hosts/paths only, so a journal-article url is never matched."""
+    u = url.strip()
+    return bool(u) and bool(_THESIS_URL_RE.search(u))
 
 
 # Slots biblatex's raw datamodel marks mandatory but that real .bib usage handles
@@ -161,7 +229,47 @@ def required_fields(e, rep):
                 category="missing_recommended")
 
     if e.etype == "article":
-        if not _has_field(e, "journal") and not e.get("eprint").strip():
+        # An @article is a JOURNAL article. Classify by venue, with the URL as a
+        # second, stronger signal than the journal FIELD (a press release often
+        # fills 'journal' with a site/company label like 'Pasqal news'):
+        #   * the URL is a clear web/press/grey source (a /newsroom//news//blog/
+        #     /press//events/ path, or a bare .pdf/slides) -> a web item mis-typed
+        #     as @article, EVEN IF a 'journal' string is present. Suggest the type.
+        #   * else names a journal/eprint -> a real article; at most omits a locator.
+        #   * else has a url/howpublished/corporate author -> a web item (no journal
+        #     to vouch for it). Suggest the type.
+        #   * else (no journal, no url) -> a genuinely broken @article (the error).
+        has_venue = _has_field(e, "journal") or e.get("eprint").strip()
+        has_weblike = e.get("url").strip() or e.get("howpublished").strip()
+        web_url = _is_web_source_url(e.get("url", ""))
+        # A BOOK signal beats the web-item guess: an ISBN (a field, or embedded in
+        # the url -- publisher 'book/<isbn>/chapter/...' links carry one) or a
+        # book-series DOI means this is a book/chapter mis-typed as @article, NOT a
+        # web item. Point at the container type (@incollection/@inbook/@book), not
+        # @online -- the id is right there in the url (e.g. Sibalic 'Rydberg Physics').
+        isbn_in_entry = e.get("isbn").strip() or extract_isbn(e.get("url"), e.get("note"))
+        book_like = bool(isbn_in_entry) or is_book_series_doi(e.get("doi", "")) \
+            or bool(re.search(r"/book[s]?/", e.get("url", ""), re.I))
+        # A THESIS signal (a thesis-repository url host or a /thesis//dissertation/
+        # path) also beats the web-item guess: a PhD/MSc thesis mis-typed as @article
+        # has its own biblatex type. Checked before the generic web-item branch.
+        thesis_like = _is_thesis_url(e.get("url", ""))
+        if book_like:
+            rep.add(Severity.WARN, e, "@article looks like a book or book chapter (it "
+                    "carries an ISBN / book DOI / a publisher book url), not a journal "
+                    "article -- use @book, @inbook or @incollection instead of @article",
+                    field="journal", category="entrytype_suggestion")
+        elif thesis_like:
+            rep.add(Severity.WARN, e, "@article looks like a thesis (its url is a thesis "
+                    "repository / dissertation page), not a journal article -- use "
+                    "@thesis (with type={phd}/{mastersthesis}) instead of @article",
+                    field="journal", category="entrytype_suggestion")
+        elif web_url or (not has_venue and (has_weblike or is_collaboration(e.get("author", "")))):
+            rep.add(Severity.WARN, e, "@article looks like a web or press item (its "
+                    "url is a news/press/grey source or it names no journal), not a "
+                    "journal article -- use @online or @misc instead", field="journal",
+                    category="entrytype_suggestion")
+        elif not has_venue:
             rep.add(Severity.ERROR, e, "missing 'journal'/'journaltitle' (or eprint) "
                     "for @article", category="missing_field")
         elif not is_preprint(e):
@@ -179,26 +287,66 @@ def required_fields(e, rep):
                         "looks like a chapter in a book or proceedings volume -- use "
                         "@incollection or @inproceedings instead of @article",
                         category="entrytype_suggestion")
-            # An @article with no locator and no volume but a url/howpublished or a
-            # corporate author is almost always a web/press item mis-typed as
-            # @article -- point at the entry type, the real fix.
-            elif not locatable and not has_volume and (
-                    e.get("url").strip() or e.get("howpublished").strip()
-                    or is_collaboration(e.get("author", ""))):
-                rep.add(Severity.WARN, e, "@article has no volume, pages or article "
-                        "number and looks like a web/press item; use @online or "
-                        "@misc instead", category="entrytype_suggestion")
             else:
-                # Missing volume/pages on a published article is NOT invalid
-                # BibTeX (biblatex builds it fine) -- it is a locator worth
-                # adding, so a warning, not an error. Its own category keeps it
-                # off the error-level 'missing_field' floor.
+                # A journal IS named, so this is a real article that merely omits a
+                # locator. volume/pages are NOT mandatory for @article in EITHER the
+                # biblatex datamodel (it requires only author/journaltitle/title) or
+                # traditional BibTeX -- the entry is valid and renders fine. So this
+                # is purely advisory completeness, a NOTE, not a conformance warning.
+                # When the online layer resolves the record it emits a more useful
+                # parity_suggestion naming the actual value to add (volume '638'),
+                # which SUPERSEDES this generic note so the same fact is not doubled.
                 if not has_volume:
-                    rep.add(Severity.WARN, e, "published article missing 'volume'",
+                    rep.add(Severity.INFO, e, "published article omits 'volume' "
+                            "(not required, but aids citeability)",
                             category="missing_locator")
                 if not locatable:
-                    rep.add(Severity.WARN, e, "published article missing 'pages' (or an "
-                            "article number / eid)", category="missing_locator")
+                    rep.add(Severity.INFO, e, "published article omits 'pages' / an "
+                            "article number (not required, but aids citeability)",
+                            category="missing_locator")
+
+
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+
+
+@rule
+def misplaced_field(e, rep):
+    """A field holding a value that cannot belong there -- it was put in the wrong
+    field. Two cases:
+
+    * 'journal'/'journaltitle' that is PURELY NUMERIC ('journal={2024}', '={5}'). A
+      journal name always has letters; an all-digit value is never a journal -- it is
+      a year/volume/issue misplaced here. This also masks problems: a numeric journal
+      satisfies the @article venue check, so a non-article escapes the entry-type
+      suggestion.
+    * 'number'/'issue' that is a 4-digit YEAR ('number={2024}'). Those fields ARE
+      legitimately numeric (issue 3, article number 031320), so only a year-SHAPED
+      value (1900-2099) is flagged, never an ordinary issue/article number.
+
+    WARN; when the value is a year, it is suggested for the 'year' field."""
+    flagged = False
+    for field in ("journal", "journaltitle"):
+        val = e.get(field, "").strip().strip("{}").strip()
+        if val and val.isdigit():
+            is_year = bool(_YEAR_RE.fullmatch(val))
+            same_as_year = e.get("year", "").strip()[:4] == val
+            sug = {"field": "year", "to": val} if is_year and not same_as_year else None
+            tail = " -- it likely belongs in the 'year'/'date' field" if is_year \
+                else " -- a journal name is text, not a number"
+            rep.add(Severity.WARN, e, f"'{field}' is a number ({val}); a journal name "
+                    f"is never purely numeric{tail}", category="misplaced_field",
+                    field=field, suggested=sug)
+            flagged = True
+    for field in ("number", "issue"):
+        val = e.get(field, "").strip().strip("{}").strip()
+        if _YEAR_RE.fullmatch(val):
+            same_as_year = e.get("year", "").strip()[:4] == val
+            sug = None if same_as_year else {"field": "year", "to": val}
+            rep.add(Severity.WARN, e, f"'{field}' is a year ({val}); an issue number "
+                    "is not a year -- it likely belongs in the 'year'/'date' field",
+                    category="misplaced_field", field=field, suggested=sug)
+            flagged = True
+    return flagged
 
 
 @rule
@@ -419,32 +567,37 @@ def title_punctuation(e, rep):
 
 @rule
 def truncated_authors(e, rep):
-    """A name list that has been truncated rather than stored in full. Two forms,
-    both flagged so the .bib keeps complete author data:
+    """A name list truncated rather than stored in full. Three forms, split by how
+    wrong each is:
 
-    * a literal 'et al.' -- worst: 'et al.' is a *publisher rendering*, not data.
-      BibTeX/biblatex treat the spelled-out form as a real author and it bakes one
-      journal's convention into the .bib. The fix is the 'and others' marker.
-    * the 'and others' marker itself -- valid, and the style WILL render it, but it
-      discards the dropped names. A style that must list the first N authors before
-      'et al.' cannot recover names the .bib never stored. For good record-keeping
-      the full list belongs in the .bib; the style applies journal-specific
-      truncation (maxnames/maxbibnames) at format time."""
+    * a literal 'et al.' or a bare 'al.' (the user dropped the 'et') -- the WARN
+      case. 'et al.' is a *publisher rendering*, not data: BibTeX/biblatex treat
+      the spelled-out form as a real author ('al.' becomes a phantom surname) and
+      it bakes one journal's convention into the .bib. The fix is the proper
+      'and others' marker.
+    * the 'and others' marker itself -- a NOTE, not a warning. It is a valid,
+      deliberate biblatex marker that the style renders correctly as 'et al.'; the
+      only downside is the dropped names are not stored, so a style that must list
+      the first N authors cannot recover them. Truncating the displayed count is the
+      style sheet's job (maxnames/maxbibnames), not the .bib's -- so this is a
+      stylistic record-keeping note, separated from the malformed cases above."""
     for field in ("author", "editor"):
         val = e.get(field, "")
-        # 'et al.' in any of its written forms: a space, a LaTeX tie 'et~al.', or
-        # the run-together 'et.al.' -- all hard-code a rendering into the .bib.
-        if re.search(r"\bet[\s~.]+al\.?", val, re.I):
-            rep.add(Severity.WARN, e, f"{field} list contains a literal 'et al.'; "
-                    "BibTeX treats it as an author and it hard-codes a journal's "
-                    "rendering -- store the full author list and use 'and others' "
-                    "if a marker is needed (the style produces 'et al.')",
+        # A literal 'et al.' in any written form (space, LaTeX tie 'et~al.',
+        # run-together 'et.al.') OR a bare trailing 'al.' with the 'et' dropped
+        # ('Pedram Roushan al.') -- both hard-code a rendering / a phantom name.
+        if has_etal_marker(val):
+            rep.add(Severity.WARN, e, f"{field} list contains a literal 'et al.' "
+                    "(or variant); BibTeX treats it as an author and it hard-codes a "
+                    "journal's rendering -- store the full author list and use 'and "
+                    "others' if a marker is needed (the style produces 'et al.')",
                     category="author_completeness", field=field)
         elif re.search(r"\band\s+others\b", val, re.I):
-            rep.add(Severity.WARN, e, f"{field} list is truncated with 'and others'; "
-                    "valid, but the dropped names are lost -- store the full list so "
-                    "the style can apply journal-specific truncation",
-                    category="author_completeness", field=field)
+            rep.add(Severity.INFO, e, f"{field} list is truncated with 'and others'; "
+                    "valid (the style renders it 'et al.'), but the dropped names are "
+                    "not stored -- keep the full list and let the style truncate the "
+                    "displayed count (maxnames/maxbibnames)",
+                    category="author_truncated_marker", field=field)
 
 
 # A name-separator 'and' fused to the preceding initial with no space:
@@ -485,6 +638,45 @@ def shouted_authors(e, rep):
                     f"normal name casing (publishers SHOUT names on export; the .bib "
                     f"should store the canonical form)", category="author_format",
                     field=field)
+
+
+# Footnote / affiliation markers that get copy-pasted into a name from a rendered
+# byline (superscripts), alongside digits. None belongs in a personal name.
+_NAME_MARKER = r"\d|[*†‡§¶∗★☆]"  # digit, * † ‡ § ¶ ⋆ ★ ☆
+
+
+@rule
+def marker_in_author_name(e, rep):
+    """A digit or footnote symbol glued to an author/editor name token -- 'Sam R.
+    Cohen1', 'Smith*', 'Lee†' -- a leftover affiliation/footnote superscript
+    copy-pasted from a rendered byline. None is part of a real personal name, so it
+    is a transcription defect that deviates the name from the published record (and
+    renders wrong). WARN, with the marker stripped in the suggested fix. Offline
+    fallback for the same deviation the record layer flags online -- caught even with
+    no network or no record. (A brace-protected token -- a collaboration like
+    '{Team 2}' -- is left alone: it is deliberate, not a stray superscript.)"""
+    marker = _NAME_MARKER
+    glued = re.compile(rf"[A-Za-z](?:{marker})|(?:{marker})[A-Za-z]")
+    strip = re.compile(rf"(?<=[A-Za-z])(?:{marker})+|(?:{marker})+(?=[A-Za-z])")
+    # A standalone all-marker WORD inside a name -- 'David Weiss 2017' (a stray year),
+    # 'Smith 1' -- where the digit/symbol is a separate space-delimited token rather
+    # than glued. A bare number is never a name part, so this is the same defect.
+    bare_word = re.compile(rf"(?:^|\s)((?:{marker})+)(?=\s|$)")
+    for field in ("author", "editor"):
+        val = e.get(field, "")
+        if not val.strip():
+            continue
+        for tok in re.split(r"\s+and\s+", val.replace("\n", " ")):
+            tok = tok.strip()
+            if not tok or tok.startswith("{"):
+                continue
+            if glued.search(tok) or bare_word.search(tok):
+                fixed = bare_word.sub("", strip.sub("", tok)).strip()
+                rep.add(Severity.WARN, e, f"{field} name {tok!r} contains a digit or "
+                        "footnote marker (likely a stray year or affiliation "
+                        "superscript); it deviates from the real name",
+                        category="author_format", field=field,
+                        suggested={"field": field, "from": tok, "to": fixed})
 
 
 @rule
@@ -583,17 +775,74 @@ def arxiv_consistency(e, rep):
                     category="identifier_format")
     if "arxiv" in j.lower() and not re.match(r"^arXiv:\d{4}\.\d{4,5}$", j.strip()) \
             and not ARXIV_OLD_RE.search(j):
-        # The canonical journal string is the bare 'arXiv:<id>' -- no 'preprint'
-        # word, no surrounding text. When the id is recoverable, the suggested edit
-        # carries the exact before -> after, so the message stays terse and does not
-        # repeat the value/template; otherwise it names the offending value itself.
+        # The arXiv id properly lives in the 'eprint' field, not in 'journal' -- a
+        # bare 'journal={arXiv}' is just a venue label. So only nag about the
+        # 'journal' string when NO arXiv id is recoverable anywhere in the entry
+        # (eprint/doi/url): then the entry is genuinely missing the id and the
+        # journal string is the only place to put it. When the id IS elsewhere, a
+        # plain 'arXiv' label is accepted silently.
+        id_url = extract_arxiv_id(e.get("url", ""))
         if id_journal:
+            # The journal string itself carries an id but in a non-canonical wrapper
+            # ('arXiv preprint arXiv:2304.14360'): suggest the bare canonical form.
             rep.add(Severity.INFO, e, "arXiv journal field not in canonical form",
                     category="style", field="journal",
                     suggested={"field": "journal", "from": j, "to": f"arXiv:{id_journal}"})
-        else:
+        elif not (id_eprint or id_doi or id_url):
             rep.add(Severity.INFO, e, f"arXiv journal field not in canonical form "
                     f"'arXiv:XXXX.XXXXX': {j!r}", category="style", field="journal")
+
+
+@rule
+def identifier_in_url(e, rep):
+    """Good-practice nudge (note): an identifier sits in the `url` but not in a
+    structured biblatex field. biblatex stores a DOI in `doi` and an arXiv id in
+    `eprint`+`eprinttype={arxiv}` so styles, hyperlinks and tools can use it; an id
+    buried in a free-text url is invisible to them. Deterministic -- it only points
+    at an id already extractable from the url, never a guess -- and note-level, so it
+    teaches the standard without blocking. This is the upstream fix for most
+    doi_available / arXiv-journal findings."""
+    url = e.get("url", "")
+    if not url.strip():
+        return
+    # A DOI in the url but no (non-arXiv) doi field. Its own category (not the
+    # overloaded 'style') so it is independently tunable AND so the online layer can
+    # withdraw it when 'doi_available' reports the SAME DOI (the online finding is
+    # richer -- it confirms the DOI resolved -- so the two should not both show).
+    if not e.get("doi").strip():
+        url_doi = extract_doi_from_url(url)
+        if url_doi:
+            rep.add(Severity.INFO, e, f"DOI {url_doi} is in the url but not in a "
+                    "'doi' field; biblatex stores it in 'doi' so styles and tools can "
+                    "use it", category="identifier_placement", field="doi",
+                    suggested={"field": "doi", "to": url_doi})
+    # An arXiv id in the url but no eprint field.
+    if not e.get("eprint").strip():
+        url_arxiv = extract_arxiv_id(url)
+        if url_arxiv:
+            rep.add(Severity.INFO, e, f"arXiv id {url_arxiv} is in the url but not in "
+                    "an 'eprint' field; biblatex stores it in 'eprint' with "
+                    "'eprinttype={arxiv}' so it is linkable and machine-readable",
+                    category="identifier_placement", field="eprint",
+                    suggested={"field": "eprint", "to": url_arxiv})
+
+
+@rule
+def online_needs_urldate(e, rep):
+    """Good-practice nudge (note): an @online / web-cited entry should carry an
+    `urldate` (access date) -- biblatex recommends it for online sources, and it is
+    the only date a page without a stable date can be pinned to. Fires for @online /
+    @misc / @electronic, or any entry whose only locator is a url (no doi/eprint),
+    when `urldate` is absent. Pure best practice, zero risk -- it asks for a field,
+    never guesses one."""
+    if e.get("urldate").strip() or not e.get("url").strip():
+        return
+    online_type = e.etype in ("online", "electronic", "www", "misc")
+    only_locator = not (e.get("doi").strip() or e.get("eprint").strip())
+    if online_type or only_locator:
+        rep.add(Severity.INFO, e, "online/url-cited entry has no 'urldate' (access "
+                "date); biblatex recommends one for online sources",
+                category="style", field="urldate")
 
 
 @rule

@@ -25,6 +25,10 @@ class Record:
     authors_display: list = field(default_factory=list)
     given: dict = field(default_factory=dict)      # surname -> first given token
     year: object = None                            # int, or None if unknown
+    # arXiv-only: the year of the LATEST version (vN), when it differs from `year`
+    # (which is v1's year). Lets the comparison treat a bib year that matches any
+    # version in [year, updated_year] as a version-pinning note, not a wrong year.
+    updated_year: object = None
     volume: str = ""
     number: str = ""
     pages: str = ""
@@ -32,6 +36,10 @@ class Record:
     journal: str = ""
     abstract: str = ""
     doi: str = ""                                  # a DOI the record itself carries
+    # The work's document type when the source reports it (INSPIRE: 'thesis',
+    # 'proceedings', 'article', ...). Lets the entry-type check confirm e.g. a
+    # @article that is really a thesis. Empty when the source does not report it.
+    document_type: str = ""
     # arXiv-only: the published version it links to, when one exists.
     published_doi: str = ""
     journal_ref: str = ""

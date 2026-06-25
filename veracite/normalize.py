@@ -193,12 +193,41 @@ def _split_on_and(field):
     return out
 
 
+# A truncation marker glued to the END of an author field rather than written as a
+# separate '... and others' token: a literal 'et al.' or a bare 'al.' (the user
+# dropped the 'et'). It rides on the last real author's token ('Pedram Roushan al.'),
+# so without stripping it 'al.' becomes a phantom surname and misfires as a
+# metadata_mismatch. Matched case-insensitively, with a LaTeX tie or run-together
+# form ('et~al.', 'et.al.', 'etal'), at the very end of a token.
+_TAIL_ETAL_RE = re.compile(r"[\s,]+(?:et[\s~.]*)?al\.?$", re.I)
+
+
+def has_etal_marker(field):
+    """True when the field carries a MALFORMED truncation: a literal 'et al.' (any
+    written form) or a bare trailing 'al.' with the 'et' dropped. These are the
+    WARN cases (a rendering baked into the data), distinct from the valid
+    'and others' marker."""
+    return bool(_TAIL_ETAL_RE.search(field)) \
+        or bool(re.search(r"\bet[\s~.]+al\.?", field, re.I))
+
+
+def is_truncated(field):
+    """True when an author/editor field is truncated by ANY completeness marker:
+    the valid 'and others' sentinel, a literal 'et al.', or a bare trailing 'al.'.
+    The single predicate every layer shares so 'truncated' means the same thing in
+    the rule, the record comparison, and the cross-source check."""
+    return "others" in field.lower() or has_etal_marker(field)
+
+
 def _author_tokens(field):
     """Yield the individual author strings of an author field, skipping the
-    'others' sentinel and collaboration tokens (split on ' and ' outside braces)."""
+    'others' sentinel and collaboration tokens (split on ' and ' outside braces).
+    A trailing truncation marker ('et al.' / bare 'al.') glued to a token is
+    stripped so it is not mistaken for a surname; a token that is ONLY the marker
+    is dropped like 'others'."""
     for a in _split_on_and(field):
-        a = a.strip()
-        if not a or a.lower() == "others" or is_collaboration(a):
+        a = _TAIL_ETAL_RE.sub("", a.strip()).strip()
+        if not a or a.lower() in ("others", "et", "al", "al.") or is_collaboration(a):
             continue
         yield a
 
@@ -266,6 +295,19 @@ def norm_pages(p):
         return m.group(1)
     p = p.replace("–", "-").replace("—", "-")
     return re.sub(r"-+", "-", p).replace(" ", "").strip()
+
+
+def biblatex_pages(p):
+    """The biblatex-canonical written form of a page value, for a SUGGESTED edit (a
+    value the consumer will paste into the .bib). A range uses the '--' separator
+    (biblatex renders it as an en-dash); a single page or article number is left as
+    is. Registries return '920-926' with a single hyphen, but the style rule treats
+    a single hyphen as non-canonical -- so a suggestion must hand back '920--926',
+    not a value that would itself trip the dash-style check."""
+    norm = norm_pages(str(p or ""))
+    if re.match(r"^\d+-\d+$", norm):
+        return norm.replace("-", "--")
+    return norm
 
 
 def extract_arxiv_id(*values):
@@ -363,3 +405,50 @@ def bare_doi(doi):
     may write 'https://doi.org/10.x/...'), and unescape BibTeX character escapes
     ('\\_' -> '_'); used for resolution, links and the JSON."""
     return _DOI_TEX_ESCAPE.sub(r"\1", _DOI_URL_PREFIX.sub("", doi))
+
+
+# A DOI embedded in a publisher landing-page URL, e.g.
+# 'iopscience.iop.org/article/10.1088/2515-7647/acb57b' or
+# 'nature.com/articles/...' (no DOI) vs 'aps.org/.../10.1103/PRXQuantum.5.010328'.
+# The suffix runs to the next URL delimiter (?#) or trailing slash/space; a final
+# '/' or sentence punctuation is trimmed. Distinct from DOI_RE (which only finds the
+# prefix) because here we must also CAPTURE the suffix and stop it at URL syntax.
+_DOI_IN_URL_RE = re.compile(r"(10\.\d{4,9}/[^\s?#]+)", re.I)
+
+
+def extract_doi_from_url(*values):
+    """A DOI mined from a URL/note string (publisher landing pages carry the DOI in
+    the path), or ''. Returned only when it is a complete, DOI-shaped value, so a
+    fragment never resolves. The FIRST well-formed DOI across the given values wins.
+    Used as a last resort when the entry records no 'doi' field: a DOI sitting in
+    the url is the canonical identifier and should resolve directly, not via a fuzzy
+    title search."""
+    for v in values:
+        if not v:
+            continue
+        m = _DOI_IN_URL_RE.search(v)
+        if not m:
+            continue
+        # Trim trailing URL/sentence punctuation that is not part of the DOI.
+        cand = bare_doi(m.group(1)).rstrip(").,;'\"/")
+        if DOI_FULL_RE.match(cand):
+            return cand
+    return ""
+
+
+# An INSPIRE-HEP record id in a 'inspirehep.net/literature/<recid>' URL. That recid
+# resolves the full record (incl. document_type) via the INSPIRE API -- the way to
+# verify a thesis/proceedings cited by its INSPIRE page alone (no DOI/arXiv id).
+_INSPIRE_RECID_RE = re.compile(r"inspirehep\.net/(?:literature|record)/(\d+)", re.I)
+
+
+def extract_inspire_recid(*values):
+    """The INSPIRE-HEP record id from an inspirehep.net URL, or '' -- so an entry
+    whose only identifier is its INSPIRE page can still be resolved."""
+    for v in values:
+        if not v:
+            continue
+        m = _INSPIRE_RECID_RE.search(v)
+        if m:
+            return m.group(1)
+    return ""

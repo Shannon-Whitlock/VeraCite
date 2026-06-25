@@ -234,7 +234,9 @@ Checks run in layers, syntax first.
    **confidence** (0–1, a deterministic function of which sources agreed, not a
    model output). **VERIFIED** — the id resolved and the first author and title
    match; confidence reflects corroboration: **1.0** (clean match across ≥2
-   sources), **~0.95** (clean single source), **0.75** (a field disagrees), **0.70**
+   sources), **~0.95** (clean single source), **0.85** (recovered by a title/author
+   search because the entry carried no identifier — verified, but a weaker basis than
+   an id that resolved), **0.75** (a field disagrees), **0.70**
    (sources disagree, or only arXiv confirms). **UNVERIFIED** — could not confirm:
    no identifier, no record returned, or a DOI that did not resolve (also an error).
    **MISMATCH** — it resolved but the record's identity disagrees (the id may point

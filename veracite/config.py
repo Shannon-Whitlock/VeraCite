@@ -61,7 +61,8 @@ DEFAULT_SETTINGS = {
         "id_resolves_wrong_record": "error",  # doi/arXiv id resolves to a different paper
         "metadata_mismatch": "warning",   # author/title/year/vol/pages/journal differ from record
         "record_unresolved": "warning",   # no authoritative source returned a record for the id
-        "author_completeness": "warning", # author list truncated ('and others' / literal 'et al.')
+        "author_completeness": "warning", # malformed truncation: a literal 'et al.' / bare 'al.'
+        "author_truncated_marker": "note", # valid 'and others' marker; dropped names not stored
         "source_conflict": "warning",     # two authoritative sources disagree on data
         "doi_available": "warning",       # a DOI exists in Crossref but the entry omits it
         "pid_missing": "warning",         # no persistent identifier where one is expected
@@ -70,18 +71,22 @@ DEFAULT_SETTINGS = {
         "llm_ok": "note",                 # LLM rated the citation relevant (4-5/5) -- clean-pass note
         "llm_config": "warning",          # LLM run misconfigured (e.g. unknown provider)
         "preprint_superseded": "warning", # a published version now exists
+        "preprint_version": "note",       # bib year matches an earlier arXiv version
         "related_work": "warning",        # erratum/correction/comment/reply linked
         "duplicate": "error",             # duplicate citation key or DOI (two entries collide)
         "duplicate_field": "note",        # a field repeated within ONE entry, values agree (benign)
         "duplicate_field_conflict": "warning",  # repeated field with DIFFERING values (data silently dropped)
         "dropped_field": "warning",       # a field outside the entry, silently dropped
+        "misplaced_field": "warning",     # a value in the wrong field (e.g. a year in 'journal')
         "missing_field": "error",         # biber-mandatory field absent (e.g. title, journal)
-        "missing_locator": "warning",     # published article lacks volume/pages (valid, but add it)
+        "missing_locator": "note",        # omits volume/pages -- NOT mandatory for @article (advisory)
+        "identifier_placement": "note",   # an id is in the url, not a structured doi/eprint field
         "entrytype_suggestion": "warning",# the @type looks wrong for the entry's data
         "datamodel_recommended": "note",  # mandatory in biblatex's datamodel but biber tolerates absent
         "missing_recommended": "warning", # field biber doesn't require but we advise (year)
         "biblatex_validity": "note",      # field invalid under biblatex datamodel
         "title_case": "note",             # title looks miscased (mostly UPPERCASE)
+        "title_style": "note",            # title matches record but punctuation/wording deviates
         "style": "note",                  # casing, punctuation, dashes, month, etc.
         "citation_order": "note",         # a \cite{} group is not in chronological order
         "encoding": "note",               # non-ASCII / mojibake
@@ -101,6 +106,7 @@ DEFAULT_SETTINGS = {
         "semanticscholar_paper": "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract",
         "inspire_doi": "https://inspirehep.net/api/doi/{doi}",
         "inspire_arxiv": "https://inspirehep.net/api/arxiv/{id}",
+        "inspire_recid": "https://inspirehep.net/api/literature/{recid}",
         "openlibrary_isbn": "https://openlibrary.org/isbn/{isbn}.json",
         "googlebooks_isbn": "https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn}",
     },

@@ -114,7 +114,9 @@ def parse_args(argv):
     ap.add_argument("--llm-provider", metavar="NAME",
                     help=f"LLM backend for --llm (default from settings; "
                          f"known: {', '.join(sorted(LLM_PROVIDERS))})")
-    ap.add_argument("--key", help="restrict online checks to one citation key")
+    ap.add_argument("--key", help="focus on ONE citation key: only it is resolved "
+                    "online and only its findings are printed (the offline checks "
+                    "still run for every entry so file-level rules stay correct)")
     ap.add_argument("--settings", metavar="FILE", help="path to a settings JSON file")
     ap.add_argument("--json", metavar="FILE", help="also write a JSON report")
     ap.add_argument("--delay", type=float, default=None,
@@ -405,7 +407,12 @@ def main(argv=None):
             append_record(args.json, entry_record(
                 e.key, res, st, conf, phases_by_key[e.key],
                 rep.issues_for(e.key), verify=rep.links.get(e.key)))
-        if args.sort == "entry":
+        # --key focuses the REPORT on one entry, not just the online lookup: print
+        # only the selected entry's block (the offline checks still RUN for every
+        # entry -- file-level rules like duplicate detection need them -- but the
+        # other entries are not emitted). Without this, '--key X' dumped all 315
+        # entries' offline findings, burying the one the user asked about.
+        if args.sort == "entry" and (not args.key or e.key == args.key):
             any_emitted |= rep.emit_entry(e, skip_notes=args.skipnotes,
                                           progress=f"[{i:>{width}}/{total}]")
 
@@ -419,9 +426,9 @@ def main(argv=None):
     run_file_rules(entries, rep)
     if args.sort == "severity":
         # Triage view: one global list, errors first, instead of per-entry blocks.
-        any_emitted |= rep.emit_by_severity(skip_notes=args.skipnotes)
+        any_emitted |= rep.emit_by_severity(skip_notes=args.skipnotes, only_key=args.key)
     else:
-        any_emitted |= rep.emit_remaining(skip_notes=args.skipnotes)
+        any_emitted |= rep.emit_remaining(skip_notes=args.skipnotes, only_key=args.key)
 
     # Layer 6: bibliography integrity score + coverage. Rates are computed over the
     # entries actually checked online (in --tex mode, the cited subset; otherwise

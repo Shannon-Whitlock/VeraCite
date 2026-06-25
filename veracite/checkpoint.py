@@ -78,6 +78,27 @@ def requested_phases(online, llm):
 
 # --- per-entry record (the NDJSON line) ------------------------------------
 
+def canonical_record(rec, conf):
+    """The authoritative-record snapshot serialized for one entry, or None. Carries
+    title/year/journal/volume/number/pages always; the AUTHOR list only when the
+    match is identity-certain (confidence >= 0.95). Authors are the identity field,
+    so copying them from a weak (same-title/same-first-author) near-miss would
+    overwrite the entry to a different paper and erase the mismatch signal -- the
+    exact wrong-paper failure VeraCite exists to catch. `authors_complete` flags
+    surname-only data (Crossref) so a consumer never clobbers full given names."""
+    if not rec:
+        return None
+    out = {k: rec.get(k) for k in
+           ("title", "year", "journal", "volume", "number", "pages")}
+    authors = rec.get("authors_display") or []
+    if conf is not None and conf >= 0.95 and authors:
+        given = rec.get("given") or {}
+        out["authors"] = list(authors)
+        full = [g for g in given.values() if len(str(g).replace(".", "").strip()) > 1]
+        out["authors_complete"] = len(full) >= len(authors)
+    return out
+
+
 def entry_record(key, res, status, conf, phases, issues, verify=None):
     """Build the persisted record for one bib entry: a self-contained dict with its
     phases, verification status, identifiers, canonical record, sources and issues.
@@ -95,9 +116,7 @@ def entry_record(key, res, status, conf, phases, issues, verify=None):
                         "arxiv": (res.arxiv_id if res else "") or None,
                         "isbn": (res.isbn if res else "") or None},
         "sources": sorted(res.sources) if res else [],
-        "canonical_record": {k: rec.get(k) for k in
-                             ("title", "year", "journal", "volume",
-                              "number", "pages")} if rec else None,
+        "canonical_record": canonical_record(rec, conf),
         "issues": issues,
     }
 
@@ -311,7 +330,8 @@ def _resolution_from_record(rec):
                             journal=crec.get("journal") or "",
                             volume=crec.get("volume") or "",
                             number=crec.get("number") or "",
-                            pages=crec.get("pages") or "")
+                            pages=crec.get("pages") or "",
+                            authors_display=list(crec.get("authors") or []))
         res.source = (rec.get("sources") or [""])[0]
     for s in (rec.get("sources") or []):
         # Per-source records are not persisted individually; a placeholder keeps

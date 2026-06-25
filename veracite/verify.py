@@ -87,6 +87,17 @@ def classify(e, res, rep):
             conf, detail = 0.70, "right paper, but authoritative sources disagree on a field"
         elif arxiv_only:
             conf, detail = 0.70, "confirmed by arXiv only (author-submitted, advisory)"
+        elif getattr(res, "found_by_search", False):
+            # Recovered by a title+author SEARCH -- the bib carried no usable
+            # identifier, so we found a candidate and confirmed it is self-consistent
+            # (title+author+year agree). That is a weaker basis than an entry that
+            # arrived with its own id and resolved cleanly: the corroboration partly
+            # echoes the query, and the missing PID is itself the defect (flagged by
+            # doi_available). So it verifies, but capped below a clean id-resolved
+            # match -- never the 0.95/1.0 reserved for an entry whose own identifier
+            # checked out.
+            conf = 0.85
+            detail = "recovered by title/author search (no identifier in the entry)"
         else:
             # Clean match: 1.00 with 2+ agreeing authoritative sources, ~0.95 with
             # a single source (consistent, but uncorroborated).
@@ -137,6 +148,18 @@ def pid_check(e, res, rep, delay, timeout, offline):
 
     if is_article_like(e):
         if usable_doi:
+            # The DOI resolved, but if it was MINED FROM THE URL (no 'doi' field),
+            # nudge the author to record it as a proper field -- the url path is not
+            # where a tool or style expects the identifier.
+            if res.doi_from_url:
+                rep.add(Severity.WARN, e, f"the DOI {res.doi_from_url} is in the url "
+                        "but not recorded as a 'doi' field; add it so the identifier "
+                        "is machine-readable", category="doi_available", field="doi",
+                        suggested={"field": "doi", "to": res.doi_from_url})
+                # This is the SAME fact as the offline identifier_placement nudge, but
+                # richer (the DOI is confirmed resolved). Withdraw the nudge so the
+                # entry shows one finding, not two, for the url DOI.
+                rep.withdraw(e.key, "identifier_placement")
             return strongest
         if res.arxiv_id:
             # arXiv-only: the arXiv id is a sufficient PID. (A linked published
@@ -223,9 +246,17 @@ def _search_doi(e, timeout):
     type AND journal-or-year corroboration before recommending a DOI."""
     from .compare import _journal_equiv, _surname_match  # avoid cycle
     from .http import http_get_json
+    from .titles import title_key
     title = clean_tex(e.get("title", "")).strip()
-    if len(title.split()) < 4:
+    nwords = len(title.split())
+    # A 1-2 word title is too generic to search on (the query returns noise and a
+    # short title can collide with a different work). A SHORT (3-word) title is
+    # allowed, but only an EXACT normalized-title match counts for it -- not the
+    # tolerant title_similar overlap -- so 'Universal Quantum Simulators' resolves
+    # while a generic 3-word title cannot ride the looser overlap into a wrong hit.
+    if nwords < 3:
         return ""
+    short_title = nwords < 4
     query = f"{title} {clean_tex(e.get('author', ''))}".strip()
     data, code = http_get_json(endpoint("crossref_search", query=query), timeout)
     if code != 200 or not data:
@@ -236,19 +267,37 @@ def _search_doi(e, timeout):
     bib_year = e.get("year", "").strip()[:4]
     want_journal = e.etype in ("article",)
     for item in (data.get("message", {}).get("items") or [])[:8]:
-        if not title_similar(title, (item.get("title") or [""])[0]):
+        cand_title = (item.get("title") or [""])[0]
+        # An EXACT normalized title match (not just the tolerant overlap) is a much
+        # stronger identity signal than a fuzzy one -- it carries its own
+        # corroboration and lets a published BOOK CHAPTER of a work mistyped as
+        # @article resolve (e.g. a Seminaire Poincare review). A short title ALWAYS
+        # requires exact; a long title may match fuzzily but only the exact case gets
+        # the relaxed type/corroboration treatment below.
+        exact_title = title_key(title) == title_key(cand_title)
+        if short_title:
+            if not exact_title:
+                continue
+        elif not (exact_title or title_similar(title, cand_title)):
             continue
         # First-author surname must match (particle-aware). Skipped for a
         # collaboration author, which has no surname to compare.
         fams = [a.get("family") or a.get("name") or "" for a in (item.get("author") or [])]
         from .normalize import fold_surname
-        if not collab and bib_first and fams \
-                and not _surname_match(bib_first, fold_surname(fams[0])):
+        author_ok = collab or not (bib_first and fams) \
+            or _surname_match(bib_first, fold_surname(fams[0]))
+        if not author_ok:
             continue
         # Type class must agree: a journal article should match a journal-article,
-        # not a posted-content/report/dataset reprint of the same title.
+        # not a posted-content/report/dataset reprint of the same title. A
+        # book-chapter is allowed ONLY for an exact-title match -- it is the
+        # published-book version of a work the bib mistyped as @article, not a
+        # same-title reprint (the entry-type rule separately suggests @incollection).
         ctype = item.get("type", "")
-        if want_journal and ctype not in ("journal-article", "proceedings-article", ""):
+        allowed = ("journal-article", "proceedings-article", "")
+        if exact_title:
+            allowed = allowed + ("book-chapter",)
+        if want_journal and ctype not in allowed:
             continue
         cand_journal = (item.get("container-title") or [""])
         cand_journal = cand_journal[0] if cand_journal else ""
@@ -261,10 +310,75 @@ def _search_doi(e, timeout):
         # Year corroboration tolerates +-1 (online-first vs print/issue year).
         year_ok = bool(bib_year) and bool(cand_year) and cand_year.isdigit() \
             and bib_year.isdigit() and abs(int(bib_year) - int(cand_year)) <= 1
-        # Require corroboration beyond title+author: the journal or the year.
-        if journal_ok or year_ok:
+        # An EXACT title match (+ first author) is its own corroboration when the
+        # bib gives nothing else to check against -- it lets a work the bib left
+        # journal-less and year-shifted resolve (a preprint-year @article that is
+        # really a later book chapter, e.g. Browaeys 'Interacting Cold Rydberg
+        # Atoms'). But it must NOT override a CONTRADICTION: if both sides carry a
+        # year and they disagree by more than the book/preprint gap, two different
+        # same-title works by the same author are possible, so exact-title alone is
+        # not enough -- fall back to requiring real journal/year corroboration.
+        years_known = bool(bib_year) and bool(cand_year) and cand_year.isdigit() \
+            and bib_year.isdigit()
+        year_conflict = years_known and abs(int(bib_year) - int(cand_year)) > 3
+        exact_ok = exact_title and not year_conflict
+        # Require corroboration beyond title+author: journal, year (+-1), or an
+        # exact-title match with no year contradiction. Recovered entries stay capped
+        # at 0.85 (found_by_search), so the caution rides in the confidence.
+        if journal_ok or year_ok or exact_ok:
             return item.get("DOI", "")
     return ""
+
+
+def search_published_version(e, timeout):
+    """For an entry cited as an arXiv PREPRINT, ask Crossref whether a PUBLISHED
+    journal version now exists -- the case arXiv has not yet back-linked in its
+    <arxiv:doi>. Returns (doi, journal, year, title) of a strong journal-article
+    match, or ('', '', '', ''). The title lets the caller show the published title
+    (so the human can confirm the match) -- the same affordance the arXiv-linked
+    path already has.
+
+    The identity gate is title + first-author surname (the same hardened comparison
+    _search_doi uses), but the corroboration differs from the no-DOI search: here
+    the bib's 'journal' is 'arXiv' and its year is the PREPRINT year, so neither
+    helps confirm the PUBLISHED record. Instead we require the hit to be a
+    'journal-article' (NOT 'posted-content', which is the preprint itself) -- a
+    published, citable version of the same title+author is exactly what we are
+    looking for. A near-future year is fine (a preprint published the next year)."""
+    from .compare import _surname_match  # avoid cycle
+    from .http import http_get_json
+    from .normalize import fold_surname
+    title = clean_tex(e.get("title", "")).strip()
+    if len(title.split()) < 4:
+        return "", "", "", ""
+    query = f"{title} {clean_tex(e.get('author', ''))}".strip()
+    data, code = http_get_json(endpoint("crossref_search", query=query), timeout)
+    if code != 200 or not data:
+        return "", "", "", ""
+    bib_first = (split_authors(e.get("author", "")) or [""])[0]
+    collab = is_collaboration(e.get("author", ""))
+    for item in (data.get("message", {}).get("items") or [])[:8]:
+        # Must be a real published article, not the arXiv preprint reposted as
+        # posted-content, and not a report/dataset reprint.
+        if item.get("type") != "journal-article":
+            continue
+        if not title_similar(title, (item.get("title") or [""])[0]):
+            continue
+        fams = [a.get("family") or a.get("name") or "" for a in (item.get("author") or [])]
+        if not collab and bib_first and fams \
+                and not _surname_match(bib_first, fold_surname(fams[0])):
+            continue
+        doi = item.get("DOI", "")
+        journal = (item.get("container-title") or [""])
+        journal = journal[0] if journal else ""
+        year = ""
+        parts = item.get("issued", {}).get("date-parts", [[None]])
+        if parts and parts[0] and parts[0][0]:
+            year = str(parts[0][0])
+        pub_title = (item.get("title") or [""])[0]
+        if doi:
+            return doi, journal, year, pub_title
+    return "", "", "", ""
 
 
 def _search_arxiv_id(e, timeout):

@@ -182,13 +182,13 @@ def test_verify_url_unescapes_bibtex_specials():
 
 
 def test_and_others_flagged_as_truncation():
-    # 'and others' is valid, but it discards the dropped names. For good record-
-    # keeping the full list should live in the .bib (the style truncates), so the
-    # marker is flagged as a truncation -- with the data-loss rationale, not a
-    # "don't use truncation markers" message.
+    # 'and others' is a VALID, deliberate marker (the style renders it 'et al.'), so
+    # it is a NOTE (author_truncated_marker), not a warning -- its own category,
+    # separate from the malformed 'et al.'/'al.' cases. The note still carries the
+    # data-loss rationale (the dropped names are not stored).
     rep, _ = check("style.bib")
     assert any("truncated with 'and others'" in m
-               for m in messages(rep, "author_completeness"))
+               for m in messages(rep, "author_truncated_marker"))
 
 
 def test_literal_et_al_flagged():
@@ -197,6 +197,43 @@ def test_literal_et_al_flagged():
     rep, _ = check("style.bib")
     assert any("literal 'et al.'" in m
                for m in messages(rep, "author_completeness"))
+
+
+def test_bare_al_flagged_as_malformed_etal():
+    # The user dropped the 'et', leaving a bare 'al.' glued to the last author
+    # ('Pedram Roushan al.'). It is a malformed 'et al.' -- a WARN under
+    # author_completeness (NOT the valid 'and others' note).
+    e = _entry("@article{k,\n author={Rajeev Acharya and Pedram Roushan al.},\n"
+               " title={A Result},\n year={2024},\n journal={Nature},\n doi={10.1/x}\n}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    cat = [f for f in rep.findings if f.category == "author_completeness"]
+    assert any("literal 'et al.' (or variant)" in f.message for f in cat)
+    assert cat and all(f.severity is Severity.WARN for f in cat)
+
+
+def test_bare_al_not_read_as_surname():
+    # 'al.' must not leak into the comparison as a phantom surname (the false
+    # 'author(s) in bib not in record: al.' from the Ezratty run). split_authors
+    # strips the trailing marker, so the bib surnames are just the real authors.
+    assert normalize.split_authors("Rajeev Acharya and Pedram Roushan al.") == \
+        normalize.split_authors("Rajeev Acharya and Pedram Roushan")
+    assert "al" not in normalize.split_authors("Karen Wintersperger and Sebastian Luber al.")
+
+
+def test_bare_al_truncation_suppresses_missing_tail():
+    # A bib list ending in 'al.' is truncated: the record's extra authors are the
+    # dropped names, so 'author(s) in record missing from bib' is suppressed exactly
+    # like 'and others'.
+    e = _entry("@article{k,\n author={Acharya, Rajeev and Roushan, Pedram al.},\n"
+               " title={A Result},\n year={2024},\n journal={Nature},\n doi={10.1/x}\n}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["acharya", "roushan", "gidney", "kelly"], "given": {},
+           "title": "A Result", "year": "2024"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    msgs = [f.message for f in rep.findings if f.category == "metadata_mismatch"]
+    assert not any("not in record" in m for m in msgs)       # no phantom 'al.'
+    assert not any("missing from bib" in m for m in msgs)    # truncation, not loss
 
 
 def test_bare_month_macro_not_flagged_in_fixture():
@@ -535,6 +572,32 @@ def test_arxiv_journal_bare_canonical_is_silent():
     assert _arxiv_journal_notes(bib) == []
 
 
+def test_bare_arxiv_journal_silent_when_id_in_eprint():
+    # 'journal={arXiv}' is a valid venue label; the id properly lives in 'eprint'.
+    # When the id is recoverable there, the bare label raises no note.
+    bib = ("@article{k, author={A. One}, title={A Title Long Enough}, year={2022},\n"
+           " eprint={2207.14255}, journal={arXiv}}\n")
+    assert _arxiv_journal_notes(bib) == []
+
+
+def test_bare_arxiv_journal_silent_when_id_in_url():
+    # The Ezratty house style: 'journal={arXiv}' with the id only in the url. Still
+    # recoverable, so no note -- both forms (bare label + url id) are accepted.
+    bib = ("@article{k, author={A. One}, title={A Title Long Enough}, year={2022},\n"
+           " url={https://arxiv.org/abs/2207.14255}, journal={arXiv}}\n")
+    assert _arxiv_journal_notes(bib) == []
+
+
+def test_bare_arxiv_journal_noted_when_no_id_anywhere():
+    # No id in eprint/doi/url -- 'journal={arXiv}' is the only place an id could go,
+    # so the entry is genuinely unidentifiable and the note stands.
+    bib = ("@article{k, author={A. One}, title={A Title Long Enough}, year={2022},\n"
+           " journal={arXiv}}\n")
+    notes = _arxiv_journal_notes(bib)
+    assert len(notes) == 1
+    assert "arXiv:XXXX.XXXXX" in notes[0].message
+
+
 def test_clean_tex_decodes_entities_and_tex_amp():
     assert normalize.clean_tex("Science &amp; Justice") == normalize.clean_tex("Science \\& Justice")
 
@@ -562,6 +625,107 @@ def _entry(bib):
 
 def _sev_by_cat(rep, cat):
     return [f.severity for f in rep.findings if f.category == cat]
+
+
+def test_marker_in_author_name_flagged_offline():
+    # A digit or footnote symbol glued to a name ('Cohen1', 'Smith*') is a stray
+    # affiliation superscript -- a WARN deviation, with the marker stripped in the
+    # suggested fix. Offline (no record needed).
+    from veracite.report import Severity
+    for au, fixed in [("Sam R. Cohen1 and Jeff D. Thompson", "Sam R. Cohen"),
+                      ("Smith*, J. and Lee, K.", "Smith, J."),
+                      # a stray YEAR as a standalone token ('David Weiss 2017').
+                      ("David Weiss 2017", "David Weiss")]:
+        e = _entry("@article{k, author={%s}, title={T}, journal={J}, year={2020}}\n" % au)
+        rep = Report(color=False)
+        run_static([e], rep)
+        af = [f for f in rep.findings if f.category == "author_format"
+              and "footnote marker" in f.message]
+        assert af, au
+        assert af[0].severity is Severity.WARN
+        assert af[0].suggested["to"] == fixed
+
+
+def test_clean_names_not_flagged_as_marker():
+    # Normal names, a brace-protected collaboration, and punctuation in a name
+    # (apostrophe, hyphen) must NOT trip the marker check.
+    for au in ["Sam R. Cohen and Jeff D. Thompson", "{Google Quantum AI 2}",
+               "Anne-Marie O'Brien and J. Smith"]:
+        e = _entry("@article{k, author={%s}, title={T}, journal={J}, year={2020}}\n" % au)
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any("footnote marker" in f.message for f in rep.findings), au
+
+
+def test_author_name_deviation_from_record_flagged():
+    # ONLINE: an author folds-equal to the record (so it IS the right person) but its
+    # written form deviates by more than accent/case ('Cohen1' vs record 'Cohen') ->
+    # a metadata_mismatch WARN with the record's clean name suggested. Accent/case
+    # differences alone must NOT trip it.
+    e = _entry("@article{k, author={Sam R. Cohen1 and J. Thompson}, title={T},\n"
+               " year={2021}, doi={10.1/x}}\n")
+    rec = {"authors": ["cohen", "thompson"], "given": {},
+           "authors_display": ["Cohen", "Thompson"], "title": "T", "year": 2021}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    dev = [f for f in rep.findings if "author name differs from the record" in f.message]
+    assert dev and dev[0].suggested == {"field": "author", "from": "Cohen1", "to": "Cohen"}
+
+    # Control: an accented record form vs an ASCII bib form is NOT a deviation.
+    e2 = _entry("@article{k, author={C. Holzl}, title={T}, year={2024}, doi={10.1/x}}\n")
+    rec2 = {"authors": ["holzl"], "given": {}, "authors_display": ["Hölzl"],
+            "title": "T", "year": 2024}
+    rep2 = Report(color=False)
+    record.compare_against_record(e2, rec2, "crossref", rep2)
+    assert not any("author name differs" in f.message for f in rep2.findings)
+
+
+def test_given_name_miscapitalization_flagged():
+    # A given name that matches the record case-INSENSITIVELY but deviates in case
+    # ('VIncent' vs record 'Vincent') is a transcription typo, flagged toward the
+    # record's form. Legitimate camelCase names (McDonald) are NOT flagged.
+    e = _entry("@article{k, author={VIncent E. Elfving and Alice Smith}, title={T},\n"
+               " year={2024}, doi={10.1/x}}\n")
+    rec = {"authors": ["elfving", "smith"], "authors_display": ["Elfving", "Smith"],
+           "given": {"elfving": "Vincent", "smith": "Alice"}, "title": "T", "year": 2024}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    mc = [f for f in rep.findings if "miscapitalized" in f.message]
+    assert mc and mc[0].suggested == {"field": "author", "from": "VIncent", "to": "Vincent"}
+
+    # Control: a legitimate camelCase given name vs the record's lower-cased form is
+    # NOT flagged as a typo.
+    e2 = _entry("@article{k, author={DeWitt Jones}, title={T}, year={2024}, doi={10.1/x}}\n")
+    rec2 = {"authors": ["jones"], "authors_display": ["Jones"],
+            "given": {"jones": "Dewitt"}, "title": "T", "year": 2024}
+    rep2 = Report(color=False)
+    record.compare_against_record(e2, rec2, "crossref", rep2)
+    assert not any("miscapitalized" in f.message for f in rep2.findings)
+
+
+def test_title_punctuation_deviation_nudged():
+    # The title matches the record as the same work (folds equal) but its punctuation
+    # deviates ('open source' vs record 'open-source') -> a NOTE nudging toward the
+    # record's canonical form. A casing-only difference is NOT a title_style finding.
+    from veracite.report import Severity
+    e = _entry("@article{k, author={A, B},\n"
+               " title={Pulser: An open source package for atom arrays}, year={2022}, doi={10.1/x}}\n")
+    rec = {"authors": ["a"], "given": {}, "authors_display": ["A"],
+           "title": "Pulser: An open-source package for atom arrays", "year": 2022}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    ts = [f for f in rep.findings if f.category == "title_style"]
+    assert ts and ts[0].severity is Severity.INFO
+    assert ts[0].suggested["to"] == "Pulser: An open-source package for atom arrays"
+
+    # Control: a pure casing difference (same punctuation) is NOT a title_style note.
+    e2 = _entry("@article{k, author={A, B}, title={quantum computing with atoms},\n"
+                " year={2020}, doi={10.1/x}}\n")
+    rec2 = {"authors": ["a"], "given": {}, "authors_display": ["A"],
+            "title": "Quantum Computing with Atoms", "year": 2020}
+    rep2 = Report(color=False)
+    record.compare_against_record(e2, rec2, "crossref", rep2)
+    assert not any(f.category == "title_style" for f in rep2.findings)
 
 
 def test_et_al_marker_not_read_as_mixed_author_format():
@@ -651,12 +815,12 @@ def test_and_others_withdrawn_when_record_has_no_more_authors():
                " pages={1},\n doi={10.1/x}\n}\n")
     rep = Report(color=False)
     run_static([e], rep)
-    assert any(f.category == "author_completeness" for f in rep.findings)
+    assert any(f.category == "author_truncated_marker" for f in rep.findings)
     rec = {"authors": ["lhcbcollaboration"], "given": {}, "title": "A Result",
            "year": "2020"}
     record.compare_against_record(e, rec, "crossref", rep)
     # supersession is resolved at read time: live_findings() drops it.
-    assert not any(f.category == "author_completeness" for f in rep.live_findings())
+    assert not any(f.category == "author_truncated_marker" for f in rep.live_findings())
 
 
 def test_and_others_kept_when_record_lists_more_authors():
@@ -667,11 +831,11 @@ def test_and_others_kept_when_record_lists_more_authors():
                " pages={1},\n doi={10.1/x}\n}\n")
     rep = Report(color=False)
     run_static([e], rep)
-    assert any(f.category == "author_completeness" for f in rep.findings)
+    assert any(f.category == "author_truncated_marker" for f in rep.findings)
     rec = {"authors": ["smith", "jones", "lee"], "given": {}, "title": "A Result",
            "year": "2020"}
     record.compare_against_record(e, rec, "crossref", rep)
-    assert any(f.category == "author_completeness" for f in rep.findings)
+    assert any(f.category == "author_truncated_marker" for f in rep.findings)
 
 
 def test_truncated_authorlist_skips_given_name_check():
@@ -896,6 +1060,118 @@ def test_analyze_entry_resolves_each_entry_in_order(monkeypatch):
     assert all(results[k].record is not None for k in ("a", "b"))
 
 
+def test_preprint_superseded_found_by_crossref_search(monkeypatch):
+    # arXiv has NOT back-linked a published version (<arxiv:doi> empty), but the
+    # journal version is already in Crossref. The title+author search must find it
+    # and emit preprint_superseded with the published DOI -- the Kim2025f case.
+    from veracite import verify
+    arx = {"authors": ["kim"], "authors_display": ["Kim"], "given": {},
+           "title": "Blinking optical tweezers for atom rearrangements",
+           "year": 2025, "journal": "arXiv", "published_doi": "", "journal_ref": ""}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    monkeypatch.setattr(verify, "search_published_version",
+                        lambda e, timeout: ("10.1002/qute.202500531",
+                                            "Advanced Quantum Technologies", "2025",
+                                            "Blinking optical tweezers for atom rearrangements"))
+    e = _entry("@article{Kim2025f, author={Kangjin Kim and Jaewook Ahn},\n"
+               " title={Blinking optical tweezers for atom rearrangements},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2502.04612}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    sup = [f for f in rep.findings if f.category == "preprint_superseded"]
+    assert sup and "10.1002/qute.202500531" in sup[0].message
+    # The published TITLE is shown too (so a human can confirm the match), same as
+    # the arXiv-linked path -- not just a bare DOI.
+    assert "Blinking optical tweezers" in sup[0].message
+    assert sup[0].suggested == {"field": "doi", "to": "10.1002/qute.202500531"}
+
+
+def test_preprint_not_superseded_when_no_crossref_match(monkeypatch):
+    # No published version anywhere: arXiv has none and the Crossref search comes up
+    # empty -- so NO preprint_superseded finding (no false positive).
+    from veracite import verify
+    arx = {"authors": ["kim"], "authors_display": ["Kim"], "given": {},
+           "title": "A Preprint Only Title", "year": 2025, "journal": "arXiv",
+           "published_doi": "", "journal_ref": ""}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    monkeypatch.setattr(verify, "search_published_version", lambda e, timeout: ("", "", "", ""))
+    e = _entry("@article{k, author={Kim, K.}, title={A Preprint Only Title},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2502.04612}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    assert not any(f.category == "preprint_superseded" for f in rep.findings)
+
+
+def test_preprint_superseded_suppressed_when_entry_already_cites_published_doi(monkeypatch):
+    # The entry ALREADY cites the published version (journal DOI) and just keeps the
+    # arXiv id in eprint -- best practice. arXiv links that very DOI as the published
+    # version, but there is nothing to supersede: the entry cites the version of
+    # record. So NO preprint_superseded finding (the false positive the fixed file
+    # exposed -- a corrected entry told to make a fix it already made).
+    pub = {"authors": ["jaksch"], "authors_display": ["Jaksch"], "given": {},
+           "title": "Entanglement of Atoms", "year": 1999, "journal": "Physical Review Letters",
+           "volume": "82", "pages": "1975-1978", "abstract": "x"}
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (pub, 200))
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    # If fetch_arxiv were consulted it would offer a published version -- it must NOT
+    # be, because the entry already cites the journal DOI.
+    monkeypatch.setattr(record, "fetch_arxiv",
+                        lambda aid, timeout: {"published_doi": "10.1103/PhysRevLett.82.1975",
+                                              "journal_ref": "", "authors": [], "given": {},
+                                              "title": "", "year": 1999})
+    e = _entry("@article{Jaksch1998, author={D. Jaksch}, title={Entanglement of Atoms},\n"
+               " journal={Physical Review Letters}, year={1999}, volume={82}, pages={1975--1978},\n"
+               " doi={10.1103/PhysRevLett.82.1975}, eprint={quant-ph/9810087}, eprinttype={arxiv}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    assert not any(f.category == "preprint_superseded" for f in rep.findings)
+
+
+def test_placeholder_doi_is_detected():
+    # An APS placeholder DOI (zero volume) deposited before the real one exists must
+    # be recognized so it is never presented as the version to cite.
+    from veracite.record import _is_placeholder_doi
+    assert _is_placeholder_doi("10.1103/PhysRevA.00.002400")
+    assert _is_placeholder_doi("10.1103/PhysRevLett.00.000000")
+    assert not _is_placeholder_doi("10.1103/PhysRevA.109.052425")   # real
+    assert not _is_placeholder_doi("10.1038/s41586-024-08449-y")     # non-APS
+
+
+def test_preprint_superseded_falls_back_to_journal_ref_on_placeholder_doi(monkeypatch):
+    # arXiv links a PLACEHOLDER published DOI (PhysRevA.00.002400) but ALSO gives a
+    # correct journal_ref. The finding must use the journal_ref text and carry NO
+    # 'suggested' DOI -- never present the non-resolving placeholder (the Zemlevskiy
+    # case).
+    arx = {"published_doi": "10.1103/PhysRevA.00.002400",
+           "journal_ref": "Phys. Rev. A 109, 052425 (2024)",
+           "authors": ["zemlevskiy"], "authors_display": ["Zemlevskiy"], "given": {},
+           "title": "Optimization of Algorithmic Errors", "year": 2024, "journal": "arXiv"}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    # fetch_crossref must NOT be called for the placeholder (it is dropped first); if
+    # it were, return None to ensure we still don't surface the bad DOI.
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (None, 404))
+    e = _entry("@article{Zem2024, author={Zemlevskiy, N}, title={Optimization of Algorithmic Errors},\n"
+               " year={2024}, journal={arXiv}, url={https://arxiv.org/abs/2308.02642}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    sup = [f for f in rep.findings if f.category == "preprint_superseded"]
+    assert sup, "should still flag the superseding journal_ref"
+    assert "Phys. Rev. A 109, 052425" in sup[0].message
+    assert "PhysRevA.00" not in sup[0].message            # the placeholder is gone
+    assert sup[0].suggested is None                        # journal_ref is not applyable
+
+
 # --- month rule: bare macro is canonical, braced/spelled-out is flagged ----
 
 def _ARTICLE(month):
@@ -1005,22 +1281,209 @@ def test_article_date_counts_as_year():
 
 
 def test_incomplete_article_still_flagged():
-    # Missing volume/pages on a published article is a locator warning, not an
-    # invalid-BibTeX error -- it lives in its own 'missing_locator' category at
-    # WARN, so a clean modern bibliography is never reported as broken.
+    # Missing volume/pages on a published article is purely advisory: NOT mandatory
+    # for @article in the biblatex datamodel (author/journaltitle/title) or BibTeX,
+    # so it is a NOTE in its own 'missing_locator' category -- never an error, and
+    # never a warning, so a clean modern bibliography is not buried in warnings.
     entries, _ = parse_bib("@article{k, author={A. B}, title={T}, year={2020}, journal={J}}")
     rep = Report(color=False)
     run_static(entries, rep)
     loc = [f for f in rep.findings if f.category == "missing_locator"]
     msgs = [f.message for f in loc]
     assert any("volume" in m for m in msgs) and any("pages" in m for m in msgs)
-    assert all(f.severity is Severity.WARN for f in loc)
+    assert all(f.severity is Severity.INFO for f in loc)
     # and it must NOT be escalated to an error-level missing_field
     assert not [f for f in rep.findings if f.category == "missing_field"]
 
 
+def test_missing_locator_superseded_by_parity_when_record_has_the_value():
+    # When the resolved record supplies the locator, parity_suggestion names the
+    # exact value to add ('volume 638'); the generic missing_locator note would
+    # state the same fact twice, so it is withdrawn -- one finding per fact.
+    e = _entry("@article{k, author={A, B}, title={A Title}, year={2024}, journal={Nature}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "missing_locator" for f in rep.findings)   # emitted offline
+    rec = {"authors": ["a"], "given": {}, "title": "A Title", "year": 2024,
+           "volume": "638", "pages": "920-926"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    # parity names the values; missing_locator is withdrawn (not in live findings).
+    live = rep.live_findings()
+    assert any(f.category == "parity_suggestion" for f in live)
+    assert not any(f.category == "missing_locator" for f in live)
+
+
+def test_parity_suggestion_carries_structured_value():
+    # Rec #3: a parity note carries the value to add as a structured {field, to}
+    # patch, so a consumer applies it from the finding alone.
+    e = _entry("@article{k, author={A, B}, title={A Title}, year={2024}, journal={Nature}}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["a"], "given": {}, "title": "A Title", "year": 2024,
+           "volume": "638", "number": "8052", "pages": "920-926"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    par = {f.message: f.suggested for f in rep.findings if f.category == "parity_suggestion"}
+    assert any(s == {"field": "volume", "to": "638"} for s in par.values())
+    # A page RANGE is suggested in biblatex form ('--'), not the registry's single
+    # hyphen, so an applied suggestion does not itself trip the dash-style check.
+    assert any(s == {"field": "pages", "to": "920--926"} for s in par.values())
+
+
+def test_pages_mismatch_suggested_in_biblatex_dash_form():
+    # metadata_mismatch on pages also hands back the '--' form.
+    from veracite.normalize import biblatex_pages
+    assert biblatex_pages("920-926") == "920--926"
+    assert biblatex_pages("123") == "123"          # single page unchanged
+    e = _entry("@article{k, author={A, B}, title={T}, year={2024}, journal={J},\n"
+               " pages={920--927}, doi={10.1/x}}\n")
+    rec = {"authors": ["a"], "given": {}, "title": "T", "year": 2024, "pages": "920-926"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    pg = [f for f in rep.findings if f.suggested and f.suggested.get("field") == "pages"]
+    assert pg and pg[0].suggested["to"] == "920--926"
+
+
+def test_mangled_markup_title_suggestion_withheld():
+    # Rec #4: the record title contains MathML, AND the bib's PROSE differs from it
+    # (a real word difference, bib has no LaTeX math). The clean parts are still
+    # compared so the finding fires, but NO 'suggested' patch is emitted (never offer
+    # the mangled/stripped value) and the message says 'verify manually'.
+    e = _entry("@article{k, author={Huie, W}, title={Detection of 171Yb Atoms},\n"
+               " year={2023}, doi={10.1/x}}\n")
+    rec = {"authors": ["huie"], "given": {},
+           "title": "Readout of <mml:math><mml:mn>171</mml:mn></mml:math> Yb Atoms",
+           "year": 2023}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    tit = [f for f in rep.findings if f.category == "metadata_mismatch" and "title" in f.message]
+    assert tit and all(f.suggested is None for f in tit)        # never a mangled 'to'
+    assert any("verify" in f.message and "manually" in f.message for f in tit)
+
+
+def test_bib_latex_math_matching_record_mathml_is_silent():
+    # The bib already carries the math in proper LaTeX '$...$' and the prose matches
+    # the record's MathML title once math is stripped from both -- the bib title is
+    # already correct, so NO title finding at all (LaTeX-vs-MathML is a registry
+    # serialization artifact, not a defect).
+    e = _entry("@article{k, author={Huie, W},\n"
+               " title={Repetitive Readout of Nuclear Spin Qubits in ${}^{171}$Yb Atoms},\n"
+               " year={2023}, doi={10.1/x}}\n")
+    rec = {"authors": ["huie"], "given": {},
+           "title": "Repetitive Readout of Nuclear Spin Qubits in "
+                    "<mml:math><mml:mn>171</mml:mn></mml:math> Yb Atoms", "year": 2023}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any("title" in f.message.lower() for f in rep.findings)
+
+
+def test_clean_title_mismatch_still_suggests():
+    # Control for Rec #4: a normal (non-markup) record title still carries the patch.
+    e = _entry("@article{k, author={A, B}, title={Old Title Words Here}, year={2024}, doi={10.1/x}}\n")
+    rec = {"authors": ["a"], "given": {}, "title": "New Title Words Here", "year": 2024}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    tit = [f for f in rep.findings if f.category == "metadata_mismatch" and "title" in f.message]
+    assert tit and any(f.suggested and f.suggested.get("to") == "New Title Words Here" for f in tit)
+
+
+def test_canonical_record_authors_gated_by_confidence():
+    # Rec #1: the author list is serialized ONLY at confidence >= 0.95 (identity-
+    # certain). At a weak 0.70 match it is withheld -- copying it could converge on
+    # a wrong reference.
+    from veracite.checkpoint import canonical_record
+    rec = {"title": "T", "year": 2024, "journal": "J", "authors_display": ["Smith", "Jones"],
+           "given": {"smith": "Alice", "jones": "Bob"}}
+    high = canonical_record(rec, 0.95)
+    assert high.get("authors") == ["Smith", "Jones"]
+    low = canonical_record(rec, 0.70)
+    assert "authors" not in low                      # withheld at weak confidence
+    assert low.get("title") == "T"                   # non-identity fields still present
+
+
+def test_canonical_record_authors_complete_flag():
+    # Rec #1: authors_complete=False when the source gives surnames only (Crossref),
+    # so a consumer never overwrites full given names with surname-only data.
+    from veracite.checkpoint import canonical_record
+    surnames_only = {"title": "T", "authors_display": ["Smith", "Jones"], "given": {}}
+    out = canonical_record(surnames_only, 1.0)
+    assert out["authors"] == ["Smith", "Jones"]
+    assert out["authors_complete"] is False
+    full = {"title": "T", "authors_display": ["Smith", "Jones"],
+            "given": {"smith": "Alice", "jones": "Bob"}}
+    assert canonical_record(full, 1.0)["authors_complete"] is True
+
+
+def test_url_identifier_nudge():
+    # Rec N1: an id in the url but not a structured field -> a note that teaches the
+    # biblatex field, with a structured patch. Both DOI and arXiv forms.
+    e = _entry("@article{k, author={A. One}, title={A Title Long Enough}, year={2024},\n"
+               " url={https://iopscience.iop.org/article/10.1088/2515-7647/acb57b}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    notes = [f for f in rep.findings if "is in the url but not" in f.message]
+    assert any(f.suggested == {"field": "doi", "to": "10.1088/2515-7647/acb57b"} for f in notes)
+
+    e2 = _entry("@article{k2, author={A. One}, title={A Title Long Enough}, year={2024},\n"
+                " url={https://arxiv.org/abs/2304.14360}, journal={arXiv}}\n")
+    rep2 = Report(color=False)
+    run_static([e2], rep2)
+    assert any(f.suggested == {"field": "eprint", "to": "2304.14360"}
+               for f in rep2.findings if "is in the url but not" in f.message)
+
+
+def test_urldate_nudge_for_online_entry():
+    # Rec N3: an @online (or url-only) entry with no urldate gets a note.
+    e = _entry("@online{k, author={Pasqal}, title={Roadmap}, year={2025},\n"
+               " url={https://pasqal.com/newsroom/x}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "style" and "urldate" in f.message for f in rep.findings)
+    # A normal article with a doi (not url-only) does NOT get the nudge.
+    e2 = _entry("@article{k2, author={A}, title={T}, journal={J}, year={2020},\n"
+                " volume={1}, pages={1}, doi={10.1/x}}\n")
+    rep2 = Report(color=False)
+    run_static([e2], rep2)
+    assert not any("urldate" in f.message for f in rep2.findings)
+
+
 def test_missing_title_still_flagged_everywhere():
     assert any("title" in m for m in _missing("@online{k, url={http://x}, year={2020}}"))
+
+
+def test_whitespace_only_mandatory_field_is_missing():
+    # A mandatory field that is only braces/whitespace ('title={{ }}') is EMPTY even
+    # though it is a non-empty string -- it must be flagged as missing, not pass as
+    # present (the González-Cuadra2023 case). A real brace-wrapped title is fine.
+    e = _entry("@article{k, author={A. B}, title={{ }}, journal={J}, year={2020}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "missing_field" and "title" in f.message for f in rep.findings)
+    # Control: a legitimately brace-protected title is NOT flagged.
+    e2 = _entry("@article{k, author={A. B}, title={{ZAP}}, journal={J}, year={2020}}\n")
+    rep2 = Report(color=False)
+    run_static([e2], rep2)
+    assert not any(f.category == "missing_field" and "title" in f.message for f in rep2.findings)
+
+
+def test_misplaced_field_journal_and_number():
+    from veracite.report import Severity
+
+    def _mf(bib):
+        e = _entry(bib)
+        rep = Report(color=False)
+        run_static([e], rep)
+        return [f for f in rep.findings if f.category == "misplaced_field"]
+
+    # journal must not be ANY number (a year, or a bare integer) -- the PasqalGoogle
+    # case had journal={2024}.
+    f = _mf("@article{k, author={A}, title={T}, journal={2024}, year={}}\n")
+    assert f and f[0].severity is Severity.WARN and f[0].suggested == {"field": "year", "to": "2024"}
+    assert _mf("@article{k, author={A}, title={T}, journal={5}, year={2020}}\n")
+    # number must not be a YEAR (but a normal issue/article number is fine).
+    assert _mf("@article{k, author={A}, title={T}, journal={J}, number={2024}, year={2024}}\n")
+    # Controls: a real journal name and a real issue/article number are clean.
+    assert not _mf("@article{k, author={A}, title={T}, journal={Physical Review A}, "
+                   "volume={5}, number={3}, year={2020}}\n")
+    assert not _mf("@article{k, author={A}, title={T}, journal={J}, number={031320}, year={2024}}\n")
 
 
 def test_thesis_alias_missing_type_is_not_flagged_at_all():
@@ -1190,6 +1653,32 @@ def test_format_suggested_previews_long_values():
     assert "..." in out and len(out) < len(long_to)
 
 
+def test_suggested_pair_keeps_the_differing_word_visible():
+    # Two long titles differing by ONE mid-string word: a naive middle-elision would
+    # hide the change (both halves identical). The diff-aware preview must show the
+    # divergence, so 'from' and 'to' do not render identically.
+    from veracite.report import format_suggested
+    frm = "Zoned Architecture and Parallelizable Compiler for Field Programmable Atom Array"
+    to = "Zoned Architecture and Performant Compiler for Field Programmable Atom Array"
+    out = format_suggested({"field": "title", "from": frm, "to": to})
+    # The two previewed sides must differ (the word that changed is visible).
+    frm_prev, to_prev = out.split(" -> ")
+    assert frm_prev != to_prev
+    assert ("Para" in frm_prev or "Paral" in frm_prev)
+    assert ("Perfo" in to_prev or "Perf" in to_prev)
+
+
+def test_suggested_pair_ignores_brace_wrapper_as_the_difference():
+    # A leading '{' on the bib title vs none on the record must NOT be treated as
+    # the divergence point (index 0), which would defeat the diff-aware window.
+    from veracite.report import format_suggested
+    frm = "{ZAP: Zoned Architecture and Parallelizable Compiler for Field Programmable Atom Array}"
+    to = "ZAP: Zoned Architecture and Performant Compiler for Field Programmable Atom Array"
+    out = format_suggested({"field": "title", "from": frm, "to": to})
+    frm_prev, to_prev = out.split(" -> ")
+    assert frm_prev != to_prev   # the real word-diff is visible, not the brace
+
+
 # --- journal matching: standard abbreviations accepted, garble warns -------
 
 def test_iso4_abbreviation_accepted():
@@ -1324,6 +1813,63 @@ def test_cross_source_year_conflict_is_warning():
     b = {"year": 2024, "title": "Same Title", "journal": "J", "volume": "1", "pages": "1"}
     record.compare_sources(_Ent(), {"crossref": a, "inspire": b}, rep)
     assert any(f.category == "source_conflict" and "year" in f.message for f in rep.findings)
+
+
+def test_preprint_year_matching_a_version_is_a_note_not_a_correction():
+    # arXiv v1=2023, v2=2024. The bib says 2024 (it cites v2). The record reports
+    # v1's year (2023). This is NOT a wrong year -- it is a version choice -- so it
+    # is a version-pinning NOTE, with no corrective 'suggested 2024 -> 2023'.
+    e = _entry("@article{Winstone2024, author={Winstone, G.},\n"
+               " title={A Title Long Enough}, year={2024}, eprint={2307.11858},\n"
+               " journal={arXiv}}\n")
+    rec = {"authors": ["winstone"], "given": {}, "title": "A Title Long Enough",
+           "year": 2023, "updated_year": 2024, "journal": "arXiv"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep)
+    yr = [f for f in rep.findings if f.category == "preprint_version"]
+    assert yr and all(f.severity is Severity.INFO for f in yr)
+    assert all(f.suggested is None for f in yr)   # no confident from->to
+    assert any("pin the version" in f.message for f in yr)
+    # And NOT emitted as a corrective metadata_mismatch.
+    assert not any(f.category == "metadata_mismatch" and "year" in f.message
+                   for f in rep.findings)
+
+
+def test_preprint_year_outside_version_span_is_still_a_warning():
+    # A bib year OUTSIDE the version span (2021, when the work has only v1=2023 and
+    # v2=2024) is a genuine mismatch -- the version-aware softening does NOT apply.
+    e = _entry("@article{k, author={A, B}, title={A Title Long Enough}, year={2021},\n"
+               " eprint={2307.11858}, journal={arXiv}}\n")
+    rec = {"authors": ["a"], "given": {}, "title": "A Title Long Enough",
+           "year": 2023, "updated_year": 2024, "journal": "arXiv"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep)
+    yr = [f for f in rep.findings if f.category == "metadata_mismatch" and "year" in f.message]
+    assert yr and all(f.severity is Severity.WARN for f in yr)
+
+
+def test_cross_source_year_conflict_suppressed_for_superseded_preprint():
+    # A superseded preprint is verified against the preprint it cites, so the
+    # preprint-vs-journal year gap (arxiv 2021 vs inspire's journal 2022) is expected
+    # -- already reported as preprint_superseded, not a second source_conflict.
+    rep = Report(color=False)
+    a = {"year": 2021, "title": "Same Title", "journal": "J", "volume": "1", "pages": "1"}
+    b = {"year": 2022, "title": "Same Title", "journal": "J", "volume": "1", "pages": "1"}
+    record.compare_sources(_Ent(), {"arxiv": a, "inspire": b}, rep, skip_year=True)
+    assert not any(f.category == "source_conflict" and "year" in f.message
+                   for f in rep.findings)
+
+
+def test_cross_source_nonyear_conflict_kept_for_superseded_preprint():
+    # skip_year only drops the YEAR field; a real volume/pages conflict between the
+    # two sources still surfaces even for a superseded preprint.
+    rep = Report(color=False)
+    a = {"year": 2021, "title": "Same Title", "journal": "J", "volume": "1", "pages": "1"}
+    b = {"year": 2022, "title": "Same Title", "journal": "J", "volume": "2", "pages": "1"}
+    record.compare_sources(_Ent(), {"arxiv": a, "inspire": b}, rep, skip_year=True)
+    msgs = [f.message for f in rep.findings if f.category == "source_conflict"]
+    assert any("volume" in m for m in msgs)
+    assert not any("year" in m for m in msgs)
 
 
 def test_cross_source_agreement_no_finding():
@@ -1580,6 +2126,7 @@ def test_found_doi_resolves_and_upgrades_status(monkeypatch):
                                          "title": e.get("title"), "year": 2010,
                                          "journal": "Journal of Stats", "abstract": "x"}, 200))
     monkeypatch.setattr(record, "fetch_openalex", lambda doi, t: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
     verify.pid_check(e, res, rep, 0, 1, offline=False)
     assert res.record is not None and res.doi == "10.1111/right"
     # Missing-DOI case: the finding suggests ADDING the found DOI (a `to`, no `from`).
@@ -1615,6 +2162,7 @@ def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
                                          "title": e.get("title"), "year": 2010,
                                          "journal": "Journal of Stats", "abstract": "x"}, 200))
     monkeypatch.setattr(record, "fetch_openalex", lambda doi, t: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
     verify.pid_check(e, res, rep, 0, 1, offline=False)
     assert res.doi == "10.1111/right"
     da = [f for f in rep.findings if f.category == "doi_available"]
@@ -1693,11 +2241,110 @@ def test_search_doi_collaboration_author_skips_surname_gate(monkeypatch):
 
 
 def test_search_doi_still_rejects_wrong_year_and_journal(monkeypatch):
-    # No corroboration: different journal AND a >1y year gap -> reject.
+    # No corroboration AND a >3y year gap: even an exact title cannot vouch for it
+    # (two same-title works by the same author are possible) -> reject.
     hit = _hit(DOI="10.1/nope",
                **{"container-title": ["Totally Other Journal"]},
                issued={"date-parts": [[2001]]})
     assert _search_with(monkeypatch, hit, _SE(year="2007")) == ""
+
+
+def test_search_doi_exact_title_book_chapter_resolves(monkeypatch):
+    # An exact-title + first-author match to a BOOK CHAPTER, with no journal in the
+    # bib and a small (<=3y) preprint->book year gap, resolves -- the Browaeys
+    # 'Interacting Cold Rydberg Atoms' case (a work mistyped @article that is really
+    # a later book chapter). exact title is its own corroboration.
+    e = _SE(title="Interacting Cold Rydberg Atoms A Toy Many Body System",
+            author="Browaeys, Antoine", journal="", year="2013")
+    hit = _hit(DOI="10.1007/978-3-319-14316-3_7", type="book-chapter",
+               title=["Interacting Cold Rydberg Atoms A Toy Many Body System"],
+               author=[{"family": "Browaeys"}],
+               **{"container-title": ["Progress in Mathematical Physics"]},
+               issued={"date-parts": [[2016]]})
+    assert _search_with(monkeypatch, hit, e) == "10.1007/978-3-319-14316-3_7"
+
+
+def test_search_doi_exact_title_rejects_large_year_gap(monkeypatch):
+    # Safety: exact title + author but a >3y year gap is NOT enough -- could be a
+    # different same-title work by the same author. Reject without journal/year.
+    e = _SE(title="Interacting Cold Rydberg Atoms A Toy Many Body System",
+            author="Browaeys, Antoine", journal="", year="2013")
+    hit = _hit(DOI="10.1/other", type="book-chapter",
+               title=["Interacting Cold Rydberg Atoms A Toy Many Body System"],
+               author=[{"family": "Browaeys"}],
+               **{"container-title": ["Some Book"]},
+               issued={"date-parts": [[2003]]})        # 10y gap
+    assert _search_with(monkeypatch, hit, e) == ""
+
+
+def test_search_doi_book_chapter_rejected_when_title_only_fuzzy(monkeypatch):
+    # A book-chapter is allowed ONLY for an EXACT title match; a merely-similar
+    # (fuzzy) title to a book-chapter must still be rejected (the type gate holds).
+    e = _SE(title="A Sufficiently Long Distinct Title Here", year="2007")
+    hit = _hit(DOI="10.1/book", type="book-chapter",
+               title=["A Sufficiently Long Distinct Title Here, Revised Edition"],
+               issued={"date-parts": [[2007]]})
+    assert _search_with(monkeypatch, hit, e) == ""
+
+
+def test_search_doi_short_title_exact_match_resolves(monkeypatch):
+    # A 3-word title (e.g. 'Universal Quantum Simulators') is allowed when it is an
+    # EXACT normalized match, with author + year corroboration -- the Lloyd1996 gap.
+    e = _SE(title="Universal Quantum Simulators", author="Lloyd, Seth",
+            journal="", year="1996")
+    hit = _hit(DOI="10.1126/science.273.5278.1073",
+               title=["Universal Quantum Simulators"],
+               author=[{"family": "Lloyd"}],
+               **{"container-title": ["Science"]},
+               issued={"date-parts": [[1996]]})
+    assert _search_with(monkeypatch, hit, e) == "10.1126/science.273.5278.1073"
+
+
+def test_search_doi_short_title_requires_exact_not_fuzzy(monkeypatch):
+    # For a SHORT title, the tolerant overlap is NOT enough -- only an exact
+    # normalized match counts, so a 3-word title cannot ride fuzzy overlap into a
+    # different work.
+    e = _SE(title="Universal Quantum Simulators", author="Lloyd, Seth",
+            journal="", year="1996")
+    hit = _hit(DOI="10.1/other", title=["Universal Quantum Computers"],  # one word off
+               author=[{"family": "Lloyd"}], issued={"date-parts": [[1996]]})
+    assert _search_with(monkeypatch, hit, e) == ""
+
+
+def test_search_doi_one_and_two_word_titles_rejected(monkeypatch):
+    # 1-2 word titles stay too generic to search on.
+    hit = _hit(title=["Quantum"])
+    assert _search_with(monkeypatch, hit, _SE(title="Quantum")) == ""
+
+
+def test_search_recovered_entry_confidence_capped(monkeypatch):
+    # An entry recovered by title search (no id in the bib) verifies, but at a capped
+    # 0.85 -- below the 0.95 reserved for an entry whose OWN identifier resolved
+    # cleanly (the match partly echoes the query; the missing PID is itself a defect).
+    from veracite import verify, record
+    e = _SE(year="2010")
+    res = record.Resolution()
+    res.found_by_search = True
+    res.record = {"authors": ["gneiting"], "given": {}, "title": e.get("title"),
+                  "year": 2010, "journal": "Journal of Stats"}
+    res.source = "crossref"; res.sources = {"crossref": res.record}
+    rep = Report(color=False)
+    status, conf = verify.classify(e, res, rep)
+    assert status == "VERIFIED" and conf == 0.85
+
+
+def test_id_resolved_entry_keeps_full_confidence(monkeypatch):
+    # Control: the SAME clean record, but NOT found_by_search (the entry carried its
+    # own id), keeps the normal single-source 0.95.
+    from veracite import verify, record
+    e = _SE(year="2010")
+    res = record.Resolution()
+    res.record = {"authors": ["gneiting"], "given": {}, "title": e.get("title"),
+                  "year": 2010, "journal": "Journal of Stats"}
+    res.source = "crossref"; res.sources = {"crossref": res.record}
+    rep = Report(color=False)
+    status, conf = verify.classify(e, res, rep)
+    assert status == "VERIFIED" and conf == 0.95
 
 
 # --- modifications.md regressions -----------------------------------------
@@ -1905,6 +2552,219 @@ def test_article_with_isbn_suggests_incollection():
     assert all(f.severity is Severity.WARN
                for f in rep.findings if f.category == "entrytype_suggestion")
     assert not any("@online" in m for m in msgs)
+
+
+def test_updated_by_relation_reads_DOI_key():
+    # Crossref's `updated-by` block carries the target under the key 'DOI'
+    # (uppercase), not 'id'. Reading 'id' lost the target, so a correction was
+    # parsed but silently dropped. Accept the 'DOI' key.
+    from veracite.sources import _extract_relations
+    msg = {"updated-by": [{"type": "correction", "DOI": "10.1038/s41586-026-10559-8"}]}
+    assert _extract_relations(msg) == [("correction", "10.1038/s41586-026-10559-8")]
+
+
+def test_related_works_checked_on_search_resolved_entry(monkeypatch):
+    # An entry with NO doi field resolves its DOI by search; the correction/erratum
+    # check must still run on it (it did not, so a published correction was missed).
+    from veracite import verify, record as rec_mod
+    rec = {"authors": ["acharya"], "given": {}, "title": "QEC below threshold",
+           "year": 2025, "journal": "Nature", "abstract": "x",
+           "relations": [("correction", "10.1038/s41586-026-10559-8")]}
+    monkeypatch.setattr(verify, "_search_doi", lambda e, t: "10.1038/s41586-024-08449-y")
+    monkeypatch.setattr(rec_mod, "fetch_crossref", lambda d, t: (rec, 200))
+    monkeypatch.setattr(rec_mod, "fetch_openalex", lambda d, t: None)
+    # Stub fetch_related to echo the passed-in relations as (label, target, title)
+    # tuples (its real output shape), so no network is touched.
+    monkeypatch.setattr(rec_mod, "fetch_related",
+                        lambda doi, title, t, relations=None:
+                        [(lbl, tgt, "") for lbl, tgt in (relations or [])])
+    e = _entry("@article{Acharya2024, author={Acharya, R.}, title={QEC below threshold},\n"
+               " journal={Nature}, year={2024}, url={https://www.nature.com/articles/x}}\n")
+    rep = Report(color=False)
+    res = rec_mod.Resolution()
+    verify.pid_check(e, res, rep, 0, 1, offline=False)
+    cor = [f for f in rep.findings if f.category == "related_work"]
+    assert cor and "10.1038/s41586-026-10559-8" in cor[0].message
+
+
+def test_url_doi_nudge_withdrawn_when_doi_available_fires(monkeypatch):
+    # U2: the offline identifier_placement nudge and the online doi_available report
+    # the SAME url DOI; the richer online finding supersedes the nudge so the entry
+    # shows ONE finding, not two.
+    from veracite import verify, record as rec_mod
+    e = _entry("@article{k, author={A, B}, title={A Title}, year={2024}, journal={J},\n"
+               " url={https://iopscience.iop.org/article/10.1088/2515-7647/acb57b}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "identifier_placement" for f in rep.findings)  # offline nudge
+    res = rec_mod.Resolution()
+    res.doi = "10.1088/2515-7647/acb57b"
+    res.doi_from_url = "10.1088/2515-7647/acb57b"
+    verify.pid_check(e, res, rep, 0, 1, offline=False)
+    live = rep.live_findings()
+    assert any(f.category == "doi_available" for f in live)
+    assert not any(f.category == "identifier_placement" for f in live)   # withdrawn
+
+
+def test_doi_mined_from_publisher_url():
+    # A DOI in a publisher landing-page url is the canonical identifier -- extract
+    # it (so the entry resolves against THAT, not a fuzzy title search), but never
+    # from an arxiv url or a press release with no DOI in the path.
+    assert normalize.extract_doi_from_url(
+        "https://iopscience.iop.org/article/10.1088/2515-7647/acb57b") == \
+        "10.1088/2515-7647/acb57b"
+    assert normalize.extract_doi_from_url(
+        "https://journals.aps.org/prxquantum/abstract/10.1103/PRXQuantum.5.010328") == \
+        "10.1103/PRXQuantum.5.010328"
+    # comptes-rendus carries the DOI with a trailing slash -- trimmed.
+    assert normalize.extract_doi_from_url(
+        "https://comptes-rendus.academie-sciences.fr/physique/articles/10.5802/crphys.172/") == \
+        "10.5802/crphys.172"
+    # No DOI in the path (Nature uses an accession slug; a press release has none).
+    assert normalize.extract_doi_from_url(
+        "https://www.nature.com/articles/s41586-024-08449-y") == ""
+    assert normalize.extract_doi_from_url(
+        "https://www.pasqal.com/newsroom/pasqal-releases-2025-roadmap/") == ""
+
+
+def test_inspire_recid_extracted_from_url():
+    # The INSPIRE record id is mined from an inspirehep.net URL so an entry cited by
+    # its INSPIRE page alone (no DOI/arXiv) can be resolved.
+    assert normalize.extract_inspire_recid(
+        "https://inspirehep.net/literature/2101024") == "2101024"
+    assert normalize.extract_inspire_recid(
+        "https://inspirehep.net/record/451647") == "451647"
+    assert normalize.extract_inspire_recid("https://arxiv.org/abs/2401.0001") == ""
+
+
+def test_entry_resolved_via_inspire_recid_typed_as_thesis(monkeypatch):
+    # An @article whose only locator is an INSPIRE page resolves via the recid, and
+    # when INSPIRE reports document_type='thesis' the entry is retyped @thesis (not
+    # the offline '@online' guess) -- the Schymik2022 case.
+    from veracite import record
+    from veracite.models import Record
+    insp = Record(authors=["schymik"], authors_display=["Schymik"], given={},
+                  title="Scaling-up the Tweezer Platform", year=2022,
+                  document_type="thesis")
+    called = {}
+
+    def _fake_inspire(doi=None, arxiv_id=None, recid=None, timeout=20):
+        called["recid"] = recid
+        return insp if recid else None
+    monkeypatch.setattr(record, "fetch_inspire", _fake_inspire)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    e = _entry("@article{Schymik2022, author={Schymik, K},\n"
+               " title={Scaling-up the Tweezer Platform}, year={2022},\n"
+               " url={https://inspirehep.net/literature/2101024}}\n")
+    rep = Report(color=False)
+    res = record.resolve_entry(e, rep, delay=0, timeout=1)
+    assert called.get("recid") == "2101024"
+    assert res.record is not None and res.source == "inspire"
+    et = [f for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert et and "thesis" in et[0].message and "@thesis" in et[0].message
+
+
+def test_article_with_journal_no_volume_is_not_a_web_item():
+    # A real journal article that merely OMITS volume/pages (the Ezratty house
+    # style: journal named, locators left to the record) must NOT be flagged as a
+    # web/press item -- the venue (journal=Nature) is the dispositive signal.
+    e = _entry("@article{Acharya2024, author={Acharya, R.},\n"
+               " title={Quantum error correction}, journal={Nature}, year={2024},\n"
+               " url={https://www.nature.com/articles/s41586-024-08449-y}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert not any(f.category == "entrytype_suggestion" for f in rep.findings)
+    # It still gets a (correct) missing-locator note for the absent volume/pages.
+    assert any(f.category == "missing_locator" for f in rep.findings)
+
+
+def test_article_no_journal_but_url_is_entrytype_not_missing_field():
+    # No journal + a web url (a press release / lecture PDF mis-typed as @article)
+    # is a TYPE problem -- suggest @online/@misc, NOT a missing_field error.
+    e = _entry("@article{QuEra2024, author={QuEra}, title={QuEra's Roadmap},\n"
+               " year={2024}, url={https://www.quera.com/events/roadmap}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    msgs = [f.message for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert any("@online" in m for m in msgs)
+    assert not any(f.category == "missing_field" for f in rep.findings)
+
+
+def test_blog_host_is_web_item_even_with_journal_label():
+    # A Medium blog post cited as @article with journal={Medium} is still a blog
+    # post, not a journal article -- the known blog HOST overrides the venue label
+    # (the Fischer2022 case). A real publisher host is never matched.
+    from veracite.rules import _is_web_source_url
+    e = _entry("@article{Fischer2022, author={Fischer, L},\n"
+               " title={You Can Use Qiskit to Control Cold Atom Systems},\n"
+               " journal={Medium}, year={2022},\n"
+               " url={https://medium.com/qiskit/you-can-use-qiskit-e4eefc7ee266}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "entrytype_suggestion" for f in rep.findings)
+    assert _is_web_source_url("https://www.hpcwire.com/2020/04/23/coldquanta")
+    assert not _is_web_source_url("https://www.nature.com/articles/s41586-024-08449-y")
+
+
+def test_book_url_suggests_book_not_online():
+    # An @article whose url is a publisher book/chapter link (ISBN in the path) is a
+    # book/chapter mis-typed, NOT a web item -- suggest @book/@inbook, not @online.
+    e = _entry("@article{Sibalic2018, author={Sibalic, N}, title={Rydberg Physics},\n"
+               " year={2018},\n"
+               " url={http://iopscience.iop.org/book/978-0-7503-1635-4/chapter/bk978ch1}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    msgs = [f.message for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert any("book" in m and "@online" not in m for m in msgs)
+    assert not any("web or press item" in m for m in msgs)
+
+
+def test_thesis_url_suggests_thesis_not_online():
+    # An @article whose url is a thesis repository (theses.fr) is a thesis mis-typed,
+    # NOT a web item -- suggest @thesis, not @online (the Nguyen2016 case).
+    e = _entry("@article{Nguyen2016, author={Nguyen, T}, title={Toward Rydberg sim},\n"
+               " year={2016}, url={https://www.theses.fr/2016PA066695.pdf}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    msgs = [f.message for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert any("thesis" in m and "@online" not in m for m in msgs)
+    assert not any("web or press item" in m for m in msgs)
+    # An ordinary journal-article url must NOT be mistaken for a thesis.
+    from veracite.rules import _is_thesis_url
+    assert not _is_thesis_url("https://www.nature.com/articles/s41586-024-08449-y")
+    assert not _is_thesis_url("https://journals.aps.org/prl/abstract/10.1103/PhysRevLett.127.050501")
+    assert _is_thesis_url("https://tel.archives-ouvertes.fr/tel-01234567")
+    # An institutional-repository dissertation: the ETD handle and the
+    # 'DISSERTATION.pdf' filename are reliable thesis markers (the Liang2012 case).
+    assert _is_thesis_url("https://repositories.lib.utexas.edu/bitstream/handle/"
+                          "2152/ETD-UT-2012-05-5053/LIANG-DISSERTATION.pdf?sequence=2")
+
+
+def test_entrytype_web_guess_withdrawn_when_resolved_to_journal():
+    # Cohen-Tannoudji case: an @article with only a url (a journal PDF on a personal
+    # site) gets the offline 'web item -> @online' guess, but it RESOLVES to a real
+    # journal record -- the guess is disproved, so it is withdrawn.
+    e = _entry("@article{CT1990, author={Cohen-Tannoudji, C}, title={New Mechanisms},\n"
+               " year={1990}, url={http://www.phys.ens.fr/~cct/articles/pt-43-33-1990.pdf}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "entrytype_suggestion" for f in rep.findings)  # offline guess
+    rec = {"authors": ["cohentannoudji"], "given": {}, "title": "New Mechanisms",
+           "year": 1990, "journal": "Physics Today", "volume": "43"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    # resolved to a real journal -> the web-item guess is withdrawn.
+    assert not any(f.category == "entrytype_suggestion" for f in rep.live_findings())
+
+
+def test_article_no_journal_no_url_is_still_missing_field_error():
+    # No journal AND no url: a genuinely broken @article -- the error stands.
+    e = _entry("@article{broken, author={Doe, J.}, title={Untitled}, year={2024}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    errs = [f for f in rep.findings if f.category == "missing_field"]
+    assert errs and all(f.severity is Severity.ERROR for f in errs)
+    assert not any(f.category == "entrytype_suggestion" for f in rep.findings)
 
 
 def test_aip_journal_doi_not_treated_as_book_series():
@@ -2377,6 +3237,7 @@ def test_arxiv_hit_prefers_published_doi(monkeypatch):
     rep = Report(color=False)
     monkeypatch.setattr(verify, "_search_doi", lambda e, t: "")
     monkeypatch.setattr(verify, "_search_arxiv_id", lambda e, t: "2210.03347")
+    monkeypatch.setattr(rec_mod, "fetch_related", lambda *a, **k: [])
     # arXiv record carries a published DOI; Crossref resolves it.
     monkeypatch.setattr(rec_mod, "fetch_arxiv", lambda i, t: Record(
         authors=["lee"], authors_display=["Lee"], title="A Findable Paper Title Here",
