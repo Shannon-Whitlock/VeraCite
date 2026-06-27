@@ -1,0 +1,70 @@
+% Sample bibliography for trying out VeraCite (used by the web demo).
+%
+% A handful of famous papers across physics and ML, with a few deliberate defects
+% planted so an online run shows what VeraCite catches:
+%   shor1999       -- bib year (1997) disagrees with the record (1999)
+%   maldacena1998  -- Crossref and INSPIRE disagree on year/volume/pages/journal
+%   vaswani2017    -- resolves via its arXiv eprint (no DOI in the entry)
+%   higgs1964      -- a dead, fabricated DOI; VeraCite finds the correct one
+%   nakamura2021   -- a post-2005 article with no findable identifier (UNVERIFIED)
+%
+% Try it:
+%   python -m veracite --bib examples/sample.bib --offline   # static checks only
+%   python -m veracite --bib examples/sample.bib             # + online verification
+
+@article{einstein1935,
+  author  = {Einstein, A. and Podolsky, B. and Rosen, N.},
+  title   = {Can Quantum-Mechanical Description of Physical Reality Be Considered Complete?},
+  journal = {Physical Review},
+  year    = {1935},
+  volume  = {47},
+  pages   = {777--780},
+  doi     = {10.1103/PhysRev.47.777}
+}
+
+@article{shor1999,
+  author  = {Shor, Peter W.},
+  title   = {Polynomial-Time Algorithms for Prime Factorization and Discrete Logarithms on a Quantum Computer},
+  journal = {SIAM Review},
+  year    = {1997},
+  volume  = {41},
+  pages   = {303--332},
+  doi     = {10.1137/S0036144598347011}
+}
+
+@article{maldacena1998,
+  author  = {Maldacena, Juan},
+  title   = {The Large N Limit of Superconformal Field Theories and Supergravity},
+  journal = {Advances in Theoretical and Mathematical Physics},
+  year    = {1998},
+  volume  = {2},
+  pages   = {231--252},
+  doi     = {10.4310/ATMP.1998.v2.n2.a1}
+}
+
+@article{vaswani2017,
+  author = {Vaswani, Ashish and others},
+  title  = {Attention Is All You Need},
+  year   = {2017},
+  eprint = {1706.03762},
+  archivePrefix = {arXiv}
+}
+
+@article{higgs1964,
+  author  = {Higgs, Peter W.},
+  title   = {Broken Symmetries and the Masses of Gauge Bosons},
+  journal = {Physical Review Letters},
+  year    = {1964},
+  volume  = {13},
+  pages   = {508--509},
+  doi     = {10.1103/PhysRevLett.99.999999}
+}
+
+@article{nakamura2021,
+  author  = {Nakamura, Kenji and Rossi, Elena and Patel, Arjun},
+  title   = {Variational Quantum Embeddings for Few-Shot Molecular Property Prediction},
+  journal = {Nature Machine Intelligence},
+  year    = {2021},
+  volume  = {3},
+  pages   = {612--620}
+}

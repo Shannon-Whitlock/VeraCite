@@ -14,12 +14,20 @@ veracite.json
 .vscode/
 .idea/
 *.swp
-# downloaded arXiv corpus -- regenerable via tools/scrape_arxiv_examples.py
-examples/
-# generated run artifacts (the --json report / NDJSON checkpoint)
+# downloaded arXiv corpus (regenerable via examples/scrape_arxiv_examples.py) is
+# ignored, but the small curated sample.bib used by the web demo is tracked.
+# NB: ignore the dir CONTENTS (examples/*), not the dir itself (examples/), so git
+# still descends into it and the negation below can re-include the one tracked file.
+examples/*
+!examples/sample.bib
+# generated run artifacts (the --json report / NDJSON checkpoint, run logs)
 report.json
 *.ndjson
+*.log
 web/counter.txt
 
 # personal Claude Code settings (not committed)
 .claude/settings.local.json
+
+# maintainer-only release notes (not part of the distributed package)
+RELEASING.md

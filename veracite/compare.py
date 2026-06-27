@@ -335,7 +335,11 @@ def _compare_authors(e, rec, source, rep):
             if _given_abbreviates(bg, rg):
                 if bg != rg:
                     abbreviated.append(f"{show(surname)} ({bg!r}->{rg!r})")
-            elif not _is_initial(bg) and deaccent(bg).lower() != deaccent(rg).lower():
+            elif not _is_initial(bg) and _clean_name_key(bg) != _clean_name_key(rg):
+                # Compare via _clean_name_key (the same normalizer the surname-deviation
+                # check uses): deaccent + ligature + hyphen/punctuation folding, so an
+                # ASCII vs Unicode hyphen ('Ida-Marie' vs 'Ida‐Marie' U+2010) or an
+                # accent/ligature difference is not mistaken for a different given name.
                 rep.add(Severity.WARN, e, f"[{source}] given name differs for "
                         f"{show(surname)!r}: bib={bg!r} vs {source}={rg!r}",
                         "record", category="metadata_mismatch")
@@ -450,16 +454,37 @@ def _journal_equiv(a, b):
         return True   # one side known to the table maps onto the other's key
     if _is_iso4_abbrev(a, b) or _is_iso4_abbrev(b, a):
         return True
-    # A registry full name often carries a trailing ':'-delimited subtitle the bib
-    # drops ('Physica D' vs 'Physica D: Nonlinear Phenomena'). The part BEFORE the
-    # colon is the journal's common name, so when one side equals the other's
-    # pre-colon head they denote the same journal. Restricted to a COLON subtitle (not
-    # any prefix), so 'Nature'/'Nature Physics' and 'ApJ'/'ApJL' -- which have no colon
-    # boundary -- are NOT equated.
+    # A registry full name often carries a trailing ':'-subtitle and/or a parenthetical
+    # former name ('Theoretical Chemistry Accounts: Theory, Computation, and Modeling
+    # (Theoretica Chimica Acta)'), while the bib uses the standard ISO-4 abbreviation
+    # of the CORE title ('Theor. Chem. Acc.'). Try the abbreviation against the title
+    # core -- the part before any ':' subtitle or '(' parenthetical -- so a valid
+    # abbreviation of the journal's name still matches. (ISO-4's word-by-word prefix
+    # match keeps this strict; a different journal won't slip through.)
+    core_a, core_b = _journal_core(a), _journal_core(b)
+    if core_a != a or core_b != b:
+        if _is_iso4_abbrev(a, core_b) or _is_iso4_abbrev(core_b, a) \
+                or _is_iso4_abbrev(b, core_a) or _is_iso4_abbrev(core_a, b) \
+                or _journal_key(core_a) == _journal_key(core_b):
+            return True
+    # The part BEFORE a ':' subtitle is the journal's common name, so when one side
+    # equals the other's pre-colon head they denote the same journal. Restricted to a
+    # COLON subtitle (not any prefix), so 'Nature'/'Nature Physics' and 'ApJ'/'ApJL'
+    # -- which have no colon boundary -- are NOT equated.
     head_a, head_b = _journal_key(a.split(":", 1)[0]), _journal_key(b.split(":", 1)[0])
     if ((":" in a) != (":" in b)) and head_a and head_a == head_b and (ka == head_a or kb == head_b):
         return True
     return False
+
+
+def _journal_core(name):
+    """A journal name with a trailing ':'-subtitle and/or a '(...)' parenthetical
+    (a former name / publisher note) removed -- the core title the standard
+    abbreviation is built from. 'Theoretical Chemistry Accounts: Theory, ... (Theoretica
+    Chimica Acta)' -> 'Theoretical Chemistry Accounts'."""
+    core = name.split(":", 1)[0]
+    core = re.sub(r"\([^)]*\)", "", core)
+    return re.sub(r"\s+", " ", core).strip()
 
 
 # --- record comparison + parity --------------------------------------------
@@ -664,18 +689,31 @@ def compare_against_record(e, rec, source, rep):
     rec_journal = (rec.get("journal") or "").strip()
     if e.etype == "article" and rec_journal and "arxiv" not in rec_journal.lower():
         rep.withdraw(e.key, "entrytype_suggestion")
-    # When the resolved record reports a document type (INSPIRE does) that is NOT a
-    # journal article -- a thesis or proceedings -- a @article entry is mis-typed.
-    # Withdraw the offline guess (which may have said '@online') and point at the
-    # correct biblatex type. This is how a thesis cited by its INSPIRE page (no DOI/
-    # arXiv id) gets the right '@thesis' suggestion instead of '@online'.
+    # When the resolved record reports a document type that disagrees with the bib's
+    # entry type, the entry is mis-typed -- the RECORD is authoritative. Two directions:
+    #   * an @article (or @inproceedings) whose record is a thesis / proceedings / book
+    #     chapter / book -> point at the book/thesis/proceedings type;
+    #   * a @book / @incollection / @inbook whose record is a journal article (or a
+    #     proceedings article) -> point at @article / @inproceedings. This catches an
+    #     SEG/conference paper mistyped '@Book' (with a 'journal=' field), which would
+    #     otherwise be mis-reported as 'a book should carry an ISBN'.
+    # Withdraw the offline guess first (it may have said '@online'/'@misc') and emit the
+    # record-grounded suggestion. The exact same-type case (already correct) says nothing.
     doc_type = (rec.get("document_type") or "").lower()
-    if e.etype == "article" and doc_type in ("thesis", "proceedings", "book chapter"):
+    bib_is_articlelike = e.etype in ("article", "inproceedings", "conference")
+    bib_is_booklike = e.etype in ("book", "mvbook", "collection", "incollection", "inbook")
+    if bib_is_articlelike and doc_type in ("thesis", "proceedings", "book chapter", "book"):
         rep.withdraw(e.key, "entrytype_suggestion")
         target = {"thesis": "@thesis", "proceedings": "@inproceedings/@proceedings",
-                  "book chapter": "@incollection"}[doc_type]
+                  "book chapter": "@incollection", "book": "@book"}[doc_type]
         rep.add(Severity.WARN, e, f"[{source}] the record is a {doc_type}, not a "
-                f"journal article -- use {target} instead of @article", "record",
+                f"journal article -- use {target} instead of @{e.etype}", "record",
+                category="entrytype_suggestion", field="journal")
+    elif bib_is_booklike and doc_type in ("journal article", "proceedings"):
+        rep.withdraw(e.key, "entrytype_suggestion")
+        target = "@article" if doc_type == "journal article" else "@inproceedings"
+        rep.add(Severity.WARN, e, f"[{source}] the record is a {doc_type}, not a book "
+                f"-- use {target} instead of @{e.etype}", "record",
                 category="entrytype_suggestion", field="journal")
 
     first_differs = _compare_authors(e, rec, source, rep)

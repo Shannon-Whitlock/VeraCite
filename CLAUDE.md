@@ -1,8 +1,14 @@
-# CLAUDE.md — working on VeraCite
+# CLAUDE.md — the VeraCite contributor charter
 
 VeraCite audits BibTeX/biblatex bibliographies to catch hallucinated, mangled, or
-mis-identified citations before publication. `README.md` is the user-facing doc;
-this is the contract for changing the code.
+mis-identified citations before publication. Three docs, three audiences:
+`README.md` is for users, [`CONTRIBUTING.md`](CONTRIBUTING.md) is the mechanics for
+human contributors (setup, workflow, tests, code style), and **this file is the
+*principles* — the contract for changing the code** that every contributor, human or
+AI, must follow. When a change conflicts with a principle here, the principle wins;
+if the principle itself is wrong, change *it* first, in its own commit, with the
+reasoning. The "stop and flag the trade-offs" steps below are about not over-editing;
+they apply to anyone proposing a change, whether or not an agent is driving.
 
 ## Trust is the #1 priority
 
@@ -10,19 +16,26 @@ Trust is the whole product: one false positive on a clean entry makes the user
 distrust *all* output, so **a false positive is the cardinal sin — prefer silence to
 a wrong flag**, tightening a rule even at some cost to recall, never the reverse.
 
-VeraCite is **read-only**: it flags, never edits, and **Crossref (by DOI), in lieu of publisher APIs is the canonical metadata resource** (arXiv/INSPIRE/OpenAlex/Open Library corroborate) — a `suggested:`
-edit always conforms the bib *toward* the record, unless the record is clearly broken.
+VeraCite is **read-only**: it flags, never edits. **Crossref (by DOI) is the
+canonical metadata resource** — the closest public stand-in for the publisher of
+record — and arXiv/INSPIRE/OpenAlex/Open Library corroborate it. A `suggested:` edit
+always conforms the bib *toward* that record, unless the record is clearly broken.
 
 ## Every message must suggest an action
 
-- If a finding implies nothing to do, don't emit it — silence is the clean pass (no
-  reassurance notes, no "all good," no "not required and none found").
-- Output stays parseable: one finding per line, with a stable `category`, the
-  offending line, and a structured `suggested` patch when one exists.
+- If a finding implies nothing to do, don't emit it — silence is the clean pass.
+- Output stays parseable: one finding per line, no repeated information, carrying a
+  stable `category`, the offending line, and a structured `suggested` patch when one
+  exists.
 - Repeating the same issue across entries is fine, but when one fix resolves several
-  findings, suppress the dependents (`SUPERSEDES` in `report.py`).
-- messages should be concise and clear, do not repeat information. Target ~1 line of text per item.
-- output must be possible to reconstruct fully from the ndjson record source (independent of whether or not --json is used)
+  findings, suppress the dependents (via `SUPERSEDES`).
+- The output must be fully reconstructible from the NDJSON record source, whether or
+  not `--json` is used. There is **one** per-entry record builder
+  (`checkpoint.entry_record`) and **one** terminal renderer
+  (`Report.render_entry_record`, which pretty-prints that record). Both `--json` and
+  the live terminal report flow through them, so the screen can show nothing the
+  record lacks — never add a second formatting path. A round-trip test
+  (`test_terminal_block_reconstructs_from_ndjson_record`) is the ratchet.
 
 ## Severity means a specific kind of action
 
@@ -32,44 +45,42 @@ edit always conforms the bib *toward* the record, unless the record is clearly b
 | `[WARN]` | a real data problem hurting accuracy — **investigate** | year/author/title/volume/pages/journal disagree with the record; sources conflict |
 | `[note]` | stylistic or a completeness/portability nudge — usually no render effect | casing, dashes, brace-protection, an abbreviated given name, an invalid-for-biblatex field |
 
-Severity follows **render-impact**: a field that changes the rendered citation
-warns, a purely cosmetic difference is a note, only an identity contradiction errors.
-
 ## Everything is a rule
 
-No model guessing in the verification path — every finding is a deterministic rule or
-a comparison against an authoritative record (`--llm` is the lone, opt-out exception,
-never a verification source).
+No guessing in the verification path — every finding is a comparison against an authoritative record or a deterministic rule (`--llm` is the sole exception).
 
 - A per-entry check is `@rule def fn(entry, report)`; a whole-file check is
   `@file_rule def fn(entries, report)` — both in [`rules.py`](veracite/rules.py).
 - Every finding carries a stable `category` that sets its severity, group, and
   catalog text — the public identity of the check.
-- The catalog is introspected from the `category="..."` literals
-  ([`catalog.py`](veracite/catalog.py), `--list-rules`); when you add/change a
-  category also add it to `CATEGORY_DOC`, `CATEGORY_GROUP`, and
-  `DEFAULT_SETTINGS["severity"]`, then run `python -m pytest` (`test_catalog.py` enforces this).
+- The category's metadata lives in [`report.py`](veracite/report.py)
+  (`CATEGORY_DOC`, `CATEGORY_GROUP`, `SUPERSEDES`, `resolve_severity`) with its
+  default severity in `DEFAULT_SETTINGS["severity"]`
+  ([`config.py`](veracite/config.py)); [`catalog.py`](veracite/catalog.py)
+  introspects those to build `--list-rules`, so it cannot drift. When you add or
+  change a category, update all four and run `python -m pytest` —
+  `test_catalog.py` fails if any is missing.
 
 ## Writing a rule that doesn't misfire
 
-A rule must be **general enough to catch a broad class, narrow enough to never fire
-on a valid entry** — both halves are required.
+A rule must be **principled** and **general enough** to catch a broad class, narrow enough to **never fire on a valid entry**.
 
-- Generalize to the underlying defect, not the one input that surfaced it (a wrapped
-  quoted value tripping the parser is "a bare word inside *any* quoted value isn't a
-  field," not a special case for `York`).
+- Generalize to the underlying defect, not the one input that surfaced it.
 - Prefer structural signals (check digits, datamodel legality, brace/quote balance)
   over free-text heuristics, which are the likeliest to misfire.
+- Check every proposed rule change against these principles before writing it —
+  even when it comes from the user.
 - Fold away legitimate variation before comparing (name particles/suffixes, ISO-4
   journal abbreviations, brace/quote wrapping, `--` vs `-`) — each unfolded thing is
   a false positive waiting.
 - Attach `suggested=` only when certain of the target; otherwise report the
   discrepancy without one.
 - An offline guess the authoritative record later disproves must be **withdrawn, not
-  shipped** — when an entry resolves, the record is ground truth, so declare the
-  supersession in `SUPERSEDES` ("record layer") or `rep.withdraw()` it (e.g. a record
-  whose issue corroborates the bib's `number` kills the offline "that's a misplaced
-  year" guess). A heuristic the record can check should never survive a resolve.
+  shipped**. When an entry resolves, the record is ground truth, so a heuristic the
+  record can check must never survive the resolve — declare the supersession in
+  `SUPERSEDES` (the "record layer") or `rep.withdraw()` it. *Example:* a record whose
+  issue corroborates the bib's `number` kills the offline "that's a misplaced year"
+  guess.
 - A style/`[note]` recommendation must be **grounded in a BibTeX/biblatex data
   standard** (the datamodel, ISO-4, the biber sort/date rules, a standard journal
   abbreviation), never personal taste — if you can't name the standard it enforces,
@@ -84,7 +95,7 @@ tests. This file is the loop's memory: a durable principle learned in one sessio
 must be written here so it is enforced in the next.
 
 - Generalize, don't proliferate — ten symptoms of one gap is one rule change, and two
-  categories firing on the same defect are spaghetti to merge.
+  categories that fire on the same defect should be merged into one.
 - A change must close a recall gap, never flip a clean entry into an error (the
   real-world failure is omission, not false assertion).
 - Never push a bad value — validate before suggesting, withhold mangled values, and

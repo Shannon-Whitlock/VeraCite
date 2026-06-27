@@ -99,18 +99,33 @@ def canonical_record(rec, conf):
     return out
 
 
-def entry_record(key, res, status, conf, phases, issues, verify=None):
+def entry_record(key, res, status, conf, phases, issues, verify=None,
+                 entry_type=None, line=0, uncited=False, status_detail=""):
     """Build the persisted record for one bib entry: a self-contained dict with its
     phases, verification status, identifiers, canonical record, sources and issues.
     `res` is a Resolution (or None for an offline-only entry); `issues` is a list of
     finding dicts (Report._finding_dict shape). This is the inverse of the loader's
-    `_resolution_from_record`, so a round trip reproduces the same report."""
+    `_resolution_from_record`, so a round trip reproduces the same report.
+
+    The record is the SINGLE canonical result for the entry: the terminal report is a
+    pretty-print of exactly these fields, so the record carries everything a header
+    needs -- the `entry_type` (@article/...) and source `line` that identify it, and
+    an `uncited` flag for the --tex skipped state -- not just what a resume needs.
+    Hence the report is fully reconstructible from the NDJSON whether or not --json
+    was used (the in-memory run builds the same records to render)."""
     rec = (res.record if res else None) or {}
     return {
         "key": key,
+        "entry_type": entry_type,
+        "line": line,
+        "uncited": uncited,
         "phases": {p: (p in phases) for p in PHASES},
         "status": status,
         "confidence": conf,
+        # The short human reason shown in the header for a non-clean status
+        # (UNVERIFIED/MISMATCH) -- persisted so the header is reconstructible from the
+        # record alone, including on resume (where it was previously lost).
+        "status_detail": status_detail or "",
         "verify": verify,
         "identifiers": {"doi": (res.doi if res else "") or None,
                         "arxiv": (res.arxiv_id if res else "") or None,
@@ -229,6 +244,7 @@ class Checkpoint:
         self.findings = []                  # replayed Finding objects (all keys)
         self.results = {}                   # key -> Resolution
         self.statuses = {}                  # key -> (status, confidence)
+        self.details = {}                   # key -> status_detail (header reason)
         self.links = {}                     # key -> verify url
         self.phases_by_key = {}             # key -> set(phases done)
         self.summary = None                 # the saved summary record, if any
@@ -264,6 +280,8 @@ class Checkpoint:
             self.results[key] = _resolution_from_record(rec)
             self.statuses[key] = (rec.get("status"),
                                   float(rec.get("confidence") or 0.0))
+            if rec.get("status_detail"):
+                self.details[key] = rec["status_detail"]
             if rec.get("verify"):
                 self.links[key] = rec["verify"]
 

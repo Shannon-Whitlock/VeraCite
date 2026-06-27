@@ -1,0 +1,42 @@
+# Citation metadata for VeraCite (Citation File Format v1.2.0).
+# GitHub reads this to show a "Cite this repository" button and to seed the
+# Zenodo archive's metadata. Schema: https://citation-file-format.github.io
+#
+# One placeholder remains before this is release-ready:
+#   doi -- uncomment and set once a Zenodo DOI is minted for the release
+#          (use the CONCEPT DOI so it always resolves to the latest version).
+cff-version: 1.2.0
+message: "If you use VeraCite, please cite it as below."
+title: "VeraCite: a deterministic verifier for BibTeX/biblatex bibliographies"
+abstract: >-
+  VeraCite audits BibTeX/biblatex bibliographies to catch hallucinated, mangled, or
+  mis-identified citations before publication, checking each entry for syntactic
+  validity, agreement with an authoritative online record (Crossref, arXiv,
+  INSPIRE-HEP, OpenAlex, Open Library), and citation context. Every finding is a
+  deterministic rule or a comparison against a record, never a language-model guess.
+type: software
+authors:
+  - given-names: Shannon
+    family-names: Whitlock
+    orcid: "https://orcid.org/0000-0002-6955-9326"
+version: 0.1.2
+date-released: "2026-06-27"
+license: MIT
+repository-code: "https://github.com/Shannon-Whitlock/VeraCite"
+url: "https://github.com/Shannon-Whitlock/VeraCite"
+keywords:
+  - bibtex
+  - biblatex
+  - bibliography
+  - latex
+  - citations
+  - doi
+  - arxiv
+  - reproducibility
+  - FAIR
+# Once a Zenodo DOI exists, uncomment and set it (concept DOI preferred):
+# doi: "10.5281/zenodo.XXXXXXX"
+# identifiers:
+#   - type: doi
+#     value: "10.5281/zenodo.XXXXXXX"
+#     description: "Concept DOI (always resolves to the latest version)"

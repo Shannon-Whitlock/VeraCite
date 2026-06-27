@@ -11,6 +11,10 @@ import unicodedata
 _SPECIAL_LETTERS = {
     "ø": "o", "Ø": "O", "đ": "d", "Đ": "D", "ł": "l", "Ł": "L",
     "ð": "d", "Ð": "D", "þ": "th", "Þ": "Th", "ı": "i", "ħ": "h",
+    # Ligatures NFKD does NOT decompose (they are letters, not accented forms), so
+    # they must be expanded explicitly or 'Hjertenæs' never folds to 'Hjertenaes'
+    # (the bib's ASCII transliteration) and the same author reads as two people.
+    "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE", "ß": "ss",
 }
 _MATHML_RE = re.compile(r"<m(?:ml:)?math\b.*?</m(?:ml:)?math>", re.S | re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -163,9 +167,12 @@ def title_is_miscased(title):
 
 
 def fold_surname(name):
-    """Reduce a surname to a lowercase ASCII key for matching, folding common
-    transliteration variants (oe/ue/ae/ss) so 'Muller' == 'Mueller'."""
-    s = clean_tex(name).lower()
+    """Reduce a surname to a lowercase ASCII key for matching. Deaccent FIRST so a
+    Unicode form and its ASCII transliteration collapse the same way (the Nordic
+    ligature 'Hjertenæs' -> 'hjertenaes', matching a bib that wrote 'Hjertenaes'),
+    then fold the German umlaut transliterations (oe/ue/ae/ss -> o/u/a/s) so
+    'Muller' == 'Mueller' == 'Müller'."""
+    s = deaccent(clean_tex(name)).lower()
     for a, b in (("oe", "o"), ("ue", "u"), ("ae", "a"), ("ss", "s")):
         s = s.replace(a, b)
     return re.sub(r"[^a-z]", "", s)

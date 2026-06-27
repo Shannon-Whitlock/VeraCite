@@ -51,7 +51,8 @@ def _month_notes(bib):
     entries, _ = parse_bib(bib)
     rep = Report(color=False)
     run_static(entries, rep)
-    return [rep._finding_line(f) for f in rep.findings if "month" in f.message]
+    return [rep._issue_line(rep._finding_dict(f))
+            for f in rep.findings if "month" in f.message]
 
 
 # --- parser ---------------------------------------------------------------
@@ -372,6 +373,22 @@ def test_surname_match_particles_only():
     assert not record._surname_match("son", "johnson")
 
 
+def test_ligature_and_umlaut_transliterations_fold_together():
+    # A Nordic ligature ('Hjertenæs', 'Kjærgaard') and its ASCII transliteration
+    # ('Hjertenaes', 'Kjaergaard') are the SAME author -- they must fold equal in BOTH
+    # the surname-match path and the name-deviation path, or one author reads as two.
+    from veracite.normalize import fold_surname
+    from veracite.compare import _clean_name_key
+    for uni, ascii_ in [("Hjertenæs", "Hjertenaes"), ("Kjærgaard", "Kjaergaard"),
+                        ("Lutnæs", "Lutnaes")]:
+        assert fold_surname(uni) == fold_surname(ascii_), (uni, ascii_)
+        assert _clean_name_key(uni) == _clean_name_key(ascii_), (uni, ascii_)
+    # German umlaut transliterations still collapse...
+    assert fold_surname("Müller") == fold_surname("Mueller") == fold_surname("Muller")
+    # ...and genuinely different surnames stay distinct.
+    assert fold_surname("Hansen") != fold_surname("Hanson")
+
+
 def test_author_mismatch_message_shows_readable_names_not_folded_keys():
     # The WARN stands (we conform to Crossref), but the message must show the
     # original, cased surnames -- not the internal folded matching keys. Crossref's
@@ -588,6 +605,59 @@ def test_finding_is_always_one_line():
     assert "\n" not in finding_lines[0]
 
 
+def test_terminal_block_reconstructs_from_ndjson_record():
+    """The invariant: the terminal report is fully reconstructible from the NDJSON
+    record alone. Render an entry's block live, then build its entry_record, round-trip
+    it through JSON, and render THAT on a fresh Report -- the text must be identical.
+    A render path that read any state not in the record (entry @type, source line,
+    the status detail, the verify link) would diverge here."""
+    import io
+    import json
+    from veracite.checkpoint import entry_record
+    buf_live = io.StringIO()
+    rep = Report(color=False)
+    e = _FmtEnt("smith2020", "article", 5)
+    rep.add(Severity.WARN, e, "year differs: bib=2009, record=2010",
+            "record", category="metadata_mismatch")
+    rep.add(Severity.INFO, e, "title looks miscased", category="title_case")
+    rep.set_status("smith2020", "VERIFIED", 0.75, "a field differs from the record")
+    rep.set_link("smith2020", "https://doi.org/10.1/x")
+    assert rep.emit_entry(e, out=buf_live, progress="[3/9]") is True
+
+    # Build the canonical record for the same entry, exactly as --json would, then
+    # round-trip it through JSON (proving nothing render-only is lost on disk).
+    rec = entry_record("smith2020", None, "VERIFIED", 0.75, {"offline", "online"},
+                       rep.issues_for("smith2020"), verify=rep.links.get("smith2020"),
+                       entry_type=e.etype, line=e.lineno,
+                       status_detail=rep.status_detail("smith2020"))
+    rec = json.loads(json.dumps(rec))
+    buf_rec = io.StringIO()
+    fresh = Report(color=False)              # no findings/status/links of its own
+    assert fresh.render_entry_record(rec, out=buf_rec, progress="[3/9]") is True
+    assert buf_rec.getvalue() == buf_live.getvalue()
+
+
+def test_uncited_block_reconstructs_from_ndjson_record():
+    """The UNCITED one-liner is also reconstructible from its record (which carries
+    the uncited flag, @type and line) -- not from render-only Report state."""
+    import io
+    import json
+    from veracite.checkpoint import entry_record
+    buf_live = io.StringIO()
+    rep = Report(color=False)
+    e = _FmtEnt("skipme", "inproceedings", 7)
+    rep.mark_uncited("skipme")
+    rep.emit_entry(e, out=buf_live, progress="[2/4]")
+
+    rec = json.loads(json.dumps(entry_record(
+        "skipme", None, None, None, set(), [],
+        entry_type=e.etype, line=e.lineno, uncited=True)))
+    buf_rec = io.StringIO()
+    Report(color=False).render_entry_record(rec, out=buf_rec, progress="[2/4]")
+    assert buf_rec.getvalue() == buf_live.getvalue()
+    assert "UNCITED" in buf_rec.getvalue()
+
+
 def test_link_with_embedded_newline_stays_one_line():
     """A link with a raw newline (e.g. a DOI the .bib wrapped mid-string) must not
     break the header across lines; it rides on the header after '; '."""
@@ -766,14 +836,16 @@ def test_unicode_hyphen_in_name_and_title_not_flagged():
     from veracite.compare import _clean_name_key, _title_punct_key
     assert _clean_name_key("Glover-Kapfer") == _clean_name_key("Glover‐Kapfer")
     assert _title_punct_key("Camera-trapping for X") == _title_punct_key("Camera‐trapping for X")
-    e = _entry("@article{k, author={Glover-Kapfer, P. and B. Jones}, "
+    e = _entry("@article{k, author={Glover-Kapfer, Philip and Hoyvik, Ida-Marie}, "
                "title={Camera-trapping for X}, year={2019}, doi={10.1/x}}\n")
-    rec = {"authors": ["gloverkapfer", "jones"], "given": {},
-           "authors_display": ["Glover‐Kapfer", "Jones"],
+    rec = {"authors": ["gloverkapfer", "hoyvik"],
+           "authors_display": ["Glover‐Kapfer", "Hoyvik"],
+           "given": {"gloverkapfer": "Philip", "hoyvik": "Ida‐Marie"},  # U+2010 hyphen
            "title": "Camera‐trapping for X", "year": 2019}
     rep = Report(color=False)
     record.compare_against_record(e, rec, "crossref", rep)
     assert not any("author name differs" in f.message for f in rep.findings)
+    assert not any("given name differs" in f.message for f in rep.findings)
     assert not any(f.category == "title_style" for f in rep.findings)
 
 
@@ -1778,7 +1850,8 @@ def _doi_notes(doi):
     rep = Report(color=False)
     run_static(entries, rep)
     # Rendered lines, so the derived '(suggested: ...)' tail is included.
-    return [rep._finding_line(f) for f in rep.findings if "DOI" in rep._finding_line(f)]
+    rendered = [rep._issue_line(rep._finding_dict(f)) for f in rep.findings]
+    return [line for line in rendered if "DOI" in line]
 
 
 def test_short_doi_prefix_accepted():
@@ -1828,7 +1901,7 @@ def test_prose_suggestion_is_derived_from_structured_field():
     for f in suggested_findings:
         # message itself never contains the arrow -- it is derived at render time.
         assert "suggested:" not in f.message and "->" not in f.message
-        line = rep._finding_line(f)
+        line = rep._issue_line(rep._finding_dict(f))
         assert format_suggested(f.suggested) in line
 
 
@@ -1896,6 +1969,24 @@ def test_journal_dropped_subtitle_after_colon_is_equivalent():
     assert eq("Physica B", "Physica B: Condensed Matter")
     assert not eq("Nature", "Nature Physics")          # series, no colon -> distinct
     assert not eq("Physica C", "Physica D: Nonlinear Phenomena")  # different series
+
+
+def test_chemistry_journal_abbreviations_resolve():
+    # The curated table includes the chemistry masterlist, so standard ACS/RSC/Wiley
+    # abbreviations match their full titles (and a bloated Crossref container-title
+    # with a ':'-subtitle / parenthetical former-name still matches the abbreviation).
+    eq = record._journal_equiv
+    assert eq("J. Am. Chem. Soc.", "Journal of the American Chemical Society")
+    assert eq("Angew. Chem., Int. Ed.", "Angewandte Chemie International Edition")
+    assert eq("J. Chem. Theory Comput.", "Journal of Chemical Theory and Computation")
+    assert eq("Theor. Chem. Acc.", "Theoretical Chemistry Accounts")
+    assert eq("Theor. Chem. Acc.",
+              "Theoretical Chemistry Accounts: Theory, Computation, and Modeling "
+              "(Theoretica Chimica Acta)")
+    assert eq("Inorg. Chem.", "Inorganic Chemistry")
+    # ...without equating different chemistry journals.
+    assert not eq("Angew. Chem., Int. Ed.", "Inorganic Chemistry")
+    assert not eq("J. Org. Chem.", "Inorganic Chemistry")
 
 
 def test_iso4_series_letter_not_dropped_as_article():

@@ -140,14 +140,23 @@ def pid_check(e, res, rep, delay, timeout, offline):
     usable_doi = has_doi and not res.dead_doi
     strongest = "doi" if usable_doi else "arxiv" if res.arxiv_id else "isbn" if res.isbn else ""
 
-    if is_book(e):
+    # A book-TYPED entry that carries a 'journal' field is not really a whole book (a
+    # book is not published in a journal) -- it is a journal article mis-typed @book,
+    # very common for SEG/IEEE entries. Don't treat it as a book here: that would emit
+    # a misdirected 'a book should carry an ISBN' AND skip the DOI search below. Let it
+    # fall through to the article-like path so its real DOI is recovered; the record
+    # layer separately suggests the correct entry type (entrytype_suggestion).
+    book_typed = is_book(e) and not e.get("journal", "").strip()
+    if book_typed:
         if not (res.isbn or has_doi):
             res.pid_missing = True
             rep.add(Severity.WARN, e, "no ISBN or DOI -- a book should carry a "
                     "persistent identifier", category="pid_missing")
         return strongest
 
-    if is_article_like(e):
+    # Article-like, OR a book-typed entry with a journal field (handled here as the
+    # mis-typed article it is, so its DOI is searched/recovered like any article).
+    if is_article_like(e) or is_book(e):
         if usable_doi:
             # The DOI resolved, but if it was MINED FROM THE URL (no 'doi' field),
             # nudge the author to record it as a proper field -- the url path is not

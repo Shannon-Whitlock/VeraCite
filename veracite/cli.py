@@ -8,7 +8,7 @@ import sys
 
 from .checkpoint import (Checkpoint, append_record, compact, entry_record,
                          file_record, requested_phases, summary_record)
-from .config import HTTP_BACKEND, SETTINGS, load_settings
+from .config import HTTP_BACKEND, SETTINGS, VERSION, load_settings
 from .llm import (LLM_PROVIDERS, collect_tex, find_citation_contexts,
                   find_citation_groups, preflight_provider, resolve_provider)
 from .parser import parse_bib
@@ -98,8 +98,13 @@ def read_bib_text(bib_path, ap):
 
 def parse_args(argv):
     """Define and parse the command-line interface. Returns (parser, args)."""
+    # prog="veracite" so usage/error lines read "veracite: error: ..." rather than
+    # argparse's default "__main__.py" -- matching the documented `veracite` /
+    # `python -m veracite` invocations and the official package name.
     ap = argparse.ArgumentParser(
+        prog="veracite",
         description=DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"veracite {VERSION}")
     ap.add_argument("--bib", metavar="FILE", help="path to the .bib file (else auto-discovered)")
     ap.add_argument("--tex", metavar="PATH", action="append", default=[],
                     help="a .tex file or directory (recursive); repeatable. Given "
@@ -331,7 +336,8 @@ def main(argv=None):
             phases_by_key[e.key] = set()
             if args.json:
                 append_record(args.json, entry_record(
-                    e.key, None, None, None, set(), [], verify=None))
+                    e.key, None, None, None, set(), [], verify=None,
+                    entry_type=e.etype, line=e.lineno, uncited=True))
             if args.sort == "entry":
                 any_emitted |= rep.emit_entry(e, skip_notes=args.skipnotes,
                                               progress=f"[{i:>{width}}/{total}]")
@@ -370,10 +376,11 @@ def main(argv=None):
                     results[e.key] = checkpoint.results[e.key]
                     st, conf = checkpoint.statuses.get(e.key, ("", 0.0))
                     statuses[e.key] = (st, conf)
-                    # Restore the header status/link so the reused entry prints its
-                    # saved verdict instead of a bare line.
+                    # Restore the header status/detail/link so the reused entry
+                    # prints its saved verdict (and reason) instead of a bare line.
                     if st:
-                        rep.set_status(e.key, st, conf)
+                        rep.set_status(e.key, st, conf,
+                                       checkpoint.details.get(e.key, ""))
                     if checkpoint.links.get(e.key):
                         rep.set_link(e.key, checkpoint.links[e.key])
                 phases_by_key[e.key] |= reuse
@@ -410,7 +417,9 @@ def main(argv=None):
             st, conf = statuses.get(e.key, (None, None))
             append_record(args.json, entry_record(
                 e.key, res, st, conf, phases_by_key[e.key],
-                rep.issues_for(e.key), verify=rep.links.get(e.key)))
+                rep.issues_for(e.key), verify=rep.links.get(e.key),
+                entry_type=e.etype, line=e.lineno,
+                status_detail=rep.status_detail(e.key)))
         # --key focuses the REPORT on one entry, not just the online lookup: print
         # only the selected entry's block (the offline checks still RUN for every
         # entry -- file-level rules like duplicate detection need them -- but the

@@ -180,7 +180,7 @@ def _run(raw, max_entries, delay, timeout, fast):
     summary = integrity(entries, statuses, results, rep)
 
     out = rep.to_json(summary=summary, results=results, statuses=statuses,
-                      phases_by_key=phases_by_key)
+                      phases_by_key=phases_by_key, entries=entries)
     out["veracite_version"] = VERSION
     out["n_entries"] = n_entries
     out["truncated"] = truncated

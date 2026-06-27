@@ -363,6 +363,13 @@ class Report:
         short human reason shown for a non-clean status."""
         self.status[key] = (status, confidence, detail)
 
+    def status_detail(self, key):
+        """The short header reason recorded for `key` (the 3rd element of its status
+        tuple), or "" -- shown after a non-clean status and persisted to the record so
+        the header is reconstructible from the record alone."""
+        st = self.status.get(key)
+        return (st[2] if st and len(st) > 2 else "") or ""
+
     def mark_uncited(self, key):
         """Mark an entry as UNCITED (--tex mode): its block is just a one-line header
         saying so, with no findings -- it was skipped from all analysis."""
@@ -441,15 +448,21 @@ class Report:
         counter prepended to the header. A block prints when the entry has findings
         OR a status that asks for attention (anything but a clean VERIFIED 1.0), so
         a bare UNVERIFIED still shows even with no other finding. Returns True if a
-        block was printed."""
+        block was printed.
+
+        emit_entry owns only the RUN-STATE decisions -- which not-yet-emitted, live,
+        not-note-suppressed findings to show, and marking them emitted. It then builds
+        the entry's canonical record dict (the same shape written to --json) and hands
+        it to `render_entry_record`, so the terminal block is a pretty-print of the
+        record, never a parallel formatting path."""
+        from .checkpoint import entry_record   # lazy: avoid import cycle
         out = out if out is not None else sys.stdout
         key = entry.key
         # An UNCITED entry (--tex mode) is one line and nothing else.
         if key in self._uncited:
-            # No trailing blank line: a skipped entry is one line, so a run of them
-            # reads as a compact list rather than double-spaced.
-            print(self._entry_header(entry, progress=progress, uncited=True), file=out)
-            return True
+            rec = entry_record(key, None, None, None, set(), [],
+                               entry_type=entry.etype, line=entry.lineno, uncited=True)
+            return self.render_entry_record(rec, out=out, progress=progress)
         idx = [i for i, f in enumerate(self.findings)
                if i not in self._emitted and f.key == key
                and not self._is_superseded(f)
@@ -467,32 +480,59 @@ class Report:
         # resolved online and otherwise clean) has nothing to say.
         if not idx and st is None:
             return False
-        print(self._entry_header(entry, st, progress), file=out)
-        for i in sorted(idx, key=lambda i: self.findings[i].severity):
-            print(self._finding_line(self.findings[i]), file=out)
+        status, conf = (st[0], st[1]) if st else (None, None)
+        issues = [self._finding_dict(self.findings[i])
+                  for i in sorted(idx, key=lambda i: self.findings[i].severity)]
+        rec = entry_record(key, None, status, conf, set(), issues,
+                           verify=self.links.get(key),
+                           entry_type=entry.etype, line=entry.lineno,
+                           status_detail=self.status_detail(key))
+        return self.render_entry_record(rec, out=out, progress=progress)
+
+    def render_entry_record(self, rec, out=None, progress=""):
+        """Pretty-print one entry's canonical record (the dict `entry_record` builds /
+        an --json NDJSON line) as its terminal block: the identifying header, then its
+        `issues` as indented finding lines in severity order, then a blank line. This
+        is the single rendering path -- the live run and a saved report render through
+        here, so the terminal output is reconstructible from the NDJSON alone. Returns
+        True if a block was printed (uncited or status/findings present)."""
+        out = out if out is not None else sys.stdout
+        if rec.get("uncited"):
+            # No trailing blank line: a skipped entry is one line, so a run of them
+            # reads as a compact list rather than double-spaced.
+            print(self._record_header(rec, progress=progress), file=out)
+            return True
+        issues = rec.get("issues") or []
+        if not issues and rec.get("status") is None:
+            return False
+        print(self._record_header(rec, progress=progress), file=out)
+        for issue in sorted(issues, key=lambda d: Severity[d.get("severity", "INFO")]):
+            print(self._issue_line(issue), file=out)
         print(file=out)   # blank line separates entry blocks
         return True
 
-    def _entry_header(self, entry, status=None, progress="", uncited=False):
-        """The block header -- the single identifying line per record:
+    def _record_header(self, rec, progress=""):
+        """The block header from a record dict -- the single identifying line:
           [i/N] key  @type  line N  STATUS (conf) -- detail   verify: <url>
-        `progress` ('[i/N]', optional) leads it. STATUS is colored by pass/fail. For
-        a clean VERIFIED 1.0 only the word shows; a caveat adds '(confidence X)';
-        UNVERIFIED/MISMATCH add their cause. The DOI/url (when known) follows after a
-        '; ' so no separate verify line is needed. `status` is the
-        (status, confidence, detail) tuple recorded by set_status. When `uncited`,
-        the line ends in a dim 'UNCITED in .tex; skipped' marker and nothing else."""
+        Mirrors `_entry_header`, reading every field from the record so the header is
+        reconstructible from the NDJSON. STATUS is colored by pass/fail; a clean
+        VERIFIED 1.0 shows just the word, a caveat adds '(confidence X)', and
+        UNVERIFIED/MISMATCH add their cause. An uncited record ends in a dim marker."""
         bits = []
         if progress:
             bits.append(self._c(progress, _DIM))
-        bits += [self._c(entry.key, _BOLD), self._c(f"@{entry.etype}", _DIM)]
-        if entry.lineno:
-            bits.append(self._c(f"line {entry.lineno}", _DIM))
-        if uncited:
+        bits.append(self._c(rec["key"], _BOLD))
+        if rec.get("entry_type"):
+            bits.append(self._c(f"@{rec['entry_type']}", _DIM))
+        if rec.get("line"):
+            bits.append(self._c(f"line {rec['line']}", _DIM))
+        if rec.get("uncited"):
             bits.append(self._c("UNCITED in .tex source; skipped from further analysis", _DIM))
             return "  ".join(bits)
-        if status:
-            st, conf, detail = (status + ("", ""))[:3] if isinstance(status, tuple) else (status, None, "")
+        st = rec.get("status")
+        if st is not None:
+            conf = rec.get("confidence")
+            detail = rec.get("status_detail") or ""
             color = _GREEN if st == "VERIFIED" else (
                 SEVERITY_STYLE[Severity.ERROR][1] if st == "MISMATCH"
                 else SEVERITY_STYLE[Severity.WARN][1])
@@ -500,39 +540,30 @@ class Report:
             if conf is not None and not (st == "VERIFIED" and conf >= 1.0):
                 label += f" (confidence {conf:.2f})"
             piece = self._c(label, color)
-            # Detail is shown only for UNVERIFIED/MISMATCH, which have no sibling
-            # finding to explain them. A VERIFIED header carries just status +
-            # confidence + the link: its caveat (if any) is already spelled out by
-            # the metadata_mismatch / source_conflict finding right below, so
-            # repeating it here ('-- resolved and consistent', '-- a field differs')
-            # would be noise.
+            # Detail is shown only for UNVERIFIED/MISMATCH: a VERIFIED header's caveat
+            # is already spelled out by the metadata_mismatch/source_conflict finding
+            # below it, so repeating it here would be noise.
             if detail and st != "VERIFIED":
                 piece += self._c(f" -- {detail}", _DIM)
             bits.append(piece)
         line = "  ".join(bits)
-        if self.links.get(entry.key):
-            # The DOI/url trails the status after '; ' (no 'verify:' label, no
-            # separate line) -- the header is the single identifying+verifying line.
-            line += self._c(f"; {_oneline(self.links[entry.key])}", _DIM)
+        if rec.get("verify"):
+            line += self._c(f"; {_oneline(rec['verify'])}", _DIM)
         return line
 
-    def _finding_line(self, f, with_key=False):
-        """One formatted finding line. Inside an entry block the key lives in the
-        header, so it is omitted here; the file-level group sets `with_key` to keep
-        each line self-contained. Shape (stable for LLM/script parsing):
-          [TAG] category (line N): message
-        The whole finding is on ONE line -- _oneline() collapses any embedded
-        whitespace/newline so a finding is never split across lines."""
-        tag, color, _ = SEVERITY_STYLE[f.severity]
-        # Pad to the width of the widest bracketed tag ("[ERROR]") outside the
-        # color span, so the spaces are uncolored and the columns stay aligned.
+    def _issue_line(self, d, with_key=False):
+        """One formatted finding line from an issue dict (the `_finding_dict` shape),
+        the record-based twin of `_finding_line`. Shape (stable for parsing):
+          [TAG] category (line N): message (suggested: X -> Y)
+        The advisory tail is derived from the issue's `suggested`, so the prose stays
+        in lock-step with the structured patch."""
+        sev = Severity[d.get("severity", "INFO")]
+        tag, color, _ = SEVERITY_STYLE[sev]
         pad = " " * (len("[ERROR]") - len(tag) - 2)
-        code = self._c(f.category or f.layer, _DIM)
-        loc = f" (line {f.line})" if f.line else ""
-        # The advisory '(suggested: X -> Y)' tail is derived from f.suggested, not
-        # stored in the message, so the prose stays in lock-step with the JSON.
-        msg = _oneline(f.message + format_suggested(f.suggested))
-        keytag = (self._c(f.key, _BOLD) + " ") if with_key else ""
+        code = self._c(d.get("category") or d.get("layer", ""), _DIM)
+        loc = f" (line {d['line']})" if d.get("line") else ""
+        msg = _oneline(d.get("message", "") + format_suggested(d.get("suggested")))
+        keytag = (self._c(d.get("key", ""), _BOLD) + " ") if with_key else ""
         return f"    {self._c(f'[{tag}]', color)}{pad} {keytag}{code}{loc}: {msg}"
 
     def emit_remaining(self, out=None, skip_notes=False, only_key=None):
@@ -554,7 +585,7 @@ class Report:
             return False
         print(self._c("file-level", _BOLD), file=out)
         for i in sorted(rest, key=lambda i: (self.findings[i].key, self.findings[i].severity)):
-            print(self._finding_line(self.findings[i], with_key=True), file=out)
+            print(self._issue_line(self._finding_dict(self.findings[i]), with_key=True), file=out)
         print(file=out)
         return True
 
@@ -577,7 +608,7 @@ class Report:
         for sev in (Severity.ERROR, Severity.WARN, Severity.INFO):
             group = sorted((f for f in live if f.severity is sev), key=lambda f: f.key)
             for f in group:
-                line = self._finding_line(f, with_key=True)
+                line = self._issue_line(self._finding_dict(f), with_key=True)
                 if self.links.get(f.key) and f.layer in self._ONLINE_LAYERS:
                     line += self._c(f"; {_oneline(self.links[f.key])}", _DIM)
                 print(line, file=out)
@@ -718,51 +749,43 @@ class Report:
         findings inside the entry's own record rather than in a separate flat list."""
         return [self._finding_dict(f) for f in self.live_findings() if f.key == key]
 
-    def to_json(self, summary=None, results=None, statuses=None, phases_by_key=None):
+    def to_json(self, summary=None, results=None, statuses=None, phases_by_key=None,
+                entries=None):
         """Machine-readable report. Always includes the flat `findings` list (for
         back-compat); each finding carries its `category`, the `group` that category
         rolls up into (syntax/semantic/context), and -- when the check proposes a
         concrete advisory edit -- a structured `suggested` ({field, from?, to}).
         When verification data is supplied, also emits a `summary` block (Layer 6)
-        and a per-reference `references` array (Layer 8) with each reference's
-        status, confidence, identifiers, canonical record and issues. `phases_by_key`
-        (key -> set of phases computed) is persisted as each reference's `phases`
-        so a later run can resume only the phases an entry still lacks."""
-        from .checkpoint import canonical_record as _canonical_record  # lazy: cycle
+        and a per-reference `references` array: one entry record per analyzed entry,
+        built by the SAME `entry_record` that writes each --json NDJSON line, so the
+        web payload and the checkpoint file are the one record shape (not two parallel
+        builders that can drift). `entries` (an iterable of Entry, optional) supplies
+        each record's identifying `entry_type`/`line`; without it those are null."""
+        from .checkpoint import entry_record   # lazy: avoid import cycle
         live = self.live_findings()
         out = {"findings": [self._finding_dict(f) for f in live]}
         if summary is not None:
             out["summary"] = summary
         if results is not None and statuses is not None:
             phases_by_key = phases_by_key or {}
-            by_key = {}
-            for f in live:
-                by_key.setdefault(f.key, []).append(self._finding_dict(f))
-            # Emit a reference per entry that was analyzed in ANY phase. Online
-            # entries come from `results`; an offline-only entry has no resolution
-            # but still records its `phases` (so a later online run can resume it),
-            # appearing with a null status/record -- honest, not a fabricated verdict.
-            # Order follows the analysis order (results first, then any offline-only
-            # keys) so the array is stable across incremental rewrites.
+            meta = {e.key: e for e in (entries or [])}   # key -> Entry (etype/lineno)
+            # One reference per entry analyzed in ANY phase. Online entries come from
+            # `results`; an offline-only entry has no resolution but still records its
+            # `phases` (so a later run can resume it), with a null status/record --
+            # honest, not a fabricated verdict. Order follows analysis order (results
+            # first, then offline-only keys) so the array is stable across rewrites.
             keys = list(results)
             keys += [k for k in phases_by_key if k not in results]
             refs = []
             for key in keys:
-                res = results.get(key)
                 status, conf = statuses.get(key, (None, None))
-                rec = (res.record if res else None) or {}
-                refs.append({
-                    "key": key,
-                    "status": status,
-                    "confidence": conf,
-                    "phases": sorted(phases_by_key.get(key, set())),
-                    "verify": self.links.get(key) or None,
-                    "identifiers": {"doi": (res.doi if res else "") or None,
-                                    "arxiv": (res.arxiv_id if res else "") or None,
-                                    "isbn": (res.isbn if res else "") or None},
-                    "sources": sorted(res.sources) if res else [],
-                    "canonical_record": _canonical_record(rec, conf),
-                    "issues": by_key.get(key, []),
-                })
+                e = meta.get(key)
+                refs.append(entry_record(
+                    key, results.get(key), status, conf,
+                    phases_by_key.get(key, set()), self.issues_for(key),
+                    verify=self.links.get(key) or None,
+                    entry_type=(e.etype if e else None),
+                    line=(e.lineno if e else 0),
+                    status_detail=self.status_detail(key)))
             out["references"] = refs
         return out

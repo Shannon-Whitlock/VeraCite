@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veracite"
-version = "0.1.1"
+version = "0.1.2"
 description = "A bibliography health checker for LaTeX projects."
 readme = "README.md"
 requires-python = ">=3.8"
@@ -29,9 +29,9 @@ http = ["requests"]
 test = ["pytest"]
 
 [project.urls]
-Homepage = "https://github.com/Shannon-Whitlock/veracite"
-Repository = "https://github.com/Shannon-Whitlock/veracite"
-Issues = "https://github.com/Shannon-Whitlock/veracite/issues"
+Homepage = "https://github.com/Shannon-Whitlock/VeraCite"
+Repository = "https://github.com/Shannon-Whitlock/VeraCite"
+Issues = "https://github.com/Shannon-Whitlock/VeraCite/issues"
 
 [project.scripts]
 veracite = "veracite.cli:main"

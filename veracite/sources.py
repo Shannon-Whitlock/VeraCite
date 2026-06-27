@@ -108,8 +108,32 @@ def fetch_crossref(doi, timeout):
         title=(msg.get("title") or [""])[0],
         journal=(msg.get("container-title") or [""])[0],
         abstract=strip_tags(msg.get("abstract", "")),
+        # Crossref's work `type` (journal-article / book-chapter / proceedings-article
+        # / book / ...) normalized to the labels the entry-type check understands, so a
+        # bib type that disagrees with the record (e.g. a @book that is really a journal
+        # article, or an @article that is really a book chapter) can be flagged.
+        document_type=_crossref_doc_type(msg.get("type", "")),
         relations=_extract_relations(msg),
     ), code
+
+
+# Crossref work `type` -> the normalized label the entry-type check keys on. Only the
+# types that map to a clear biblatex entry class are translated; anything else (a
+# 'dataset', 'report', 'posted-content' preprint, ...) yields '' (no type claim).
+_CROSSREF_TYPE_LABELS = {
+    "journal-article": "journal article",
+    "proceedings-article": "proceedings",
+    "book-chapter": "book chapter",
+    "reference-entry": "book chapter",
+    "book": "book",
+    "monograph": "book",
+    "reference-book": "book",
+    "edited-book": "book",
+}
+
+
+def _crossref_doc_type(t):
+    return _CROSSREF_TYPE_LABELS.get((t or "").lower(), "")
 
 
 _ARXIV_CACHE = {}
