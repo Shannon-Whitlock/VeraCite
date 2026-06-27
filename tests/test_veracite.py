@@ -272,6 +272,69 @@ def test_bare_doi_unescapes_bibtex_escapes():
     assert bare_doi("10.1103/PhysRevA.88.052108") == "10.1103/PhysRevA.88.052108"
 
 
+# --- URL-injection / SSRF hardening ----------------------------------------
+# VeraCite reads an UNTRUSTED .bib and builds API URLs from its fields. DOIs/ids
+# keep '/' literal in the path (so real DOIs survive), so a crafted 'doi' with a
+# '../' segment would -- absent a guard -- be normalized by the HTTP client into a
+# traversing path on the trusted API host (api.crossref.org/etc/passwd). Two layers
+# stop it: the shared DOI gate (DOI_FULL_RE) rejects an all-dots segment, and the
+# HTTP layer drops any URL whose host is not a configured endpoint. Test the CLASS.
+
+def test_doi_gate_rejects_path_traversal_keeps_real_dois():
+    from veracite.normalize import DOI_FULL_RE
+    # ATTACK: a suffix segment that is entirely dots is never a real DOI and is the
+    # path-traversal primitive -- must NOT qualify as a usable DOI.
+    for bad in ["10.1234/../../../etc/passwd", "10.1234/x/./y", "10.1234/..",
+                "10.1234/.", "10.1234/x/..", "10.1234/../secret"]:
+        assert not DOI_FULL_RE.match(bad), f"traversal DOI wrongly accepted: {bad!r}"
+    # NEGATIVE: real DOIs -- including multi-slash and dots WITHIN a segment -- must
+    # still resolve, or the gate would reject valid citations (the cardinal sin).
+    for good in ["10.1103/PhysRevA.101.032301", "10.1090/conm/717",
+                 "10.1007/978-3-031-25069-9_19", "10.48550/arXiv.2103.16313",
+                 "10.1109/FOCS54457.2022.00117", "10.1016/S0370-2693(98)00123-4",
+                 "10.5555/a/b/c/d"]:
+        assert DOI_FULL_RE.match(good), f"valid DOI wrongly rejected: {good!r}"
+
+
+def test_resolver_treats_traversal_doi_as_unusable(monkeypatch):
+    # A traversal-bearing 'doi' field must not be used to build an API URL; the
+    # resolver gates on DOI_FULL_RE, so res.doi stays empty (no traversing request).
+    # Stub every fetcher so nothing reaches the network either way (the value is
+    # rejected before resolution, but the title-search fallback would otherwise fire).
+    monkeypatch.setattr(record, "fetch_crossref", lambda *a, **k: (None, 404))
+    monkeypatch.setattr(record, "fetch_datacite", lambda *a, **k: (None, 404))
+    monkeypatch.setattr(record, "doi_registered_at_datacite", lambda *a, **k: False)
+    for fn in ("fetch_arxiv", "fetch_openalex", "fetch_inspire", "fetch_related",
+               "fetch_isbn", "search_arxiv"):
+        monkeypatch.setattr(record, fn, lambda *a, **k: None)
+    e = _entry("@article{k, author={A, B}, title={T}, journal={J}, year={2020},"
+               " doi={10.1234/../../../etc/passwd}}\n")
+    res = record.resolve_entry(e, Report(color=False), delay=0, timeout=1)
+    assert res.doi == "", "traversal DOI must not be accepted for resolution"
+    # And the offline doi_format rule flags it as malformed (not silently dropped).
+    rep = Report(color=False)
+    run_static([e], rep)
+    assert any(f.category == "identifier_format" for f in rep.findings), \
+        "a malformed/traversal DOI should be reported, not silently ignored"
+
+
+def test_http_layer_blocks_non_configured_hosts(monkeypatch):
+    # Defense in depth: even if a bad URL were somehow built, the HTTP layer refuses
+    # to GET a host that is not a configured endpoint -- and never calls the network.
+    from veracite import http
+    fired = {"n": 0}
+    monkeypatch.setattr(http, "_throttle",
+                        lambda url: fired.__setitem__("n", fired["n"] + 1))
+    # An off-host URL (a cloud metadata IP, an arbitrary host) is dropped with each
+    # fetcher's "no result" sentinel -- without ever throttling or hitting the network.
+    assert http.http_get_json("http://169.254.169.254/latest/meta-data/", 1) == (None, -1)
+    assert http.http_get_text("https://evil.example.com/x", 1) is None
+    assert fired["n"] == 0, "a blocked URL must not reach the throttle/network"
+    # A configured API host passes the allowlist (host-locking does not block real use).
+    assert http._host_allowed("https://api.crossref.org/works/10.1/x")
+    assert not http._host_allowed("http://169.254.169.254/")
+
+
 def test_verify_url_unescapes_bibtex_specials():
     # A url field carries TeX-escaped specials ('\_', '\&', ...) that are literal in
     # the real address; the verify link must de-escape them so it is clickable.

@@ -35,12 +35,21 @@ ARXIV_OLD_RE = re.compile(r"\b((?:" + _ARXIV_ARCHIVES + r")(?:\.[A-Za-z]{2})?/\d
 # A value that CONTAINS a DOI substring -- never mine an arXiv id out of one.
 DOI_RE = re.compile(r"\b10\.\d{4,9}/")
 # A value that IS a bare DOI, whole-string: '10.' + registrant (dot-separated
-# digits) + '/' + a suffix with NO whitespace. Anchored, so a DOI merely *embedded*
-# in junk (e.g. a field that wrapped 'https:\n //doi:10.1103/...') does NOT match --
-# such a value is not usable as a DOI for resolution or a verify link. This is the
-# single definition of "is a usable DOI", shared by the resolver and the doi_format
-# rule so they agree on what counts.
-DOI_FULL_RE = re.compile(r"^10\.\d+(\.\d+)*/\S+$")
+# digits) + '/' + a suffix of one-or-more '/'-joined segments with NO whitespace.
+# Anchored, so a DOI merely *embedded* in junk (e.g. a field that wrapped
+# 'https:\n //doi:10.1103/...') does NOT match -- such a value is not usable as a
+# DOI for resolution or a verify link. This is the single definition of "is a
+# usable DOI", shared by the resolver and the doi_format rule so they agree on what
+# counts.
+#
+# Security: no suffix segment may be entirely dots ('.' or '..'). A real DOI suffix
+# never needs one, but a crafted 'doi' like '10.1/../../etc/passwd' would otherwise
+# pass the gate and -- since DOIs keep '/' literal in the API URL -- be normalized by
+# the HTTP client into a traversing path on the trusted API host (api.crossref.org/
+# etc/passwd). The `_DOI_SEG` lookahead rejects an all-dots segment, closing that
+# request-path injection at the one shared gate every source resolves through.
+_DOI_SEG = r"(?!\.+(?:/|$))[^/\s]+"
+DOI_FULL_RE = re.compile(r"^10\.\d+(\.\d+)*/" + _DOI_SEG + r"(?:/" + _DOI_SEG + r")*$")
 # A 13- or 10-digit ISBN (publisher URLs often embed one, e.g. springer .../9780387952741).
 _ISBN13_RE = re.compile(r"(?<!\d)(97[89]\d{10})(?!\d)")
 # Generational name suffixes, dropped before keying a surname so 'Hunt III' and

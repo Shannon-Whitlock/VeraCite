@@ -8,6 +8,7 @@ the tool runs with no configuration. Nothing here carries personal data.
 import json
 import os
 import sys
+from urllib.parse import urlsplit
 
 try:
     import requests
@@ -176,3 +177,28 @@ def endpoint(name, **params):
     escaped = {k: url_quote(v, safe=query_safe if k == "query" else "/")
                for k, v in params.items()}
     return template.format(**escaped)
+
+
+def allowed_hosts():
+    """The set of (scheme, hostname) pairs the configured endpoints talk to.
+
+    Defense in depth against URL injection: identifiers keep '/' literal in a path
+    segment (so DOIs/arXiv ids survive), which means a crafted value could in
+    principle steer a request elsewhere on the same host -- or, with a future
+    template change, off it. The HTTP layer checks every outbound URL against this
+    allowlist (see http._host_allowed) and drops anything that does not target a
+    configured API host, so VeraCite can only ever GET the services it was pointed
+    at. Built from the LIVE endpoints (defaults plus any settings-file override), so
+    a legitimately repointed endpoint stays allowed while a `.bib`-derived value --
+    which is never a host here -- cannot introduce a new one.
+
+    The template host is the literal netloc right after the scheme; an embedded URL
+    like openalex's '.../works/https://doi.org/{doi}' contributes its real host
+    (api.openalex.org), not the path-embedded 'doi.org'."""
+    eps = {**DEFAULT_SETTINGS["endpoints"], **SETTINGS.get("endpoints", {})}
+    hosts = set()
+    for template in eps.values():
+        parts = urlsplit(template)
+        if parts.scheme and parts.hostname:
+            hosts.add((parts.scheme, parts.hostname))
+    return hosts

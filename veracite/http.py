@@ -18,7 +18,7 @@ import json
 import time
 from urllib.parse import urlsplit
 
-from .config import HTTP_BACKEND, SETTINGS, user_agent
+from .config import HTTP_BACKEND, SETTINGS, allowed_hosts, user_agent
 
 if HTTP_BACKEND == "requests":
     import requests
@@ -71,11 +71,27 @@ def reset_throttle():
     _last_request.clear()
 
 
+def _host_allowed(url):
+    """True if `url` targets one of the configured API hosts (scheme + hostname).
+
+    Defense in depth against URL injection: even though identifiers are shape-gated
+    and percent-encoded, DOIs/ids keep '/' literal in the path, so a crafted value
+    could in principle steer a request to an unexpected place. Every outbound GET is
+    checked against config.allowed_hosts() and dropped if it does not match, so a
+    `.bib` can never make VeraCite talk to a host it was not pointed at. The check is
+    on (scheme, hostname) only -- the path is where a value lives, so locking the
+    host is what matters; a same-host path is already constrained by the DOI gate."""
+    parts = urlsplit(url)
+    return (parts.scheme, parts.hostname) in allowed_hosts()
+
+
 def http_get_json(url, timeout):
     """GET `url` and parse JSON. Returns (data, status_code); data is None on any
     failure, with status_code carrying the HTTP code (or -1 for a network error)
     so callers can distinguish a 404 from a timeout. Paced per service (see
     _throttle): the wait, if any, is only for this URL's host."""
+    if not _host_allowed(url):
+        return None, -1                  # not a configured host -- never reach out
     _throttle(url)
     headers = user_agent()
     if HTTP_BACKEND == "requests":
@@ -97,6 +113,8 @@ def http_get_json(url, timeout):
 def http_get_text(url, timeout):
     """GET `url` and return the body as text, or None on any failure. Paced per
     service (see _throttle)."""
+    if not _host_allowed(url):
+        return None                      # not a configured host -- never reach out
     _throttle(url)
     headers = user_agent()
     if HTTP_BACKEND == "requests":
