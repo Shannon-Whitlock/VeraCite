@@ -2779,24 +2779,128 @@ def test_datacite_doi_not_flagged_dead_on_crossref_404(monkeypatch):
     # Crossref and DataCite are SEPARATE DOI registries. A Zenodo/Figshare/Dryad
     # dataset or software DOI ('10.5281/zenodo.3937751') resolves via DataCite but is
     # a 404 at Crossref -- it must NOT be reported as a dead DOI (a false ERROR on a
-    # live, working DOI). It is a record_unresolved WARN instead (no Crossref metadata
-    # to compare). A DOI that 404s at BOTH registries is still a genuine dead_doi error.
+    # live, working DOI). A DOI that 404s at BOTH registries is still a genuine
+    # dead_doi error.
     from veracite import record
-    e = _entry("@misc{k, author={Org}, title={A Dataset}, year={2019}, "
+    from veracite.models import Record
+    e = _entry("@dataset{k, author={Org}, title={A Dataset}, year={2019}, "
                "doi={10.5281/zenodo.3937751}}\n")
     monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
-    monkeypatch.setattr(record, "doi_registered_at_datacite", lambda doi, t: True)
+    # DataCite resolves it to a dataset record -> verified, no dead_doi.
+    dc = Record(authors=["org"], authors_display=["Org"], title="A Dataset",
+                year=2019, document_type="dataset", journal="Zenodo")
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (dc, 200))
     rep = Report(color=False)
     record.resolve_entry(e, rep, 0, 5)
     assert not any(f.category == "dead_doi" for f in rep.findings), \
         "a DataCite DOI must not be reported dead on a Crossref 404"
-    assert any(f.category == "record_unresolved" for f in rep.findings)
     # Truly dead (absent from both registries) -> still an error.
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (None, 404))
     monkeypatch.setattr(record, "doi_registered_at_datacite", lambda doi, t: False)
     rep2 = Report(color=False)
     record.resolve_entry(e, rep2, 0, 5)
     assert any(f.category == "dead_doi" and f.severity is Severity.ERROR
                for f in rep2.findings)
+
+
+# --- DataCite resolution: software/dataset DOIs verify; no false locator warns ----
+
+def _datacite_record(**kw):
+    """A DataCite-style Record (defaults to a clean software record)."""
+    from veracite.models import Record
+    base = dict(authors=["whitlock"], authors_display=["Whitlock"],
+                given={"whitlock": "Shannon"}, title="VeraCite: a verifier",
+                year=2026, document_type="software", journal="Zenodo")
+    base.update(kw)
+    return Record(**base)
+
+
+def test_datacite_software_verifies_clean(monkeypatch):
+    # A @software entry whose DOI resolves via DataCite (Crossref 404) with matching
+    # title+author+year VERIFIES, with no findings -- the article-only locators it
+    # lacks (volume/pages/journal) must not be invented as mismatches.
+    from veracite import record, verify
+    e = _entry("@software{k, author={Whitlock, Shannon}, "
+               "title={VeraCite: a verifier}, year={2026}, "
+               "doi={10.5281/zenodo.20963060}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (_datacite_record(), 200))
+    rep = Report(color=False)
+    res = record.resolve_entry(e, rep, 0, 5)
+    status, conf = verify.classify(e, res, rep)
+    assert status == "VERIFIED"
+    # The killer negative: no manufactured volume/pages/issue/journal mismatch.
+    cats = {f.category for f in rep.findings}
+    assert "metadata_mismatch" not in cats and "journal_macro" not in cats, \
+        f"a software record must not produce locator/journal findings; got {cats}"
+
+
+def test_datacite_software_missing_locators_not_flagged(monkeypatch):
+    # Even with NO volume/pages in the bib (normal for software), a software record
+    # produces no 'missing locator' / 'volume differs' noise.
+    from veracite import record
+    e = _entry("@software{k, author={Whitlock, Shannon}, "
+               "title={VeraCite: a verifier}, year={2026}, doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (_datacite_record(), 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    for f in rep.findings:
+        assert "volume" not in f.message and "pages" not in f.message \
+            and "journal differs" not in f.message, f"unexpected locator finding: {f.message}"
+
+
+def test_datacite_wrong_title_still_flags(monkeypatch):
+    # The identity check is NOT relaxed for DataCite: a genuinely different title is
+    # still caught (the scoping skips only the article-only LOCATORS, not title/author).
+    from veracite import record
+    e = _entry("@software{k, author={Whitlock, Shannon}, "
+               "title={Completely Different Software Name}, year={2026}, "
+               "doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (_datacite_record(), 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    assert any(f.category in ("metadata_mismatch", "id_resolves_wrong_record")
+               for f in rep.findings), "a wrong title must still be flagged for a DataCite record"
+
+
+def test_article_resolving_to_dataset_is_flagged(monkeypatch):
+    # The accompanying-dataset trap: an @article whose DOI resolves to a DATASET with
+    # the SAME title (a paper and its companion dataset share a title). Identity
+    # matches, but the author likely cited the dataset's DOI, not the paper's -- flag
+    # it (entrytype_suggestion), keyed on the registered TYPE, never the title.
+    from veracite import record
+    e = _entry("@article{k, author={Whitlock, Shannon}, "
+               "title={VeraCite: a verifier}, year={2026}, journal={Some Journal}, "
+               "doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    monkeypatch.setattr(record, "fetch_datacite",
+                        lambda doi, t: (_datacite_record(document_type="dataset"), 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    et = [f for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert et and "dataset" in et[0].message and "accompanying" in et[0].message, \
+        "an @article resolving to a dataset must warn it may be the wrong object"
+
+
+def test_datacite_journalarticle_gets_full_comparison(monkeypatch):
+    # Some publishers register ARTICLES with DataCite (resourceTypeGeneral
+    # 'JournalArticle'). Such a record is article-like, so the normal comparison
+    # applies -- a real volume mismatch is still caught (scoping is by TYPE, and this
+    # type is an article).
+    from veracite import record
+    e = _entry("@article{k, author={Whitlock, Shannon}, title={A Real Article}, "
+               "year={2026}, volume={5}, journal={J}, doi={10.1234/x}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    art = _datacite_record(title="A Real Article", document_type="journal article",
+                           volume="9", journal="J")
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (art, 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    vol = [f for f in rep.findings if f.category == "metadata_mismatch"
+           and "volume" in f.message]
+    assert vol, "a DataCite-registered ARTICLE must still get the volume comparison"
 
 
 def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):

@@ -136,6 +136,112 @@ def _crossref_doc_type(t):
     return _CROSSREF_TYPE_LABELS.get((t or "").lower(), "")
 
 
+# DataCite `resourceTypeGeneral` (its controlled vocabulary) -> a normalized
+# document_type. Classification keys on this field, NEVER on the title: a journal
+# article and its accompanying Zenodo dataset can share a title, so only the
+# registered TYPE distinguishes them. Two buckets matter to the comparison layer:
+#   * article/book-like types resolve to the SAME labels Crossref uses, so a
+#     DataCite-registered article gets the normal full comparison and the existing
+#     entry-type check works unchanged;
+#   * the data/software-like types map to their own labels, which the compare layer
+#     treats as non-article (title+author+year only) and which let an @article that
+#     resolved to data be flagged as a likely wrong-object citation.
+# Anything unlisted yields '' (no type claim) -- conservative, never a false flag.
+_DATACITE_TYPE_LABELS = {
+    # article / book-like -> Crossref-compatible labels (normal comparison)
+    "journalarticle": "journal article",
+    "conferencepaper": "proceedings",
+    "conferenceproceeding": "proceedings",
+    "datapaper": "journal article",
+    "preprint": "journal article",
+    "book": "book",
+    "bookchapter": "book chapter",
+    "dissertation": "thesis",
+    # data / software-like -> own labels (non-article comparison + wrong-object guard)
+    "software": "software",
+    "dataset": "dataset",
+    "model": "dataset",
+    "workflow": "software",
+    "computationalnotebook": "software",
+    "collection": "dataset",
+    "image": "dataset",
+    "physicalobject": "dataset",
+    "service": "software",
+    "sound": "dataset",
+    "audiovisual": "dataset",
+}
+
+# The normalized labels that denote a NON-article object (data/software/etc.). The
+# compare layer reads this to (a) skip the article-only locators (volume/issue/pages/
+# journal) and (b) flag an @article/@inproceedings that resolved to one of these.
+NONARTICLE_DOC_TYPES = {"software", "dataset"}
+
+
+def _datacite_doc_type(resource_type_general):
+    return _DATACITE_TYPE_LABELS.get((resource_type_general or "").lower(), "")
+
+
+def fetch_datacite(doi, timeout):
+    """Resolve a DOI to a normalized record via DataCite (the registry behind Zenodo,
+    figshare, Dryad, OSF -- software and datasets, but also some articles/books).
+    Returns (record, code); record is None on failure with the HTTP status in `code`.
+
+    DataCite and Crossref are separate registries, so this is the fallback when
+    Crossref 404s but the DOI still resolves (record.py). The record's `document_type`
+    comes from DataCite's `resourceTypeGeneral` (Software/Dataset/JournalArticle/...),
+    which -- not the title -- is what classifies the object: a paper and its companion
+    dataset may share a title, so only the registered type tells them apart."""
+    data, code = http_get_json(endpoint("datacite_doi", doi=doi), timeout)
+    if code != 200 or not data:
+        return None, code
+    attr = (data.get("data") or {}).get("attributes") or {}
+    authors, authors_display, given, given_full = [], [], {}, {}
+    for c in (attr.get("creators") or []):
+        # Prefer the structured familyName; fall back to a "Family, Given" or plain
+        # `name`. nameType "Organizational" (a lab/consortium) has no surname to fold
+        # -- keep it as a display name only, never as a matchable author key.
+        fam = clean_tex(c.get("familyName") or "").strip()
+        giv = clean_tex(c.get("givenName") or "").strip()
+        if not fam:
+            name = clean_tex(c.get("name") or "").strip()
+            if (c.get("nameType") or "").lower().startswith("organ") or not name:
+                continue
+            if "," in name:
+                fam, _, giv = (p.strip() for p in (name.split(",", 1) + [""])[:3])
+            else:
+                parts = name.split()
+                fam, giv = parts[-1], " ".join(parts[:-1])
+        surname = fold_surname(fam)
+        if not surname:
+            continue
+        authors.append(surname)
+        authors_display.append(fam)
+        if giv:
+            given[surname] = giv.split()[0]
+            given_full[surname] = giv
+    titles = attr.get("titles") or []
+    title = (titles[0].get("title") if titles else "") or ""
+    year = attr.get("publicationYear")
+    try:
+        year = int(year) if year is not None else None
+    except (TypeError, ValueError):
+        year = None
+    rtg = ((attr.get("types") or {}).get("resourceTypeGeneral")) or ""
+    return Record(
+        authors=authors,
+        authors_display=authors_display,
+        given=given,
+        given_full=given_full,
+        year=year,
+        title=title,
+        # The repository ("Zenodo"/"Dryad") is the nearest analog to a journal, but it
+        # is NOT compared for non-article records (the compare layer skips it), so it is
+        # carried for completeness only.
+        journal=(attr.get("publisher") or ""),
+        document_type=_datacite_doc_type(rtg),
+    ), code
+
+
 _ARXIV_CACHE = {}
 
 

@@ -204,7 +204,13 @@ comparing a garbled parse against a record only yields false mismatches.
    names) and journal-name folding (a curated physics table plus period-insensitive
    ISO-4, so `Phys. Rev. B` matches `Physical Review B`) keep these from misfiring.
    The one identity **error** is when first author *and* title both differ strongly —
-   the id likely points at a different paper (a copy-pasted DOI).
+   the id likely points at a different paper (a copy-pasted DOI). A DOI that resolves
+   at **DataCite** rather than Crossref (a Zenodo/figshare/Dryad **software or
+   dataset**) is resolved against DataCite and verified on title/author/year only —
+   the article-only locators (volume/pages/journal) it lacks are never flagged as
+   missing. Because a paper and its companion dataset can share a title, the object is
+   classified by its registered type, not its title: an `@article` whose DOI resolves
+   to software/data is flagged (you may have cited the dataset's DOI, not the paper's).
 
 3. **Status** (online) — retractions (OpenAlex / Retraction Watch), linked
    errata/corrections/comments/replies, and preprints with a published version.
@@ -430,6 +436,7 @@ tests/           pytest suite + .bib fixtures
 - Python 3.8+. Uses `requests` if present, else the stdlib `urllib`.
 - Network (for the online layers): `api.crossref.org`, `export.arxiv.org`,
   `api.openalex.org`, `api.semanticscholar.org`, `inspirehep.net` (physics),
+  `api.datacite.org` (software/dataset DOIs — Zenodo, figshare, Dryad),
   `openlibrary.org` / `googleapis.com` (ISBN). All optional and degrade
   gracefully — a source that fails to respond is reported as "could not retrieve",
   never a crash, and `--offline` skips them all.

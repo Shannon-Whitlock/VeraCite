@@ -702,7 +702,26 @@ def compare_against_record(e, rec, source, rep):
     doc_type = (rec.get("document_type") or "").lower()
     bib_is_articlelike = e.etype in ("article", "inproceedings", "conference")
     bib_is_booklike = e.etype in ("book", "mvbook", "collection", "incollection", "inbook")
-    if bib_is_articlelike and doc_type in ("thesis", "proceedings", "book chapter", "book"):
+    # A non-article object (software/dataset, via DataCite's resourceTypeGeneral). The
+    # classification is the RECORD's registered type, never the title -- a paper and its
+    # companion dataset can share a title, so only the type tells them apart. When the
+    # record is one of these, the article-only locators (volume/issue/pages/journal)
+    # are skipped below: they do not exist for software/data, so comparing them would
+    # manufacture false metadata_mismatch findings.
+    nonarticle = doc_type in ("software", "dataset")
+    if bib_is_articlelike and nonarticle:
+        # The bib says @article but the DOI resolves to software/data. Identity still
+        # holds (title/author are compared below), but the author likely cited the
+        # accompanying dataset/software DOI instead of the paper's -- a wrong-object
+        # mistake the matching title would otherwise hide. Flag it to verify.
+        rep.withdraw(e.key, "entrytype_suggestion")
+        kind = "dataset" if doc_type == "dataset" else "software"
+        target = "@dataset" if doc_type == "dataset" else "@software"
+        rep.add(Severity.WARN, e, f"[{source}] this DOI resolves to {kind}, not a "
+                f"journal article -- you may have cited the accompanying {kind}'s DOI "
+                f"rather than the paper's; verify, and use {target} if the {kind} is "
+                f"what you mean", "record", category="entrytype_suggestion", field="doi")
+    elif bib_is_articlelike and doc_type in ("thesis", "proceedings", "book chapter", "book"):
         rep.withdraw(e.key, "entrytype_suggestion")
         target = {"thesis": "@thesis", "proceedings": "@inproceedings/@proceedings",
                   "book chapter": "@incollection", "book": "@book"}[doc_type]
@@ -866,6 +885,11 @@ def compare_against_record(e, rec, source, rep):
     # is render-affecting -> WARN.
     folded_missing = set()
     for fld, label, bibval, recval in _soft_field_diffs(e, rec):
+        # A software/dataset record has no volume/issue/pages -- only `year` is a real,
+        # comparable field. Skip the article-only locators so a record that legitimately
+        # lacks them never produces a false 'volume differs' / 'pages differ' finding.
+        if nonarticle and fld != "year":
+            continue
         # arXiv preprints are VERSIONED: v1 and a later vN can carry different years
         # (<published> vs <updated>). When the bib's year matches SOME version in the
         # record's version span [year, updated_year] -- just not the one the record
@@ -922,10 +946,15 @@ def compare_against_record(e, rec, source, rep):
     if bib_number and bib_number == rec_issue and not numeric_journal:
         rep.withdraw(e.key, "misplaced_field")
 
+    # The journal comparison is article-only. For a software/dataset record the
+    # record's "journal" is the repository name ("Zenodo") and the bib entry has no
+    # journal at all -- comparing them would be meaningless, so skip the whole block.
     raw_journal = e.get("journal", "")
     bj, aj = clean_tex(raw_journal).lower(), clean_tex(rec.get("journal", "")).lower()
     rec_journal_safe = _safe_suggestion(rec.get("journal", ""))
-    if bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
+    if nonarticle:
+        pass
+    elif bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
         # Journal renders in the citation -> WARN, with the record's name suggested
         # (only when it is safe to paste verbatim -- an entity-laden name is withheld).
         rep.add(Severity.WARN, e, f"[{source}] journal differs", "record",

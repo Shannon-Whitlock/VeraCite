@@ -51,8 +51,8 @@ def _arxiv_abstract_by_title(e, timeout):
         return rec.get("abstract", "")
     return ""
 from .sources import (doi_registered_at_datacite, fetch_abstract_s2, fetch_arxiv,
-                      fetch_crossref, fetch_inspire, fetch_isbn, fetch_openalex,
-                      fetch_related, search_arxiv)
+                      fetch_crossref, fetch_datacite, fetch_inspire, fetch_isbn,
+                      fetch_openalex, fetch_related, search_arxiv)
 
 # Re-exported for callers/tests that reach these as `record.X` (their logic lives
 # in compare.py now). Listed in __all__-style here so a linter sees them as used.
@@ -203,14 +203,21 @@ def resolve_entry(e, rep, delay, timeout):
         if crossref_doi and code == 404:
             # A Crossref 404 means Crossref has no record -- NOT that the DOI is dead.
             # Crossref and DataCite are separate registries; a Zenodo/Figshare/Dryad
-            # dataset or software DOI resolves fine via DataCite. Only call a DOI dead
-            # when it is absent from BOTH. If DataCite has it, the DOI is valid but
-            # carries no Crossref metadata to compare -- a record_unresolved note, not
-            # a dead-DOI error (never a false 'must fix' on a working DOI).
-            if doi_registered_at_datacite(crossref_doi, timeout):
+            # software or dataset DOI (and some articles/books) resolves via DataCite.
+            # Fetch the DataCite record and verify against it like any other source;
+            # only call a DOI dead when it is absent from BOTH.
+            dc_rec, dc_code = fetch_datacite(crossref_doi, timeout)
+            if dc_rec is not None:
+                rec, source = dc_rec, "datacite"
+                # fall through to the shared "rec is not None" path below, which sets
+                # res.record/source and runs compare_against_record.
+            elif dc_code == 200 or doi_registered_at_datacite(crossref_doi, timeout):
+                # Registered at DataCite but the metadata could not be parsed into a
+                # record -- the DOI is valid (never a dead-DOI error), but there is
+                # nothing to compare against.
                 rep.add(Severity.WARN, e, f"DOI is registered with DataCite, not "
-                        f"Crossref (a dataset/software DOI); no Crossref metadata to "
-                        f"verify against: {doi}", "record", category="record_unresolved")
+                        f"Crossref; its metadata could not be parsed to verify "
+                        f"against: {doi}", "record", category="record_unresolved")
             else:
                 res.dead_doi = True
                 rep.add(Severity.ERROR, e, f"DOI does not resolve (404 at Crossref and "
@@ -224,7 +231,10 @@ def resolve_entry(e, rep, delay, timeout):
             # search in pid_check. The driver emits it only if the entry stays
             # unresolved (see emit of res.no_id).
             res.no_id = True
-        return res
+        # The DataCite branch above may have recovered a record; if so, fall through to
+        # the shared compare path. Only return early when nothing was resolved.
+        if rec is None:
+            return res
 
     if rec is not None:
         res.record, res.source = rec, source
