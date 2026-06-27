@@ -152,15 +152,21 @@ function startProgress() {
 function render(data) {
   const parts = [];
   const s = data.summary || {};
-  const score = (s.integrity_score === null || s.integrity_score === undefined)
-    ? "–" : s.integrity_score;
+  const fmt = (v) => (v === null || v === undefined) ? "–" : v;
+  const integrity = fmt(s.integrity_score);
+  const confidence = fmt(s.confidence_score);
   const verdict = [
     s.verified != null ? `${s.verified} verified` : null,
     s.unverified ? `${s.unverified} unverified` : null,
     s.mismatch ? `${s.mismatch} mismatch` : null,
   ].filter(Boolean).join(" · ");
+  // Two headline scores: integrity (is the bibliography sound?) and confidence (how
+  // much VeraCite trusts the verifications it made). They are independent -- a clean
+  // but thinly-corroborated bib is high integrity / lower confidence, and a bib with
+  // a field typo on a resolved entry is lower integrity / high confidence.
   parts.push(`<div class="score">
-    <span class="num">${score}</span><span class="out">/ 100 integrity</span>
+    <span class="metric"><span class="num">${integrity}</span><span class="out">/ 100 integrity</span></span>
+    <span class="metric"><span class="num">${confidence}</span><span class="out">/ 100 confidence</span></span>
     <span class="verdict">${esc(verdict || "")}</span></div>`);
 
   if (data.truncated) {

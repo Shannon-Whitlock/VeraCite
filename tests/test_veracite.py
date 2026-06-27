@@ -2631,6 +2631,84 @@ def test_integrity_score_ignores_unchecked_entries():
     assert with_skipped["integrity_score"] >= 90
 
 
+# --- two metrics: integrity (author-fixable) vs confidence (source trust) ---
+
+def _score(statuses, results, findings=()):
+    """Run integrity() with given per-entry statuses/results and seeded findings."""
+    entries = [_YEnt(2020) for _ in statuses]
+    for e, k in zip(entries, statuses):
+        e.key = k
+    rep = Report(color=False)
+    for sev, key, cat in findings:
+        rep.add(sev, (key, 1), "x", "record", category=cat)
+    return verify.integrity(entries, statuses, results, rep)
+
+
+def test_clean_doi_resolve_is_full_confidence_single_source():
+    # A clean resolve by the entry's own DOI at one trusted source is NOT modest:
+    # confidence 100. We do not dock for "only one source" -- a DOI matching its
+    # Crossref record is the strongest verification VeraCite makes.
+    s = _score({"a": ("VERIFIED", 0.95)},
+               {"a": _res(doi="10.1/a", record={}, sources={"crossref": {}})})
+    assert s["confidence_score"] == 100 and s["integrity_score"] == 100
+
+
+def test_metadata_mismatch_lowers_integrity_not_confidence():
+    # The bug that started this: a title/field disagreeing with the record is an
+    # AUTHOR-fixable defect -> it lowers integrity, but the source was trusted and the
+    # entry resolved, so confidence stays high. (Was: 100/100 beside a WARN.)
+    s = _score({"a": ("VERIFIED", 0.75)},
+               {"a": _res(doi="10.1/a", record={}, sources={"crossref": {}})},
+               findings=[(Severity.WARN, "a", "metadata_mismatch")])
+    assert s["confidence_score"] == 100, "a field typo must not make VeraCite look unsure"
+    assert s["integrity_score"] < 100, "a field disagreement must dent integrity"
+    assert s["integrity_score"] >= 70, "a transcription slip is minor, not catastrophic"
+
+
+def test_source_conflict_lowers_neither_integrity_nor_confidence_via_trust():
+    # Registries disagreeing (source_conflict) is OUR verification matter, not the
+    # author's defect: integrity stays clean. Confidence is by source trust (the entry
+    # still resolved at a trusted source), so it is not docked either.
+    s = _score({"a": ("VERIFIED", 0.70)},
+               {"a": _res(doi="10.1/a", record={}, sources={"crossref": {}, "inspire": {}})},
+               findings=[(Severity.WARN, "a", "source_conflict")])
+    assert s["integrity_score"] == 100
+    assert s["confidence_score"] == 100
+
+
+def test_arxiv_only_lowers_confidence_not_integrity():
+    # arXiv-only metadata is author-submitted (weaker basis) -> confidence < 100, but
+    # there is nothing for the author to FIX -> integrity stays 100.
+    s = _score({"a": ("VERIFIED", 0.70)},
+               {"a": _res(arxiv_id="2101.00001", record={}, sources={"arxiv": {}})})
+    assert s["integrity_score"] == 100
+    assert 80 <= s["confidence_score"] < 100
+
+
+def test_unverified_and_mismatch_tank_both_scores():
+    # A reference that may not exist (UNVERIFIED) or resolves to a different paper
+    # (MISMATCH) is the severe, must-fix case -> low integrity AND low confidence.
+    un = _score({"a": ("UNVERIFIED", 0.1)}, {"a": _res()})
+    mm = _score({"a": ("MISMATCH", 0.3)}, {"a": _res(doi="10.1/a", record={})})
+    assert un["integrity_score"] < 50 and un["confidence_score"] < 50
+    assert mm["integrity_score"] < 50 and mm["confidence_score"] < 50
+
+
+def test_integrity_severity_ordering():
+    # A metadata typo must score far higher than a hallucinated/unverifiable ref.
+    typo = _score({"a": ("VERIFIED", 0.75)},
+                  {"a": _res(doi="10.1/a", record={}, sources={"crossref": {}})},
+                  findings=[(Severity.WARN, "a", "metadata_mismatch")])
+    halluc = _score({"a": ("UNVERIFIED", 0.1)}, {"a": _res()})
+    assert typo["integrity_score"] > halluc["integrity_score"] + 30
+
+
+def test_summary_carries_both_scores():
+    s = _score({"a": ("VERIFIED", 1.0)},
+               {"a": _res(doi="10.1/a", record={}, sources={"crossref": {}})})
+    assert "integrity_score" in s and "confidence_score" in s
+
+
 # --- L8: per-reference JSON shape ------------------------------------------
 
 def test_json_has_summary_and_references():

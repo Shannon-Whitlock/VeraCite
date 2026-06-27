@@ -454,7 +454,75 @@ def chronological_order(groups, by_key, rep):
                     "verify", category="citation_order")
 
 
-# --- Layer 6: integrity score + coverage -----------------------------------
+# --- Layer 6: integrity + confidence scores --------------------------------
+#
+# Two orthogonal 0-100 metrics, because they answer different questions and drive
+# different action:
+#   INTEGRITY  -- is the bibliography sound? Only AUTHOR-FIXABLE defects dent it,
+#                 weighted by how badly each compromises the reference. A clean entry
+#                 is 1.0; a transcription/completeness slip costs a little; a likely
+#                 wrong or unverifiable reference costs a lot. NOT lowered by how many
+#                 sources corroborated (that is outside the author's control).
+#   CONFIDENCE -- how much VeraCite trusts the verifications it made. High whenever a
+#                 TRUSTED source confirmed the entry; we do NOT dock for "only one
+#                 source" (a DOI resolving at Crossref is gold) nor for a field
+#                 disagreeing (that is an integrity matter, not a sign we are unsure).
+#                 Read as a quality signal, so it stays high for a sound check.
+# So a clean-but-thinly-corroborated bib is integrity 100 / confidence lower, and a
+# bib with a title typo on a DOI-resolved entry is integrity < 100 / confidence 100.
+
+# Per-entry INTEGRITY credit, keyed by the worst author-fixable defect on the entry.
+_INTEGRITY_CREDIT = {
+    "clean":             1.00,
+    "missing_pid":       0.85,   # a modern article omits an available DOI/PID
+    "metadata_mismatch": 0.80,   # a field disagrees with the record (fixable)
+    "dead_doi":          0.65,   # the recorded DOI is broken (wrong id on file)
+    "unverified":        0.30,   # no record returned -- may not exist as written
+    "mismatch":          0.20,   # the id resolves to a DIFFERENT paper
+}
+_DUP_PENALTY = 10                # flat points per duplicate (a file-level defect)
+
+# Per-entry CONFIDENCE, keyed by HOW the entry resolved (trust in the source), NOT by
+# whether a field disagreed. metadata_mismatch / source_conflict do not appear here.
+_CONFIDENCE = {
+    "trusted":        1.00,      # resolved by its own id at a trusted source
+    "arxiv":          0.90,      # arXiv only (author-submitted metadata)
+    "search":         0.85,      # recovered by title/author search (no id in entry)
+    "dead_recovered": 0.80,      # recorded DOI broken, paper recovered by search
+    "mismatch":       0.30,
+    "unverified":     0.10,
+}
+
+
+def _integrity_defect(status, fcats, has_pid):
+    """The worst author-fixable defect on one entry -> its integrity-credit key."""
+    if status == "MISMATCH":
+        return "mismatch"
+    if status == "UNVERIFIED":
+        return "unverified"
+    if "dead_doi" in fcats:
+        return "dead_doi"
+    if "metadata_mismatch" in fcats:
+        return "metadata_mismatch"
+    if ("doi_available" in fcats or "pid_missing" in fcats) and not has_pid:
+        return "missing_pid"
+    return "clean"
+
+
+def _confidence_kind(status, res):
+    """How one entry resolved -> its confidence key (trust in the source)."""
+    if status == "MISMATCH":
+        return "mismatch"
+    if status == "UNVERIFIED":
+        return "unverified"
+    if getattr(res, "dead_doi", False):
+        return "dead_recovered"
+    if getattr(res, "found_by_search", False):
+        return "search"
+    if set(getattr(res, "sources", {}) or {}) <= {"arxiv"}:
+        return "arxiv"
+    return "trusted"
+
 
 def integrity(entries, statuses, results, rep):
     """Compute the bibliography integrity summary from per-reference statuses and
@@ -478,7 +546,6 @@ def integrity(entries, statuses, results, rep):
                                if s == "VERIFIED" and c < 1.0)
     unverified = sum(1 for s, _ in statuses.values() if s == "UNVERIFIED")
     mismatch = sum(1 for s, _ in statuses.values() if s == "MISMATCH")
-    passed = verified
 
     # DOI coverage over *eligible* records (post-2005 article-likes) among checked.
     eligible = [e for e in checked if is_article_like(e)
@@ -497,12 +564,31 @@ def integrity(entries, statuses, results, rep):
     conflicts = cat("source_conflict")
     superseded = cat("preprint_superseded")
 
-    # Integrity score (0-100): verification rate (50), PID coverage (20), DOI
-    # coverage of eligible records (15), freedom from integrity defects (15).
-    verify_rate = passed / n if n else 1.0
-    defect_penalty = min(1.0, (duplicates + unverified + mismatch + conflicts) / n) if n else 0.0
-    score = round(100 * (0.50 * verify_rate + 0.20 * pid_cov + 0.15 * doi_cov
-                         + 0.15 * (1 - defect_penalty)))
+    # Per-entry findings, for the per-entry defect lookup.
+    fcats_by_key = {}
+    for f in rep.live_findings():
+        fcats_by_key.setdefault(f.key, set()).add(f.category)
+
+    # INTEGRITY (0-100): mean per-entry credit by the worst author-fixable defect,
+    # minus a flat penalty per duplicate (a file-level defect not tied to one entry).
+    # A clean bibliography scores 100; a wrong/unverifiable reference costs far more
+    # than a transcription slip. Corroboration depth does NOT enter here.
+    credit_sum = 0.0
+    for e in checked:
+        status, _ = statuses[e.key]
+        res = results.get(e.key)
+        has_pid = bool(res and (res.doi or res.arxiv_id or res.isbn))
+        credit_sum += _INTEGRITY_CREDIT[
+            _integrity_defect(status, fcats_by_key.get(e.key, set()), has_pid)]
+    integrity_score = (max(0, round(100 * credit_sum / n - _DUP_PENALTY * duplicates))
+                       if n else None)
+
+    # CONFIDENCE (0-100): mean trust in the verification source. High whenever a
+    # trusted source confirmed the entry; not docked for single-source or a field
+    # discrepancy (those are corroboration depth / integrity, not our uncertainty).
+    conf_sum = sum(_CONFIDENCE[_confidence_kind(statuses[e.key][0], results.get(e.key))]
+                   for e in checked)
+    confidence_score = round(100 * conf_sum / n) if n else None
 
     return {
         "checked": n, "verified": verified,
@@ -512,7 +598,8 @@ def integrity(entries, statuses, results, rep):
         "pid_coverage": round(pid_cov, 3),
         "duplicates": duplicates, "source_conflicts": conflicts,
         "preprints_with_published_version": superseded,
-        "integrity_score": score,
+        "integrity_score": integrity_score,
+        "confidence_score": confidence_score,
     }
 
 

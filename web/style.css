@@ -35,6 +35,8 @@ button.ghost { background: transparent; color: var(--accent); }
   background: var(--card); border: 1px solid var(--border); border-radius: 10px;
   margin-bottom: 1.25rem;
 }
+.score .metric { display: flex; align-items: baseline; gap: .4rem; }
+.score .metric + .metric { margin-left: 1.5rem; }
 .score .num { font-size: 2.4rem; font-weight: 700; line-height: 1; }
 .score .out { color: var(--muted); }
 .score .verdict { margin-left: auto; text-align: right; color: var(--muted);

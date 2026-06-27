@@ -653,16 +653,21 @@ class Report:
             for line in self._render_integrity(integrity):
                 print(line, file=out)
 
-    def _render_integrity(self, s):
-        """The Layer-6 verification roll-up appended to the summary."""
-        bar = self._c("=" * 64, _DIM)
-        score = s["integrity_score"]
-        score_color = _GREEN if score >= 90 else (
+    def _score_color(self, score):
+        """Green >= 90, yellow >= 70, else red -- shared by both 0-100 scores."""
+        return _GREEN if score >= 90 else (
             SEVERITY_STYLE[Severity.WARN][1] if score >= 70
             else SEVERITY_STYLE[Severity.ERROR][1])
+
+    def _render_integrity(self, s):
+        """The Layer-6 roll-up appended to the summary: the verification counts,
+        coverage, and the two headline scores (integrity + confidence)."""
+        bar = self._c("=" * 64, _DIM)
+        integ = s["integrity_score"]
+        conf = s.get("confidence_score")
         caveat = s.get("verified_with_caveat", 0)
         caveat_txt = f" ({caveat} with a caveat)" if caveat else ""
-        return [
+        lines = [
             f"  verified {self._c(str(s['verified']), _GREEN)}{caveat_txt}  "
             f"unverified {self._c(str(s['unverified']), SEVERITY_STYLE[Severity.WARN][1])}  "
             f"mismatch {self._c(str(s['mismatch']), SEVERITY_STYLE[Severity.ERROR][1])}"
@@ -674,10 +679,16 @@ class Report:
             f"(post-2005 articles)   "
             f"PID coverage: {s['pid_coverage']:.0%} of {s['checked']} checked "
             f"(DOI/arXiv/ISBN)",
-            f"  {self._c('integrity score:', _BOLD)} "
-            f"{self._c(str(score) + '/100', score_color)}",
-            bar,
         ]
+        # Two headline scores, side by side: integrity (is the bib sound?) and
+        # confidence (how much we trust the verifications we made?).
+        score_line = (f"  {self._c('integrity', _BOLD)} "
+                      f"{self._c(str(integ) + '/100', self._score_color(integ))}")
+        if conf is not None:
+            score_line += (f"   {self._c('confidence', _BOLD)} "
+                           f"{self._c(str(conf) + '/100', self._score_color(conf))}")
+        lines += [score_line, bar]
+        return lines
 
     def _render_disclaimer(self, llm_used):
         """Lead the report with the accuracy disclaimer(s)."""

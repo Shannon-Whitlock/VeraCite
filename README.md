@@ -68,7 +68,7 @@ developer can read, correct, and extend. The four places to look:
 | **Static checks** (the rule registry) | [`veracite/rules.py`](veracite/rules.py) | Each check is a function decorated `@rule` (per entry) or `@file_rule` (whole file) and appended to a registry the engine iterates. Add a check by writing one function; the module docstring marks it *"the part meant to be read and edited."* |
 | **Structural validity** (legal & mandatory fields) | [`veracite/data/biblatex_datamodel.json`](veracite/data/biblatex_datamodel.json), loaded by [`veracite/datamodel.py`](veracite/datamodel.py) | Generated from biblatex's **own** `blx-dm.def` by [`tools/gen_datamodel.py`](tools/gen_datamodel.py) — not a hand-kept blocklist. Regenerate when biblatex updates. |
 | **Severity, grouping & descriptions** (what's an error vs. a note, the syntax/semantic/context bucket, and the catalog text) | `resolve_severity()`, `CATEGORY_GROUP`, and `CATEGORY_DOC` in [`veracite/report.py`](veracite/report.py); defaults in `DEFAULT_SETTINGS["severity"]` ([`veracite/config.py`](veracite/config.py)) | Every finding carries a stable string **category**. List the whole catalog with `--list-rules`; re-rank any category to `error`/`warning`/`note` via the `severity` block in a settings file (see [Configuration](#configuration)) — no code change needed. |
-| **Integrity score** (the 0–100 rating) | `integrity()` in [`veracite/verify.py`](veracite/verify.py) | A transparent weighted formula over explicit counts — `0.50·verification + 0.20·PID + 0.15·DOI + 0.15·(1 − defects)` — **not** a model output. |
+| **Integrity & confidence scores** (two 0–100 ratings) | `integrity()` in [`veracite/verify.py`](veracite/verify.py) | Two transparent per-entry roll-ups, **not** model outputs: **integrity** is the mean of a severity-weighted credit for each entry's worst *author-fixable* defect (a typo costs little, a wrong/unverifiable reference costs a lot); **confidence** is the mean trust in the source that verified each entry (a DOI resolving at Crossref is full trust). |
 
 The complete list of every finding category VeraCite can emit — with its default
 severity, group, what supersedes it, the source rule(s) that raise it, and a one-line
@@ -234,10 +234,20 @@ comparing a garbled parse against a record only yields false mismatches.
    resolved against *that* — the search never runs. A post-2005 article with no
    findable identifier is flagged; pre-2005 work is not penalized.
 
-6. **Integrity score** (online) — a roll-up: counts of verified (and caveats),
-   unverified, mismatch, DOI coverage over eligible (post-2005) articles, PID
-   coverage, and a **0–100 integrity score** — a transparent weighted blend:
-   verification 50%, PID 20%, DOI 15%, freedom from defects 15%.
+6. **Integrity & confidence scores** (online) — a roll-up: counts of verified (and
+   caveats), unverified, mismatch, DOI/PID coverage, and **two independent 0–100
+   scores**. **Integrity** answers *"is the bibliography sound?"* — the mean of a
+   per-entry credit (1.0 clean) docked by the entry's worst **author-fixable** defect,
+   weighted by severity (a metadata typo costs a little, a dead DOI more, a wrong or
+   unverifiable reference a lot; duplicates subtract a flat penalty). **Confidence**
+   answers *"how much does VeraCite trust the verifications it made?"* — the mean
+   trust in the source that confirmed each entry (a DOI/id resolving at a trusted
+   source is full trust; arXiv-only or a search recovery a little less; unverified
+   low). The two are **orthogonal**: a clean but thinly-corroborated bibliography is
+   high integrity / lower confidence, and a bibliography with a field typo on a
+   resolved entry is lower integrity / high confidence. Corroboration depth never
+   dents integrity (it is outside the author's control), and a field disagreement
+   never dents confidence (the source was still trusted).
 
 7. **LLM** (optional, `--llm`, needs `--tex`) — a language model rates each cited
    entry's **relevance** (1–5) from the abstract and surrounding sentences and flags
@@ -279,10 +289,10 @@ balance, dropped cited keys) and `"<summary>"` (the integrity roll-up):
  "sources": ["crossref", "inspire"], "canonical_record": {"title": "...", "year": 2009},
  "issues": []}
 {"key": "<file>", "issues": []}
-{"key": "<summary>", "veracite_version": "0.1.3",
+{"key": "<summary>", "veracite_version": "0.1.4",
  "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
  "unverified": 1, "mismatch": 0, "doi_coverage": 0.94, "pid_coverage": 0.97,
- "integrity_score": 97}}
+ "integrity_score": 97, "confidence_score": 99}}
 ```
 
 Read it line by line (`for line in open(f): json.loads(line)`). The `"<summary>"`

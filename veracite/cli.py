@@ -30,11 +30,12 @@ LARGE_BIB = 200
 
 
 def offline_summary_stub(rep):
-    """The stable offline-mode `summary` record: no verification, so a null integrity
-    score and the finding counts -- an honest, parseable shape, never a fabricated
-    100. Used when no online layer ran."""
+    """The stable offline-mode `summary` record: no verification, so null scores and
+    the finding counts -- an honest, parseable shape, never a fabricated 100. Used
+    when no online layer ran."""
     return {
-        "mode": "offline", "checked": 0, "integrity_score": None,
+        "mode": "offline", "checked": 0,
+        "integrity_score": None, "confidence_score": None,
         "errors": rep.count(Severity.ERROR), "warnings": rep.count(Severity.WARN),
         "notes": rep.count(Severity.INFO),
     }
