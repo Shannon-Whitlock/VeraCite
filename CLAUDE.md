@@ -107,7 +107,7 @@ must be written here so it is enforced in the next.
 
 - **`url` is not validated.** A dead or wrong link in a `@misc`/`@online`/`@software`
   entry passes silently. Checking it means VeraCite would **fetch a URL from an
-  untrusted `.bib`**, which is an SSRF risk. 
+  untrusted `.bib`**, which is an SSRF risk.
 
 ## Before proposing a patch
 
