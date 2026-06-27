@@ -673,7 +673,38 @@ def field_diffs(left, right, lname, rname, pages_substring_ok=False, skip_keys=(
     return out
 
 
-def compare_against_record(e, rec, source, rep):
+def _bib_matches_earlier_version(e, rec, btitle, atitle, timeout):
+    """When the arXiv record's (latest) title disagrees strongly with the bib's, ask
+    whether the bib title matches an EARLIER version of the same preprint -- the
+    honest case where the author cited a version arXiv has since RENAMED. Returns
+    (matched_version, latest_version, latest_title) if so, else None.
+
+    Only the arXiv source carries versioned titles, and only when we have a bare id
+    and a timeout (so the call sites that pass neither cannot probe). The bib title
+    must match a NON-latest version: a match against the latest would not have
+    reached this strong-mismatch branch, and there is nothing to report when the
+    cited title is already current."""
+    arxiv_id = rec.get("arxiv_id", "")
+    if timeout is None or not arxiv_id:
+        return None
+    from .sources import arxiv_version_titles
+    versions = arxiv_version_titles(arxiv_id, timeout)
+    if len(versions) < 2:
+        return None
+    latest = max(versions)
+    bkey = title_key(btitle)
+    # The cited title must match an EARLIER version (not the latest) closely. Use the
+    # same tolerant fold the rest of the title layer uses; require a near-exact match
+    # so a different paper that merely shares words cannot pose as "an old version".
+    for v in sorted(versions):
+        if v == latest:
+            continue
+        if title_key(versions[v]) == bkey or title_overlap(versions[v], btitle) >= 0.9:
+            return (v, latest, versions[latest])
+    return None
+
+
+def compare_against_record(e, rec, source, rep, timeout=None):
     """RECORD layer: flag where the entry disagrees with its id-resolved record.
     The DOI/arXiv id already establishes identity, so individual field
     disagreements (author, title, year/volume/pages, journal) are metadata
@@ -862,11 +893,29 @@ def compare_against_record(e, rec, source, rep):
                         f"book/volume, not the chapter -- check the entry type", "record",
                         category="container_granularity")
             elif overlap < 0.6:
-                title_differs_strongly = True
-                rep.add(Severity.WARN, e, f"[{source}] title differs from record (overlap {overlap:.0%}){mangle_note}:\n"
-                        f"        bib:    {btitle[:90]}\n"
-                        f"        {source}: {atitle[:90]}", "record",
-                        category="metadata_mismatch", field="title", suggested=_title_sug())
+                # Before calling this a mismatch, check the honest case: the bib may
+                # faithfully cite an EARLIER arXiv version whose title arXiv later
+                # changed. If the cited title matches a non-latest version, the bib is
+                # NOT wrong -- suppress the mismatch, withhold the title overwrite (it
+                # would push the new title over a correct one -- 'never push a bad
+                # value'), and emit an informational 'renamed in a later version' note.
+                # That note is itself superseded by preprint_superseded when a
+                # published version exists (one fix -- cite the published DOI -- covers
+                # both); record.py records that supersession.
+                retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
+                if retitle:
+                    matched_v, latest_v, latest_title = retitle
+                    rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
+                            f"in a later version: the cited title matches v{matched_v}, but "
+                            f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
+                            f"cited title if you mean the current version", "record",
+                            category="preprint_retitled", field="title")
+                else:
+                    title_differs_strongly = True
+                    rep.add(Severity.WARN, e, f"[{source}] title differs from record (overlap {overlap:.0%}){mangle_note}:\n"
+                            f"        bib:    {btitle[:90]}\n"
+                            f"        {source}: {atitle[:90]}", "record",
+                            category="metadata_mismatch", field="title", suggested=_title_sug())
             else:
                 rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}",
                         "record", category="metadata_mismatch", field="title", suggested=_title_sug())

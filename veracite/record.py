@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from .compare import compare_against_record, compare_sources
 from .normalize import (DOI_FULL_RE, bare_doi, clean_tex, extract_arxiv_id,
                         extract_doi_from_url, extract_inspire_recid, extract_isbn,
-                        fold_surname, is_book, is_preprint, split_authors)
+                        fold_surname, is_book, is_preprint, split_authors, strip_tags)
 from .report import Severity
 from .titles import title_overlap
 
@@ -50,9 +50,10 @@ def _arxiv_abstract_by_title(e, timeout):
             continue
         return rec.get("abstract", "")
     return ""
-from .sources import (doi_registered_at_datacite, fetch_abstract_s2, fetch_arxiv,
-                      fetch_crossref, fetch_datacite, fetch_inspire, fetch_isbn,
-                      fetch_openalex, fetch_related, search_arxiv)
+from .sources import (arxiv_fetch_was_transient, doi_registered_at_datacite,
+                      fetch_abstract_s2, fetch_arxiv, fetch_crossref, fetch_datacite,
+                      fetch_inspire, fetch_isbn, fetch_openalex, fetch_related,
+                      search_arxiv)
 
 # Re-exported for callers/tests that reach these as `record.X` (their logic lives
 # in compare.py now). Listed in __all__-style here so a linter sees them as used.
@@ -121,6 +122,14 @@ class Resolution:
                                          # entry with no findable identifier); the
                                          # deferred 'record_unresolved' note is then
                                          # redundant -- same root cause, same fix
+    online_error: bool = False           # resolution failed on a TRANSIENT API error
+                                         # (429/5xx/network), not a real miss -- so a
+                                         # re-run should RETRY this entry's online phase
+                                         # rather than treat it as settled
+    llm_error: bool = False              # the LLM rating call FAILED (provider/CLI/
+                                         # connection error), as opposed to a legitimate
+                                         # 'no abstract' skip -- so a re-run should RETRY
+                                         # the llm phase rather than treat it as settled
 
 
 def resolve_entry(e, rep, delay, timeout):
@@ -223,9 +232,20 @@ def resolve_entry(e, rep, delay, timeout):
                 rep.add(Severity.ERROR, e, f"DOI does not resolve (404 at Crossref and "
                         f"DataCite): {doi}", "record", category="dead_doi")
         elif crossref_doi or arxiv_id:
-            rep.add(Severity.WARN, e, f"could not retrieve record "
-                    f"(doi={crossref_doi or '-'}, arxiv={arxiv_id or '-'})", "record",
-                    category="record_unresolved")
+            # Distinguish a TRANSIENT API failure (rate-limit/5xx/network) from a real
+            # miss: the former is a VeraCite-side hiccup, not a problem with the
+            # citation, so mark it retryable and say so -- a re-run will retry it.
+            transient = bool(arxiv_id) and arxiv_fetch_was_transient(arxiv_id)
+            if transient:
+                res.online_error = True
+                rep.add(Severity.WARN, e, f"could not retrieve record "
+                        f"(doi={crossref_doi or '-'}, arxiv={arxiv_id or '-'}) -- the "
+                        f"source was rate-limited or unreachable (transient); re-run to "
+                        f"retry", "record", category="record_unresolved")
+            else:
+                rep.add(Severity.WARN, e, f"could not retrieve record "
+                        f"(doi={crossref_doi or '-'}, arxiv={arxiv_id or '-'})", "record",
+                        category="record_unresolved")
         elif not doi and not isbn and not (e.etype == "misc" and e.get("url").strip()):
             # Defer the 'no id to verify against' note: a DOI may still be found by
             # search in pid_check. The driver emits it only if the entry stays
@@ -239,7 +259,7 @@ def resolve_entry(e, rep, delay, timeout):
     if rec is not None:
         res.record, res.source = rec, source
         res.sources[source] = rec
-        compare_against_record(e, rec, source, rep)
+        compare_against_record(e, rec, source, rep, timeout=timeout)
 
     # INSPIRE (physics): a second authoritative source, used for cross-source
     # consistency. Resolved by DOI or arXiv id when one is present.
@@ -281,16 +301,35 @@ def resolve_entry(e, rep, delay, timeout):
             # on the linked DOI also VALIDATES it: if it does not resolve, the DOI is
             # bad (another placeholder form), so fall back to the journal_ref.
             where = f"doi {pub_doi}" if pub_doi else jref
+            # When the linked record's title/author DIVERGE from the bib's, the link may
+            # be wrong (or the paper was retitled at publication) -- soften the claim so
+            # a human verifies rather than blindly adopting a possibly-wrong DOI.
+            diverges = False
             if pub_doi:
                 pub, _ = fetch_crossref(pub_doi, timeout)
                 if pub:
-                    ptitle = (pub.get("title") or "").strip()
+                    # Strip markup so a MathML-mangled registry title ('Fast collisional
+                    # <mml:math>...') shows as clean text, not raw tags.
+                    ptitle = strip_tags((pub.get("title") or "").strip())
                     pjournal = (pub.get("journal") or "").strip()
                     pyear = pub.get("year")
                     venue = ", ".join(x for x in (pjournal, str(pyear) if pyear else "") if x)
                     if ptitle:
                         where = f'"{ptitle[:80]}"' + (f" ({venue}, " if venue else " (") \
                                 + f"doi {pub_doi})"
+                    # Identity check the linked version against the bib: a low title
+                    # overlap OR a first-author surname that does not match signals the
+                    # link points elsewhere (the Jang2025 case: arXiv linked a same-author
+                    # but differently-titled proceedings paper). Compare on the markup-
+                    # stripped title so MathML noise alone never trips it.
+                    btitle = clean_tex(e.get("title", "")).strip()
+                    if btitle and ptitle and title_overlap(btitle, ptitle) < 0.6:
+                        diverges = True
+                    pub_first = (pub.get("authors") or [""])[0]
+                    bib_first = (split_authors(e.get("author", "")) or [""])[0]
+                    if bib_first and pub_first \
+                            and not _surname_match(bib_first, pub_first):
+                        diverges = True
                 else:
                     # The linked DOI did not resolve -- do not present it. Use the
                     # journal_ref text if we have one; otherwise drop the finding.
@@ -306,9 +345,15 @@ def resolve_entry(e, rep, delay, timeout):
                 # is not machine-applicable, and guessing a DOI from the ref text risks
                 # resolving a different paper (the Tarruell2019 failure mode).
                 sug = {"field": "doi", "to": pub_doi} if pub_doi else None
-                rep.add(Severity.WARN, e, f"a published version exists ({where}); "
-                        f"consider citing it instead of the arXiv preprint",
-                        "preprint", category="preprint_superseded",
+                if diverges:
+                    msg = (f"a published version MAY exist ({where}); its title or author "
+                           f"differs from the entry -- verify it is the same work before "
+                           f"citing it instead of the arXiv preprint")
+                else:
+                    msg = (f"a published version exists ({where}); consider citing it "
+                           f"instead of the arXiv preprint")
+                rep.add(Severity.WARN, e, msg, "preprint",
+                        category="preprint_superseded",
                         field="doi" if pub_doi else "", suggested=sug)
         else:
             # arXiv has not back-linked a published version yet (its <arxiv:doi> is
@@ -333,6 +378,12 @@ def resolve_entry(e, rep, delay, timeout):
                         f"({where}); consider citing it instead of the arXiv preprint",
                         "preprint", category="preprint_superseded",
                         field="doi", suggested={"field": "doi", "to": pub_doi})
+        # A published version of record now exists, so citing it (the suggestion above)
+        # also resolves any 'renamed in a later version' note the title compare emitted
+        # -- the published title is the one to use. Suppress the dependent note so one
+        # fix is not described twice (the SUPERSEDES table documents the relationship).
+        if superseded:
+            rep.supersede(e.key, "preprint_retitled")
 
     # CROSS-SOURCE (Layer 4): compare the authoritative records against each other.
     # When the entry is cited as an arXiv PREPRINT, the cited document is the arXiv
@@ -470,5 +521,5 @@ def resolve_by_found_arxiv(e, arxiv_id, res, rep, timeout):
     # arXiv-only (no published DOI, or it did not resolve): verify against arXiv.
     res.record, res.source = arx, "arxiv"
     rep.set_link(e.key, f"https://arxiv.org/abs/{arxiv_id}")
-    compare_against_record(e, arx, "arxiv", rep)
+    compare_against_record(e, arx, "arxiv", rep, timeout=timeout)
     return "arxiv", arxiv_id

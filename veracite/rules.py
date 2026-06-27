@@ -108,7 +108,8 @@ def _has_field(e, name):
 # style links (rare) from over-matching while catching '.../speech/Name_3.pdf'.
 _WEB_SOURCE_RE = re.compile(
     r"/(?:newsroom|news|press|press-release|blog|events?|media|"
-    r"announcements?|stories|insights)/", re.I)
+    r"announcements?|stories|insights|case-stud(?:y|ies)|tutorials?|"
+    r"docs?|getting[-_]started)/", re.I)
 _WEB_DOC_RE = re.compile(r"\.(?:pdf|pptx?|key)(?:[?#].*)?$", re.I)
 # Well-known BLOG / grey-literature HOSTS -- never journals, so an @article pointing
 # at one is mis-typed regardless of any 'journal' label it carries (a Medium post
@@ -116,7 +117,8 @@ _WEB_DOC_RE = re.compile(r"\.(?:pdf|pptx?|key)(?:[?#].*)?$", re.I)
 # hosts only, so a real publisher host is never matched.
 _WEB_HOST_RE = re.compile(
     r"//(?:[\w.-]+\.)?(?:medium\.com|substack\.com|wordpress\.com|blogspot\.|"
-    r"hpcwire\.com|eetimes\.|thequantuminsider\.com|quantumcomputingreport\.com)/",
+    r"hpcwire\.com|eetimes\.|thequantuminsider\.com|quantumcomputingreport\.com|"
+    r"blog\.google)/",
     re.I)
 
 
@@ -670,6 +672,30 @@ def shouted_authors(e, rep):
 # byline (superscripts), alongside digits. None belongs in a personal name.
 _NAME_MARKER = r"\d|[*†‡§¶∗★☆]"  # digit, * † ‡ § ¶ ⋆ ★ ☆
 
+# TeX *spacing* macros that do not belong in a name field: an explicit inter-initial
+# space ('H.{\hspace{0.167em}}L.'), a kern, or one of the short spacing primitives
+# (\, \; \: \! \quad \qquad \thinspace \enspace). These are typesetting, not name
+# content -- biblatex already spaces initials -- so a name should store 'H. L.', not
+# the macro. This is DELIBERATELY not accents (\o, \"{u}, \'{e}) or other name markup,
+# which are legitimate encoding and must be left alone.
+_TEX_SPACING = re.compile(
+    r"\\(?:hspace\*?|kern|hskip|mskip)\s*\{?[^{}]*\}?"   # \hspace{..}, \kern 2pt, ...
+    r"|\\(?:thinspace|enspace|quad|qquad|space)\b"        # named spaces
+    r"|\\[,;:!> ]")                                        # \, \; \: \! \> and '\ '
+
+
+def _strip_name_spacing(tok):
+    """Return `tok` with TeX spacing macros collapsed to a single normal space, plus
+    a flag for whether any were present. Brace pairs left empty by the removal (the
+    common '{\\hspace{..}}' wrapper) are cleaned up, and runs of space coalesced, so
+    'H.{\\hspace{0.167em}}L.' -> 'H. L.'. Accents/encoding are untouched."""
+    if not _TEX_SPACING.search(tok):
+        return tok, False
+    s = _TEX_SPACING.sub(" ", tok)
+    s = re.sub(r"\{\s*\}", " ", s)          # '{}' left where '{\hspace..}' was
+    s = re.sub(r"\s+", " ", s).strip()
+    return s, True
+
 
 @rule
 def marker_in_author_name(e, rep):
@@ -696,9 +722,29 @@ def marker_in_author_name(e, rep):
             tok = tok.strip()
             if not tok or tok.startswith("{"):
                 continue
-            if glued.search(tok) or bare_word.search(tok):
-                fixed = bare_word.sub("", strip.sub("", tok)).strip()
-                rep.add(Severity.WARN, e, f"{field} name {tok!r} contains a digit or "
+            # A TeX *spacing* macro inside a name ('H.{\hspace{0.167em}}L.') is
+            # typesetting, not name content -- biblatex spaces initials itself, and
+            # the record stores 'H. L.'. Flag it and suggest the macro -> a plain
+            # space. Done FIRST, and the marker scan below then runs on the cleaned
+            # name, so the macro's own dimension digits ('0.167em') are never misread
+            # as a stray-year/footnote superscript (that was a false positive).
+            despaced, had_spacing = _strip_name_spacing(tok)
+            if had_spacing:
+                # A NOTE, not a warning: a TeX spacing macro is a portability/style
+                # nudge, not a data defect -- biblatex spaces initials itself and the
+                # name (and its record match) is unaffected, so it never survives as a
+                # "real problem". (The stray-superscript case below stays a WARN: that
+                # one changes WHO the author is.) Also why Crossref verifying the entry
+                # does not supersede this -- the record has no opinion on .bib markup.
+                rep.add(Severity.INFO, e, f"{field} name {tok!r} contains a TeX "
+                        "spacing macro (e.g. \\hspace) -- typesetting, not part of the "
+                        "name; biblatex spaces initials itself",
+                        category="author_format", field=field,
+                        suggested={"field": field, "from": tok, "to": despaced})
+            scan = despaced
+            if glued.search(scan) or bare_word.search(scan):
+                fixed = bare_word.sub("", strip.sub("", scan)).strip()
+                rep.add(Severity.WARN, e, f"{field} name {scan!r} contains a digit or "
                         "footnote marker (likely a stray year or affiliation "
                         "superscript); it deviates from the real name",
                         category="author_format", field=field,
@@ -858,16 +904,30 @@ def identifier_in_url(e, rep):
 @rule
 def online_needs_urldate(e, rep):
     """Good-practice nudge (note): an @online / web-cited entry should carry an
-    `urldate` (access date) -- biblatex recommends it for online sources, and it is
-    the only date a page without a stable date can be pinned to. Fires for @online /
-    @misc / @electronic, or any entry whose only locator is a url (no doi/eprint),
-    when `urldate` is absent. Pure best practice, zero risk -- it asks for a field,
-    never guesses one."""
-    if e.get("urldate").strip() or not e.get("url").strip():
+    `urldate` (access date) -- biblatex recommends it for sources whose content can
+    change or vanish, which is the only date a page without a stable date can be
+    pinned to.
+
+    Scoped to entries that are ACTUALLY online/grey, not merely url-bearing. A url is
+    not by itself an 'online source': in many bibs the DOI/arXiv id lives inside the
+    url rather than a structured field, so a published @article landing page (a DOI
+    or arXiv abstract page) carries a url yet is a stable source of record an access
+    date adds nothing to. So fire only when:
+      * the entry's TYPE is online-ish (@online/@misc/@electronic/@www), or
+      * its url is a clear web/press/grey source (a news/press/blog path, a bare
+        slide/PDF off a personal/corporate site, a known blog host) AND it exposes
+        no stable identifier (no doi/eprint field, and no DOI/arXiv id mineable from
+        the url) -- i.e. it cannot be pinned by an id, only by an access date.
+    A stable, identifier-bearing landing page never gets the nudge, regardless of
+    type. Pure best practice, zero risk -- it asks for a field, never guesses one."""
+    url = e.get("url").strip()
+    if e.get("urldate").strip() or not url:
         return
     online_type = e.etype in ("online", "electronic", "www", "misc")
-    only_locator = not (e.get("doi").strip() or e.get("eprint").strip())
-    if online_type or only_locator:
+    has_stable_id = bool(e.get("doi").strip() or e.get("eprint").strip()
+                         or extract_doi_from_url(url, e.get("note"))
+                         or extract_arxiv_id(url, e.get("note")))
+    if online_type or (_is_web_source_url(url) and not has_stable_id):
         rep.add(Severity.INFO, e, "online/url-cited entry has no 'urldate' (access "
                 "date); biblatex recommends one for online sources",
                 category="style", field="urldate")

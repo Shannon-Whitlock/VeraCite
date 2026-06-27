@@ -52,6 +52,10 @@ class Record:
     # arXiv-only: the published version it links to, when one exists.
     published_doi: str = ""
     journal_ref: str = ""
+    # arXiv-only: the bare id this record was fetched under (no 'vN' suffix), so the
+    # comparison layer can lazily fetch per-version titles to tell an honest
+    # "cited an earlier version that was later renamed" from a genuine title mismatch.
+    arxiv_id: str = ""
     # Crossref-only: related-work links carried in the SAME work response
     # (relation / updated-by), so the related-works check needs no second fetch.
     # A list of (relationship_label, target_doi) pairs.

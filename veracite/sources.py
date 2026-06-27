@@ -13,7 +13,7 @@ import re
 import time
 
 from .config import endpoint
-from .http import http_get_json, http_get_text
+from .http import http_get_json, http_get_text, is_transient_status
 from .models import Record
 from .normalize import clean_tex, fold_surname, strip_math, strip_tags
 
@@ -250,10 +250,24 @@ def fetch_arxiv(arxiv_id, timeout):
     """Resolve an arXiv id to a normalized record (incl. the published-version
     DOI / journal_ref when arXiv has them), or None. Memoized per run: the same
     id serves the record, the published-version check and the abstract fallback,
-    so it is fetched only once."""
+    so it is fetched only once. The fetch's HTTP status is cached alongside (see
+    arxiv_fetch_was_transient) so a caller can tell a rate-limited miss from a real
+    one without re-fetching."""
     if arxiv_id not in _ARXIV_CACHE:
         _ARXIV_CACHE[arxiv_id] = _fetch_arxiv(arxiv_id, timeout)
-    return _ARXIV_CACHE[arxiv_id]
+    return _ARXIV_CACHE[arxiv_id][0]
+
+
+def arxiv_fetch_was_transient(arxiv_id):
+    """True if the cached fetch for `arxiv_id` failed with a TRANSIENT status (a
+    429 rate-limit, a 5xx, or a network error) rather than resolving or a real 404.
+    Lets resolve_entry mark a record_unresolved as retryable. False if never fetched
+    or it succeeded."""
+    cached = _ARXIV_CACHE.get(arxiv_id)
+    if not cached:
+        return False
+    rec, status = cached
+    return rec is None and is_transient_status(status)
 
 
 def _parse_arxiv_entry(entry_xml):
@@ -306,7 +320,7 @@ def search_arxiv(title, timeout):
     if len(words) < 3:
         return []
     q = "ti:" + "+".join(words)
-    txt = http_get_text(endpoint("arxiv_search", query=q), timeout)
+    txt, _ = http_get_text(endpoint("arxiv_search", query=q), timeout)
     if not txt:
         return []
     out = []
@@ -322,17 +336,53 @@ def search_arxiv(title, timeout):
 
 
 def _fetch_arxiv(arxiv_id, timeout):
-    """Uncached arXiv fetch. arXiv throttles rapid requests, so a single timeout
-    is retried once before giving up."""
+    """Uncached arXiv fetch. Returns (Record|None, last_status). arXiv throttles
+    rapid requests, so a single timeout/transient is retried once before giving up;
+    the final status is returned so the caller can tell a rate-limited miss (429,
+    retryable) from a real one."""
     url = endpoint("arxiv", id=arxiv_id)
-    txt = http_get_text(url, timeout)
+    txt, status = http_get_text(url, timeout)
     if not txt:
         time.sleep(3)
-        txt = http_get_text(url, timeout)
+        txt, status = http_get_text(url, timeout)
     if not txt:
-        return None
+        return None, status
     entry_m = re.search(r"<entry>(.*?)</entry>", txt, re.S)
-    return _parse_arxiv_entry(entry_m.group(1) if entry_m else txt)
+    rec = _parse_arxiv_entry(entry_m.group(1) if entry_m else txt)
+    if rec is not None:
+        # Stamp the bare id (no 'vN') so the comparison layer can lazily probe
+        # per-version titles when the latest title disagrees with the bib.
+        rec.arxiv_id = re.sub(r"v\d+$", "", arxiv_id)
+    return rec, status
+
+
+# arxiv_id (no 'vN') -> {version_number: title}, memoized per run. Only populated on
+# demand (the rare strong-title-mismatch branch), never eagerly.
+_ARXIV_VERSION_TITLES = {}
+
+
+def arxiv_version_titles(arxiv_id, timeout, max_versions=12):
+    """Titles of each arXiv version of `arxiv_id`, as {version:int -> title:str}.
+
+    The arXiv API's single-id query returns only the LATEST version's title, so an
+    entry that faithfully cites an EARLIER version's title (the paper was renamed in
+    a later revision) looks like a title mismatch. Querying the versioned ids
+    (`<id>v1`, `v2`, ...) recovers each version's title so the caller can tell that
+    honest case from a genuinely wrong id. Walks v1 upward and stops at the first
+    gap (arXiv returns no <entry> past the latest version); capped so a malformed id
+    can't loop. Network only -- callers gate on the title actually disagreeing."""
+    bare = re.sub(r"v\d+$", "", arxiv_id)
+    if bare in _ARXIV_VERSION_TITLES:
+        return _ARXIV_VERSION_TITLES[bare]
+    titles = {}
+    for v in range(1, max_versions + 1):
+        rec, _ = _fetch_arxiv(f"{bare}v{v}", timeout)
+        title = (rec.title.strip() if rec else "")
+        if not title:
+            break                       # past the latest version -- no such vN
+        titles[v] = title
+    _ARXIV_VERSION_TITLES[bare] = titles
+    return titles
 
 
 def fetch_openalex(doi, timeout):

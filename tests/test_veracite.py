@@ -328,7 +328,9 @@ def test_http_layer_blocks_non_configured_hosts(monkeypatch):
     # An off-host URL (a cloud metadata IP, an arbitrary host) is dropped with each
     # fetcher's "no result" sentinel -- without ever throttling or hitting the network.
     assert http.http_get_json("http://169.254.169.254/latest/meta-data/", 1) == (None, -1)
-    assert http.http_get_text("https://evil.example.com/x", 1) is None
+    # http_get_text now returns (body, status) like http_get_json; a blocked host is
+    # (None, -1) -- never throttled or fetched.
+    assert http.http_get_text("https://evil.example.com/x", 1) == (None, -1)
     assert fired["n"] == 0, "a blocked URL must not reach the throttle/network"
     # A configured API host passes the allowlist (host-locking does not block real use).
     assert http._host_allowed("https://api.crossref.org/works/10.1/x")
@@ -420,6 +422,20 @@ def test_journal_alias_not_flagged_on_article():
     # 'journal' aliases biblatex 'journaltitle' -- must not be flagged.
     rep, _ = check("clean.bib")
     assert not any("journal" in m for m in messages(rep, "biblatex_validity"))
+
+
+def test_place_alias_not_flagged_but_real_invalid_field_still_is():
+    # 'place' is a biber input alias of 'location' (like 'address'), so a Zotero
+    # export's place={..} on a @book must NOT be flagged. A genuinely invalid field
+    # ('collection' on @book) in the same entry must STILL be flagged -- the alias fix
+    # must not blanket-suppress the datamodel check.
+    e = _entry("@book{k, author={Gallagher, T.}, title={Rydberg Atoms},\n"
+               " publisher={CUP}, year={1994}, place={Cambridge}, collection={Series}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    msgs = messages(rep, "biblatex_validity")
+    assert not any("place" in m for m in msgs)          # aliased -> not flagged
+    assert any("collection" in m for m in msgs)         # truly invalid -> still flagged
 
 
 # --- predicates with a false-positive history -----------------------------
@@ -889,6 +905,38 @@ def test_clean_names_not_flagged_as_marker():
         rep = Report(color=False)
         run_static([e], rep)
         assert not any("footnote marker" in f.message for f in rep.findings), au
+
+
+def test_tex_spacing_macro_in_name_flagged_and_stripped_to_space():
+    # An inter-initial TeX spacing macro ('H.{\hspace{0.167em}}L.') is typesetting,
+    # not name content: flag it and suggest the macro -> a plain space, keeping any
+    # accent. The dimension's digits ('0.167em') must NOT be read as a stray-year
+    # footnote superscript (the prior false positive that also proposed '\hspace{0.em}').
+    from veracite.report import Severity
+    e = _entry("@article{k, author={H.{\\hspace{0.167em}}L. S{\\o}rensen and J. Appel},\n"
+               " title={T}, journal={J}, year={2020}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    spacing = [f for f in rep.findings if f.category == "author_format"
+               and "spacing macro" in f.message]
+    # A NOTE (portability nudge), not a WARN: biblatex handles the spacing and the
+    # name itself is unaffected, so an online record-verify never supersedes it.
+    assert spacing and spacing[0].severity is Severity.INFO
+    assert spacing[0].suggested["to"] == "H. L. S{\\o}rensen"   # accent kept, macro->space
+    # The old false positive must be gone: no 'footnote marker' / no '\hspace{0.em}'.
+    assert not any("footnote marker" in f.message for f in rep.findings)
+    assert not any("hspace{0.em}" in str(f.suggested) for f in rep.findings)
+
+
+def test_accent_only_name_not_flagged_as_spacing():
+    # A pure accent/encoding macro ('M\"{u}ller', 'S{\o}rensen') is legitimate name
+    # content -- not a spacing macro -- so it must NOT be flagged or rewritten.
+    for au in ["J. H. M\\\"{u}ller", "K. S{\\o}rensen", "J.-B. B{\\'{e}}guin"]:
+        e = _entry("@article{k, author={%s}, title={T}, journal={J}, year={2020}}\n" % au)
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any(f.category == "author_format" and "spacing macro" in f.message
+                       for f in rep.findings), au
 
 
 def test_unicode_hyphen_in_name_and_title_not_flagged():
@@ -1442,6 +1490,110 @@ def test_preprint_superseded_falls_back_to_journal_ref_on_placeholder_doi(monkey
     assert sup[0].suggested is None                        # journal_ref is not applyable
 
 
+def test_preprint_superseded_softened_when_linked_doi_title_diverges(monkeypatch):
+    # arXiv links a published DOI whose TITLE differs strongly from the bib's (the
+    # Jang2025 case: arXiv 'Mantra: Rewriting...' linked to a proceedings paper 'Qubit
+    # Movement-Optimized...', same first author). The link MAY be wrong (or the paper
+    # was retitled at publication), so the finding must soften to 'MAY exist -- verify'
+    # rather than confidently asserting it, while still carrying the DOI to check.
+    arx = {"published_doi": "10.1145/3696443.3708937", "journal_ref": "",
+           "authors": ["jang"], "authors_display": ["Jang"], "given": {},
+           "title": "Mantra: Rewriting Quantum Programs to Minimize Trap-Movements",
+           "year": 2025, "journal": "arXiv"}
+    pub = {"authors": ["jang"], "authors_display": ["Jang"], "given": {},
+           "title": "Qubit Movement-Optimized Program Generation on Zoned Neutral Atom Processors",
+           "year": 2025, "journal": "Proc. CGO 2025"}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (pub, 200))
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    e = _entry("@article{Jang2025, author={Enhyeok Jang and Won Woo Ro},\n"
+               " title={Mantra: Rewriting Quantum Programs to Minimize Trap-Movements},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2503.02272}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    sup = [f for f in rep.findings if f.category == "preprint_superseded"]
+    assert sup, "still surfaces the linked DOI"
+    assert "MAY exist" in sup[0].message and "differs" in sup[0].message
+    assert sup[0].suggested == {"field": "doi", "to": "10.1145/3696443.3708937"}
+
+
+def test_preprint_superseded_strips_mathml_and_stays_confident(monkeypatch):
+    # The linked published record's title arrives as MathML ('Fast collisional
+    # <mml:math>...SWAP...'). Stripping the markup (a) shows a clean title, and (b)
+    # lets the divergence check see it is the SAME title -- so the finding stays the
+    # confident 'a published version exists', not a spurious 'MAY exist'. The Weill2025
+    # case: MathML noise must not be read as a different paper.
+    arx = {"published_doi": "10.1103/PhysRevLett.135.010601", "journal_ref": "",
+           "authors": ["weill"], "authors_display": ["Weill"], "given": {},
+           "title": "Fast collisional SWAP gate operations", "year": 2025, "journal": "arXiv"}
+    pub = {"authors": ["weill"], "authors_display": ["Weill"], "given": {},
+           "title": "Fast collisional <mml:math><mml:msqrt><mml:mtext>SWAP</mml:mtext>"
+                    "</mml:msqrt></mml:math> gate operations",
+           "year": 2025, "journal": "Physical Review Letters"}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (pub, 200))
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    e = _entry("@article{Weill2025Fast, author={Weill, R},\n"
+               " title={Fast collisional SWAP gate operations},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2503.01234}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    sup = [f for f in rep.findings if f.category == "preprint_superseded"]
+    assert sup
+    assert "<mml:" not in sup[0].message            # markup stripped from the display
+    assert "MAY exist" not in sup[0].message         # same title -> stays confident
+    assert "a published version exists" in sup[0].message
+
+
+def test_arxiv_rate_limit_marks_record_unresolved_transient(monkeypatch):
+    # A 429 (or 5xx/network) on the arXiv fetch is a VeraCite-side transient failure,
+    # NOT a missing record. The record_unresolved finding must say so (so a 429 is not
+    # mistaken for a bad citation) and the Resolution must carry online_error=True so a
+    # re-run retries it. The Ezratty rate-limit casualty class.
+    from veracite import sources, http
+    # Clear the per-run arXiv cache so the stub is consulted.
+    sources._ARXIV_CACHE.clear()
+    monkeypatch.setattr(sources, "http_get_text", lambda url, timeout: (None, 429))
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (None, 404))
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    e = _entry("@article{Rl2025, author={A, B}, title={A Rate Limited Paper},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2501.99999}}\n")
+    rep = Report(color=False)
+    res = record.resolve_entry(e, rep, delay=0, timeout=1)
+    unr = [f for f in rep.findings if f.category == "record_unresolved"]
+    assert unr, "a failed arXiv fetch still flags record_unresolved"
+    assert "transient" in unr[0].message and "re-run" in unr[0].message
+    assert res.online_error is True
+    sources._ARXIV_CACHE.clear()
+
+
+def test_arxiv_real_miss_is_not_marked_transient(monkeypatch):
+    # The negative twin: a genuine 404 (the id does not exist) is NOT transient -- the
+    # record_unresolved must stay the plain message and online_error must be False, so
+    # a re-run does NOT pointlessly retry a dead id.
+    from veracite import sources
+    sources._ARXIV_CACHE.clear()
+    monkeypatch.setattr(sources, "http_get_text", lambda url, timeout: (None, 404))
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (None, 404))
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    e = _entry("@article{Miss2025, author={A, B}, title={A Genuinely Missing Paper},\n"
+               " year={2025}, journal={arXiv}, url={https://arxiv.org/abs/2501.88888}}\n")
+    rep = Report(color=False)
+    res = record.resolve_entry(e, rep, delay=0, timeout=1)
+    unr = [f for f in rep.findings if f.category == "record_unresolved"]
+    assert unr and "transient" not in unr[0].message
+    assert res.online_error is False
+    sources._ARXIV_CACHE.clear()
+
+
 # --- month rule: bare macro is canonical, braced/spelled-out is flagged ----
 
 def _ARTICLE(month):
@@ -1734,6 +1886,38 @@ def test_urldate_nudge_for_online_entry():
     rep2 = Report(color=False)
     run_static([e2], rep2)
     assert not any("urldate" in f.message for f in rep2.findings)
+
+
+def test_urldate_not_nudged_for_stable_landing_page_url():
+    # A url is NOT by itself an 'online source': the DOI/arXiv id often lives INSIDE
+    # the url rather than a structured field. A published @article whose only locator
+    # is an arxiv.org/abs or DOI landing page is a STABLE source of record -- an access
+    # date adds nothing, so it must NOT get the urldate nudge (the 315/315 misfire the
+    # Ezratty audit found). The look-alike valid inputs the rescoped rule must skip.
+    for url in ("https://arxiv.org/abs/2304.14360",
+                "https://www.nature.com/articles/s41586-023-06768-0",
+                "https://comptes-rendus.academie-sciences.fr/physique/articles/10.5802/crphys.172/"):
+        e = _entry("@article{k, author={A}, title={A Real Paper Title}, journal={arXiv},\n"
+                   " year={2023}, url={" + url + "}}\n")
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any("urldate" in f.message for f in rep.findings), \
+            f"stable landing page must not get a urldate nudge: {url}"
+
+
+def test_urldate_nudged_for_grey_web_article():
+    # The positive twin: an @article whose only locator is a genuine web/press/grey
+    # source (a newsroom path, a personal-site PDF, a blog host) with no mineable id
+    # SHOULD get the nudge -- it can only be pinned by an access date.
+    for url in ("https://www.pasqal.com/newsroom/pasqal-releases-2025-roadmap/",
+                "http://www.phys.ens.fr/~cct/articles/Physics-today.pdf",
+                "https://medium.com/@russfein/quantum-computing-with-neutral-atoms"):
+        e = _entry("@article{k, author={A}, title={A Web Item}, journal={News},\n"
+                   " year={2023}, url={" + url + "}}\n")
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert any(f.category == "style" and "urldate" in f.message for f in rep.findings), \
+            f"grey/web source with no id should get a urldate nudge: {url}"
 
 
 def test_missing_title_still_flagged_everywhere():
@@ -2481,6 +2665,89 @@ def test_preprint_year_matching_no_arxiv_version_is_a_warning():
     assert any(f.category == "preprint_version" for f in rep_ok.findings)
 
 
+def test_arxiv_retitled_version_is_a_note_not_a_title_mismatch(monkeypatch):
+    # The bib faithfully cites an arXiv preprint's v1 title; arXiv RENAMED the paper
+    # at v2. The single-id record carries only the latest (v2) title, so a naive
+    # compare sees a strong title mismatch. The version probe must recover that the
+    # cited title matches v1 -> emit the informational 'preprint_retitled' note and
+    # NOT a metadata_mismatch, and crucially NOT push the new title as a suggested
+    # overwrite (the bib is correct). The Chalopin2024 / Evered2025Probing class.
+    from veracite import sources
+    rec = {"authors": ["chalopin"], "authors_display": ["Chalopin"], "given": {},
+           "title": "Observation of emergent scaling of spin-charge correlations",
+           "year": 2024, "journal": "arXiv", "arxiv_id": "2412.17801"}
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "Probing the magnetic origin of the pseudogap using a Fermi-Hubbard quantum simulator",
+        2: "Observation of emergent scaling of spin-charge correlations"})
+    e = _entry("@article{Chalopin2024, author={Thomas Chalopin and Antoine Georges},\n"
+               " title={Probing the magnetic origin of the pseudogap using a Fermi-Hubbard quantum simulator},\n"
+               " year={2024}, eprint={2412.17801}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep, timeout=1)
+    titlemiss = [f for f in rep.findings
+                 if f.category == "metadata_mismatch" and "title differs" in f.message]
+    assert not titlemiss, "a faithfully-cited earlier-version title must not be a mismatch"
+    retitled = [f for f in rep.findings if f.category == "preprint_retitled"]
+    assert retitled and retitled[0].severity is Severity.INFO
+    assert "v1" in retitled[0].message and "v2" in retitled[0].message
+    assert retitled[0].suggested is None     # never push the new title over a correct one
+    # And it is NOT escalated to the wrong-paper error (it IS the same paper).
+    assert not any(f.category == "id_resolves_wrong_record" for f in rep.findings)
+
+
+def test_arxiv_title_matching_no_version_stays_a_mismatch(monkeypatch):
+    # The negative twin: the bib title matches NEITHER the latest NOR any earlier
+    # version -- a genuinely different paper (a wrong id). The retitle path must NOT
+    # fire; the strong title mismatch stays a metadata_mismatch WARN. 'synthesis must
+    # not match a thesis rule' -- the version check must not swallow a real mismatch.
+    from veracite import sources
+    rec = {"authors": ["chalopin"], "authors_display": ["Chalopin"], "given": {},
+           "title": "Observation of emergent scaling of spin-charge correlations",
+           "year": 2024, "journal": "arXiv", "arxiv_id": "2412.17801"}
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "An unrelated earlier title about something entirely different",
+        2: "Observation of emergent scaling of spin-charge correlations"})
+    e = _entry("@article{k, author={Thomas Chalopin and Antoine Georges},\n"
+               " title={Probing the magnetic origin of the pseudogap with quantum gas microscopy},\n"
+               " year={2024}, eprint={2412.17801}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep, timeout=1)
+    assert not any(f.category == "preprint_retitled" for f in rep.findings)
+    assert any(f.category == "metadata_mismatch" and "title differs" in f.message
+               for f in rep.findings)
+
+
+def test_arxiv_retitled_note_superseded_when_published_version_exists(monkeypatch):
+    # When a published version of record ALSO exists, citing it is the one fix -- so
+    # the 'renamed in a later version' note is suppressed (SUPERSEDES) and only the
+    # preprint_superseded WARN survives. One action, described once.
+    from veracite import sources, verify
+    arx = {"authors": ["evered"], "authors_display": ["Evered"], "given": {},
+           "title": "Probing the Kitaev honeycomb model on a neutral-atom quantum computer",
+           "year": 2025, "journal": "arXiv", "arxiv_id": "2501.18554",
+           "published_doi": "10.1038/s41586-025-09475-0", "journal_ref": ""}
+    pub = {"authors": ["evered"], "authors_display": ["Evered"], "given": {},
+           "title": "Probing the Kitaev honeycomb model on a neutral-atom quantum computer",
+           "year": 2025, "journal": "Nature", "abstract": "x"}
+    monkeypatch.setattr(record, "fetch_arxiv", lambda aid, timeout: arx)
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, timeout: (pub, 200))
+    monkeypatch.setattr(record, "fetch_inspire", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_openalex", lambda *a, **k: None)
+    monkeypatch.setattr(record, "fetch_related", lambda *a, **k: [])
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "Probing topological matter and fermion dynamics on a neutral-atom quantum computer",
+        2: "Probing the Kitaev honeycomb model on a neutral-atom quantum computer"})
+    e = _entry("@article{Evered2025Probing, author={Simon J. Evered and Vladan Vuletic},\n"
+               " title={Probing topological matter and fermion dynamics on a neutral-atom quantum computer},\n"
+               " year={2025}, url={https://arxiv.org/abs/2501.18554}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    live = rep.live_findings()
+    assert any(f.category == "preprint_superseded" for f in live)
+    assert not any(f.category == "preprint_retitled" for f in live), \
+        "the published-version fix supersedes the retitle note"
+
+
 def test_cross_source_year_conflict_suppressed_for_superseded_preprint():
     # A superseded preprint is verified against the preprint it cites, so the
     # preprint-vs-journal year gap (arxiv 2021 vs inspire's journal 2022) is expected
@@ -2659,36 +2926,60 @@ def test_arxiv_only_is_sufficient_pid():
 
 # --- L6: integrity score ---------------------------------------------------
 
-def test_integrity_score_clean_vs_unverified():
-    e1, e2 = _YEnt(2020), _YEnt(2020)
-    e1.key, e2.key = "a", "b"
+def _records(statuses, results, findings=(), entries=None):
+    """Build per-entry record dicts (the new integrity() input) from the old-style
+    statuses/results/findings, so the score tests exercise the record-parse path the
+    tool now uses. `findings` is a list of (severity, key, category) attached to the
+    matching record's issues; the report carries the file-level ones."""
+    from veracite.checkpoint import entry_record
+    ents = {e.key: e for e in (entries or [])}
+    recs = []
+    for key, (status, conf) in statuses.items():
+        res = results.get(key)
+        e = ents.get(key)
+        issues = [{"severity": sev.name, "category": cat}
+                  for sev, k, cat in findings if k == key]
+        recs.append(entry_record(
+            key, res, status, conf, {"offline", "online"}, issues,
+            entry_type=(e.etype if e else "article"),
+            bib_year=(e.get("year") if e else "2020")))
+    return recs
+
+
+def _integ(statuses, results, findings=(), entries=None):
+    """integrity() over records built from the old-style inputs; file-level findings
+    (duplicate/source_conflict) are seeded on the report, which integrity reads."""
     rep = Report(color=False)
-    clean = verify.integrity([e1], {"a": ("VERIFIED", 0.95)},
-                             {"a": _res(doi="10.1/a", record={})}, rep)
+    for sev, key, cat in findings:
+        if cat in ("duplicate", "source_conflict", "preprint_superseded"):
+            rep.add(sev, (key, 1), "x", "record", category=cat)
+    recs = _records(statuses, results, findings, entries)
+    return verify.integrity(recs, rep)
+
+
+def test_integrity_score_clean_vs_unverified():
+    clean = _integ({"a": ("VERIFIED", 0.95)}, {"a": _res(doi="10.1/a", record={})})
     assert clean["integrity_score"] >= 90 and clean["verified"] == 1
-    bad = verify.integrity([e2], {"b": ("UNVERIFIED", 0.0)},
-                           {"b": _res()}, rep)
+    bad = _integ({"b": ("UNVERIFIED", 0.0)}, {"b": _res()})
     assert bad["integrity_score"] < clean["integrity_score"]
 
 
 def test_integrity_score_ignores_unchecked_entries():
-    # In --tex mode only cited entries are resolved (they appear in `statuses`);
-    # uncited entries are skipped by design. The score must be computed over the
-    # checked entries only, so adding skipped entries to the bib must not change it
-    # and `checked` must report the resolved count, not len(entries).
-    checked = _YEnt(2020); checked.key = "cited"
+    # In --tex mode only cited entries are resolved (their record has a status);
+    # uncited entries are skipped by design (status None / uncited=True). The score
+    # must be computed over the checked entries only, so adding skipped records must
+    # not change it and `checked` must report the resolved count, not len(records).
+    from veracite.checkpoint import entry_record
+    checked = entry_record("cited", _res(doi="10.1/a", record={}, sources={"crossref": {}}),
+                           "VERIFIED", 0.95, {"offline", "online"}, [],
+                           entry_type="article", bib_year="2020")
     rep = Report(color=False)
-    only = verify.integrity([checked], {"cited": ("VERIFIED", 0.95)},
-                            {"cited": _res(doi="10.1/a", record={}, sources={"crossref": {}})},
-                            rep)
-    # Same checked entry, but the bib also holds 50 uncited/unresolved entries.
-    uncited = [_YEnt(2020) for _ in range(50)]
-    for i, e in enumerate(uncited):
-        e.key = f"uncited{i}"
-    with_skipped = verify.integrity([checked] + uncited,
-                                    {"cited": ("VERIFIED", 0.95)},
-                                    {"cited": _res(doi="10.1/a", record={}, sources={"crossref": {}})},
-                                    rep)
+    only = verify.integrity([checked], rep)
+    # Same checked record, plus 50 uncited records (status None, uncited=True).
+    skipped = [entry_record(f"uncited{i}", None, None, None, set(), [],
+                            entry_type="article", uncited=True, bib_year="2020")
+               for i in range(50)]
+    with_skipped = verify.integrity([checked] + skipped, rep)
     assert with_skipped["checked"] == 1
     assert with_skipped["integrity_score"] == only["integrity_score"]
     assert with_skipped["integrity_score"] >= 90
@@ -2697,14 +2988,10 @@ def test_integrity_score_ignores_unchecked_entries():
 # --- two metrics: integrity (author-fixable) vs confidence (source trust) ---
 
 def _score(statuses, results, findings=()):
-    """Run integrity() with given per-entry statuses/results and seeded findings."""
-    entries = [_YEnt(2020) for _ in statuses]
-    for e, k in zip(entries, statuses):
-        e.key = k
-    rep = Report(color=False)
-    for sev, key, cat in findings:
-        rep.add(sev, (key, 1), "x", "record", category=cat)
-    return verify.integrity(entries, statuses, results, rep)
+    """Run integrity() over records built from the given statuses/results/findings.
+    Per-entry finding categories ride on the record's issues; file-level ones
+    (duplicate/source_conflict) are seeded on the report -- _integ splits them."""
+    return _integ(statuses, results, findings)
 
 
 def test_clean_doi_resolve_is_full_confidence_single_source():
@@ -3563,11 +3850,32 @@ def test_doi_mined_from_publisher_url():
     assert normalize.extract_doi_from_url(
         "https://comptes-rendus.academie-sciences.fr/physique/articles/10.5802/crphys.172/") == \
         "10.5802/crphys.172"
-    # No DOI in the path (Nature uses an accession slug; a press release has none).
-    assert normalize.extract_doi_from_url(
-        "https://www.nature.com/articles/s41586-024-08449-y") == ""
+    # A press release with no DOI anywhere yields nothing.
     assert normalize.extract_doi_from_url(
         "https://www.pasqal.com/newsroom/pasqal-releases-2025-roadmap/") == ""
+
+
+def test_nature_doi_reconstructed_from_prefixless_url():
+    # Nature is the one common publisher whose article URL carries the DOI SUFFIX but
+    # not the '10.<registrant>/' prefix. The prefix is unrecoverable from the URL or by
+    # search (a bare suffix is not a resolvable DOI), so the nature.com host supplies
+    # the registrant 10.1038. This recovered Rodriguez2024 (a real Nature paper that
+    # went UNVERIFIED because its DOI lived, prefixless, in the url). Three id forms:
+    assert normalize.extract_doi_from_url(
+        "https://www.nature.com/articles/s41586-025-09367-3") == "10.1038/s41586-025-09367-3"
+    assert normalize.extract_doi_from_url(
+        "https://www.nature.com/articles/nphys2259") == "10.1038/nphys2259"
+    assert normalize.extract_doi_from_url(
+        "https://www.nature.com/articles/d41586-022-01029-y") == "10.1038/d41586-022-01029-y"
+    # But NOT a non-article Nature path or a stray segment -- the suffix shape is pinned
+    # tight so a bogus DOI is never reconstructed (it would 404 / mis-resolve).
+    assert normalize.extract_doi_from_url("https://www.nature.com/subjects/quantum-physics") == ""
+    assert normalize.extract_doi_from_url("https://www.nature.com/news/some-story") == ""
+    # And it stays journal-agnostic: publishers that DO embed the literal DOI are
+    # unaffected -- only nature.com needs the prefix supplied.
+    assert normalize.extract_doi_from_url(
+        "https://link.springer.com/chapter/10.1007/978-3-319-14316-3_7") == \
+        "10.1007/978-3-319-14316-3_7"
 
 
 def test_inspire_recid_extracted_from_url():
@@ -3648,6 +3956,27 @@ def test_blog_host_is_web_item_even_with_journal_label():
     assert any(f.category == "entrytype_suggestion" for f in rep.findings)
     assert _is_web_source_url("https://www.hpcwire.com/2020/04/23/coldquanta")
     assert not _is_web_source_url("https://www.nature.com/articles/s41586-024-08449-y")
+
+
+def test_docs_caseStudy_tutorial_urls_are_web_items():
+    # A vendor tutorial / case-study / corporate blog cited as @article is a web item,
+    # not a journal article (PasqalGoogle2024, PasqalThales2024, Neven2026ColdAtoms).
+    # Recognising them as web items ALSO stops the 'published article omits volume/
+    # pages' (missing_locator) note from misfiring on a non-article -- that note only
+    # reaches entries that are NOT web/book/thesis/preprint.
+    from veracite.rules import _is_web_source_url
+    assert _is_web_source_url("https://quantumai.google/cirq/tutorials/pasqal/getting_started")
+    assert _is_web_source_url("https://www.pasqal.com/case-studies/thales/")
+    assert _is_web_source_url("https://blog.google/innovation-and-ai/technology/research/x/")
+    for url in ("https://quantumai.google/cirq/tutorials/pasqal/getting_started",
+                "https://www.pasqal.com/case-studies/thales/"):
+        e = _entry("@article{k, author={A}, title={A Web Item}, journal={Vendor},\n"
+                   " year={2024}, url={" + url + "}}\n")
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert any(f.category == "entrytype_suggestion" for f in rep.findings)
+        assert not any(f.category == "missing_locator" for f in rep.findings), \
+            "a web item must not be told it 'omits volume/pages'"
 
 
 def test_book_url_suggests_book_not_online():
@@ -4002,9 +4331,10 @@ def test_unclosed_paren_string_recovers_at_next_entry():
 
 # --- JSON report shape & --offline/--llm guard -----------------------------
 
-def test_offline_json_has_summary_record_with_null_score(tmp_path):
-    """The NDJSON report carries a reserved <summary> record even offline, with an
-    honest null integrity_score -- never a fabricated 100 from zero verified."""
+def test_offline_json_holds_only_entry_records(tmp_path):
+    """The NDJSON report is ONE record per bib entry and nothing else -- no reserved
+    <summary>/<file> aggregates (those are recomputed each run, not stored). An
+    offline entry honestly records only its offline phase, with a null verdict."""
     import json
     from veracite.cli import main
     bib = tmp_path / "refs.bib"
@@ -4013,13 +4343,13 @@ def test_offline_json_has_summary_record_with_null_score(tmp_path):
     main(["--bib", str(bib), "--offline", "--no-color", "--json", str(out)])
     recs = {json.loads(l)["key"]: json.loads(l)
             for l in out.read_text().splitlines() if l.strip()}
-    assert "<summary>" in recs and "<file>" in recs
-    summary = recs["<summary>"]["summary"]
-    assert summary["mode"] == "offline"
-    assert summary["integrity_score"] is None
-    # The single entry appears as its own record with the offline phase set.
-    entry = [r for k, r in recs.items() if k not in ("<summary>", "<file>")][0]
+    assert "<summary>" not in recs and "<file>" not in recs
+    # Exactly the bib entry's record, honest about phases (offline only, no verdict).
+    assert list(recs) == ["k"]
+    entry = recs["k"]
     assert entry["phases"]["offline"] is True and entry["phases"]["online"] is False
+    assert entry["status"] is None         # offline: no fabricated verification
+    assert "checksum" in entry             # source-change detection is stamped
 
 
 def test_llm_with_offline_is_rejected(tmp_path, capfd):
@@ -4210,7 +4540,8 @@ def test_arxiv_hit_prefers_published_doi(monkeypatch):
 
 def test_report_is_stamped_with_veracite_version(tmp_path, capfd):
     """A report is traceable to the tool revision: the terminal summary names the
-    version and the NDJSON <summary> record carries veracite_version."""
+    version and EACH NDJSON entry record carries veracite_version (per-record, since
+    a resumed report can be written across versions)."""
     import json
     from veracite import __version__
     from veracite.cli import main
@@ -4220,9 +4551,8 @@ def test_report_is_stamped_with_veracite_version(tmp_path, capfd):
     out = tmp_path / "rep.ndjson"
     main(["--bib", str(bib), "--offline", "--no-color", "--json", str(out)])
     assert f"VeraCite {__version__}" in capfd.readouterr().out
-    summary = [json.loads(l) for l in out.read_text().splitlines()
-               if l.strip() and json.loads(l)["key"] == "<summary>"][0]
-    assert summary["veracite_version"] == __version__
+    recs = [json.loads(l) for l in out.read_text().splitlines() if l.strip()]
+    assert recs and all(r["veracite_version"] == __version__ for r in recs)
 
 
 def test_version_is_consistent_across_files():

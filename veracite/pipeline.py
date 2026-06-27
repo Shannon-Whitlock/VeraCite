@@ -37,5 +37,9 @@ def analyze_entry(e, res_store, status_store, rep, *, delay, timeout,
     status_store[e.key] = classify(e, res, rep)                     # Layer 3
     if res.record is not None and provider is not None \
             and contexts is not None and e.key in contexts:
-        rate_one(e, res.record, contexts[e.key], rep, provider, model, by_key)
+        # rate_one returns False only when the call FAILED (provider/connection error),
+        # so the llm phase is not settled and a re-run retries it. A success or a
+        # permanent 'no abstract' skip returns True (settled). Mirrors online_error.
+        settled = rate_one(e, res.record, contexts[e.key], rep, provider, model, by_key)
+        res.llm_error = settled is False
     return res

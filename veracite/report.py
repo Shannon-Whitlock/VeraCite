@@ -112,7 +112,7 @@ CATEGORY_GROUP = {
     # at -- citation order/usage, whether the id resolves to the right paper, whether
     # a published version should be cited instead, and the LLM-relevance ratings.
     "citation_order": "context", "preprint_superseded": "context",
-    "preprint_version": "context",
+    "preprint_version": "context", "preprint_retitled": "context",
     "id_resolves_wrong_record": "context", "wrong_paper": "context",
     "llm_relevance": "context", "llm_config": "context", "llm_ok": "context",
     "llm_unavailable": "context",
@@ -155,6 +155,7 @@ CATEGORY_DOC = {
     "llm_config": "LLM run misconfigured (e.g. unknown provider)",
     "preprint_superseded": "a published version now exists",
     "preprint_version": "bib year matches an arXiv version (v1 precedence vs latest) -- informational",
+    "preprint_retitled": "arXiv renamed the preprint in a later version; the cited title matches an earlier one",
     "related_work": "erratum/correction/comment/reply linked",
     "duplicate": "duplicate citation key or DOI (two entries collide)",
     "duplicate_field": "a field repeated within ONE entry, values agree (benign)",
@@ -333,6 +334,10 @@ SUPERSEDES = {
     "misplaced_field": ("static", "record layer",
         "the resolved record carries the bib's 'number' as the issue, so the value "
         "is not a misplaced year after all -- the offline guess is disproven"),
+    "preprint_retitled": ("record", "preprint",
+        "a published version of record now exists, so citing it (the "
+        "preprint_superseded suggestion) is the one fix -- the 'renamed in a later "
+        "version' note would describe the same action a second time"),
 }
 
 
@@ -766,17 +771,17 @@ class Report:
         back-compat); each finding carries its `category`, the `group` that category
         rolls up into (syntax/semantic/context), and -- when the check proposes a
         concrete advisory edit -- a structured `suggested` ({field, from?, to}).
-        When verification data is supplied, also emits a `summary` block (Layer 6)
-        and a per-reference `references` array: one entry record per analyzed entry,
-        built by the SAME `entry_record` that writes each --json NDJSON line, so the
-        web payload and the checkpoint file are the one record shape (not two parallel
-        builders that can drift). `entries` (an iterable of Entry, optional) supplies
-        each record's identifying `entry_type`/`line`; without it those are null."""
+        When verification data is supplied, emits a per-reference `references` array
+        (one entry record per analyzed entry, built by the SAME `entry_record` that
+        writes each --json NDJSON line -- one record shape, never two) and a `summary`
+        block DERIVED from those records (the single source of truth) plus the live
+        file-level findings. `entries` (an iterable of Entry, optional) supplies each
+        record's identifying `entry_type`/`line`; without it those are null. A caller
+        may still pass an explicit `summary` to override the derived one."""
         from .checkpoint import entry_record   # lazy: avoid import cycle
+        from .verify import integrity          # lazy: avoid import cycle
         live = self.live_findings()
         out = {"findings": [self._finding_dict(f) for f in live]}
-        if summary is not None:
-            out["summary"] = summary
         if results is not None and statuses is not None:
             phases_by_key = phases_by_key or {}
             meta = {e.key: e for e in (entries or [])}   # key -> Entry (etype/lineno)
@@ -797,6 +802,13 @@ class Report:
                     verify=self.links.get(key) or None,
                     entry_type=(e.etype if e else None),
                     line=(e.lineno if e else 0),
+                    bib_year=(e.get("year") if e else None),
                     status_detail=self.status_detail(key)))
             out["references"] = refs
+            # Summary is DERIVED from the records just built (not a stored aggregate),
+            # so the web payload and the CLI summary take the identical parse path.
+            if summary is None:
+                summary = integrity(refs, self)
+        if summary is not None:
+            out["summary"] = summary
         return out

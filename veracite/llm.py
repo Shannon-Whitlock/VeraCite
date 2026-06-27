@@ -380,16 +380,19 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
         # No abstract to rate against -- the user cannot act on this (it is a registry
         # gap, not a bib defect), so it is a NOTE, not a warning. Its own category so
         # the note severity is not overridden by llm_relevance's warning default.
+        # This is a PERMANENT skip (re-running re-fetches the same absent abstract), so
+        # the llm phase IS settled: return True so it is not retried forever.
         rep.add(Severity.INFO, entry, "[llm] skipped: no abstract available for rating",
                 "llm", category="llm_unavailable")
-        return
+        return True
     result = rate_citation(provider, model, build_rating_prompt(entry, rec, ctx, by_key))
     if "error" in result:
-        # The provider failed (e.g. CLI error) -- a tooling problem, not a bib defect;
-        # a note that records the spent attempt, not an actionable warning.
+        # The provider FAILED (CLI/connection/provider error) -- a tooling problem, not
+        # a bib defect, and TRANSIENT. Return False so the caller does NOT mark the llm
+        # phase complete and a second pass retries it.
         rep.add(Severity.INFO, entry, f"[llm] rating unavailable: {result['error']}",
                 "llm", category="llm_unavailable")
-        return
+        return False
     rel = result.get("relevance")
     wrong = result.get("wrong_paper") is True
     misfit = result.get("group_misfit") is True
@@ -407,13 +410,15 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
         rep.add(Severity.WARN, entry, f"[llm] possible wrong paper (model opinion from "
                 f"the abstract/context only -- verify, do not treat as authoritative)"
                 f"{tail}", "llm", category="wrong_paper")
-        return
+        return True
     if not isinstance(rel, int):
         # The call was made (tokens spent) but the model gave no usable rating --
-        # record that rather than vanish silently.
+        # record that rather than vanish silently. The call SUCCEEDED (the model just
+        # gave no number), so the phase is settled -- a retry would spend tokens for the
+        # same non-answer.
         rep.add(Severity.INFO, entry, "[llm] no usable relevance rating returned",
                 "llm", category="llm_relevance")
-        return
+        return True
     # When the standalone relevance is already weak (<=3), a group anomaly (the
     # reference does not fit the works it is co-cited with) lowers the score by a
     # further point -- a low-relevance citation hidden in a group is the worst case.
@@ -428,9 +433,10 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
         rep.add(Severity.WARN, entry, f"[llm] relevance rated {adjusted}/5 (model "
                 f"opinion from the abstract and cited context only -- verify, do not "
                 f"treat as authoritative){note}{tail}", "llm", category="llm_relevance")
-        return
+        return True
     # relevance 4-5 with no problem: still leave ONE note recording the result, so an
     # LLM call (which costs tokens) always shows in the report rather than vanishing
     # silently. It is a note (reassurance), hidden by --skipnotes like other notes.
     rep.add(Severity.INFO, entry, f"[llm] context OK {adjusted}/5{tail}",
             "llm", category="llm_ok")
+    return True

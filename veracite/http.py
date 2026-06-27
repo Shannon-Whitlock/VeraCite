@@ -111,21 +111,35 @@ def http_get_json(url, timeout):
 
 
 def http_get_text(url, timeout):
-    """GET `url` and return the body as text, or None on any failure. Paced per
-    service (see _throttle)."""
+    """GET `url` and return (body_text, status_code); body is None on any non-200,
+    with status_code carrying the HTTP code (or -1 for a network error). Paced per
+    service (see _throttle). The status lets a caller tell a TRANSIENT failure
+    (429 rate-limit, 5xx, or -1 network) -- which a re-run should retry -- from a
+    settled 404 'no such record'. Mirrors http_get_json's contract."""
     if not _host_allowed(url):
-        return None                      # not a configured host -- never reach out
+        return None, -1                  # not a configured host -- never reach out
     _throttle(url)
     headers = user_agent()
     if HTTP_BACKEND == "requests":
         try:
             r = requests.get(url, headers=headers, timeout=timeout)
         except requests.RequestException:
-            return None
-        return r.text if r.status_code == 200 else None
+            return None, -1
+        return (r.text, 200) if r.status_code == 200 else (None, r.status_code)
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8")
+            return resp.read().decode("utf-8"), 200
+    except urllib.error.HTTPError as ex:
+        return None, ex.code
     except Exception:
-        return None
+        return None, -1
+
+
+# HTTP status codes that mean "try again later", not "this does not exist": a
+# rate-limit, a server hiccup, or a local network error. A record_unresolved caused
+# by one of these is a VeraCite-side transient failure, NOT a property of the
+# citation -- it is marked so a re-run retries it (and the finding says why).
+def is_transient_status(code):
+    """True if `code` is a retryable transient (429, any 5xx, or -1 network error)."""
+    return code == 429 or code == -1 or (500 <= code < 600)
