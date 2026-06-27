@@ -40,7 +40,7 @@ def offline_summary_stub(rep):
     }
 
 DESCRIPTION = """\
-VeraCite -- a bibliography health checker for LaTeX projects.
+VeraCite -- a deterministic verifier for BibTeX/biblatex bibliographies.
 
 Point it at a .bib file. Checks run in layers: syntax (structural validity),
 static (offline rules), record/status (resolve each entry against

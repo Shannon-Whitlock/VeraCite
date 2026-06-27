@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "veracite"
 version = "0.1.2"
-description = "A bibliography health checker for LaTeX projects."
+description = "A deterministic verifier for BibTeX/biblatex bibliographies."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
