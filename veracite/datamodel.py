@@ -16,7 +16,8 @@ _DATA = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 # fields. Without these, standard .bib usage ('journal', 'school') would be
 # flagged as invalid against the pure biblatex datamodel.
 FIELD_ALIASES = {
-    "journal": "journaltitle", "school": "institution", "address": "location",
+    "journal": "journaltitle", "school": "institution",
+    "address": "location", "place": "location",   # both are biber aliases of location
     "annote": "annotation", "archiveprefix": "eprinttype",
     "primaryclass": "eprintclass", "key": "sortkey",
 }

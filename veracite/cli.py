@@ -6,8 +6,8 @@ import argparse
 import os
 import sys
 
-from .checkpoint import (Checkpoint, append_record, compact, entry_record,
-                         file_record, requested_phases, summary_record)
+from .checkpoint import (Checkpoint, append_record, compact, entry_checksum,
+                         entry_record, requested_phases)
 from .config import HTTP_BACKEND, SETTINGS, VERSION, load_settings
 from .llm import (LLM_PROVIDERS, collect_tex, find_citation_contexts,
                   find_citation_groups, preflight_provider, resolve_provider)
@@ -28,17 +28,6 @@ LARGE_BIB = 200
 # re-run appends a fresh record for the key (last line wins on load). At the end of a
 # clean run the log is compacted once (one line per key, atomically).
 
-
-def offline_summary_stub(rep):
-    """The stable offline-mode `summary` record: no verification, so null scores and
-    the finding counts -- an honest, parseable shape, never a fabricated 100. Used
-    when no online layer ran."""
-    return {
-        "mode": "offline", "checked": 0,
-        "integrity_score": None, "confidence_score": None,
-        "errors": rep.count(Severity.ERROR), "warnings": rep.count(Severity.WARN),
-        "notes": rep.count(Severity.INFO),
-    }
 
 DESCRIPTION = """\
 VeraCite -- a deterministic auditor for BibTeX/biblatex bibliographies.
@@ -318,6 +307,8 @@ def main(argv=None):
     any_emitted = False
     results, statuses = {}, {}      # key -> Resolution / (status, confidence)
     phases_by_key = {}              # key -> set(phases done this run + reused)
+    records = []                    # the per-entry record dicts built this run, in
+                                    # bib order: the single source the summary parses
     by_key = {e.key: e for e in entries}   # for naming a citation's group-mates
     # Advisory: note any \cite{} group whose members are out of chronological order
     # (offline, from the bib years). Done before the loop so notes attach to the
@@ -325,6 +316,9 @@ def main(argv=None):
     if tex_mode:
         chronological_order(cite_groups, by_key, rep)
     for i, e in enumerate(entries, 1):
+        # The source checksum stamps every record so a later run can tell whether the
+        # entry was edited (see Checkpoint.is_stale). Computed once per entry here.
+        checksum = entry_checksum(e.raw)
         # In --tex (citations) mode an UNCITED entry is reduced to a single header
         # line and skipped from ALL further analysis -- no offline rules, no online
         # lookup, no notes. (Its structural soundness is still covered by the
@@ -335,10 +329,13 @@ def main(argv=None):
         if uncited:
             rep.mark_uncited(e.key)
             phases_by_key[e.key] = set()
+            rec = entry_record(
+                e.key, None, None, None, set(), [], verify=None,
+                entry_type=e.etype, line=e.lineno, uncited=True,
+                bib_year=e.get("year"), checksum=checksum)
+            records.append(rec)
             if args.json:
-                append_record(args.json, entry_record(
-                    e.key, None, None, None, set(), [], verify=None,
-                    entry_type=e.etype, line=e.lineno, uncited=True))
+                append_record(args.json, rec)
             if args.sort == "entry":
                 any_emitted |= rep.emit_entry(e, skip_notes=args.skipnotes,
                                               progress=f"[{i:>{width}}/{total}]")
@@ -358,32 +355,39 @@ def main(argv=None):
                     category="syntax")
             analyzed = False
 
+        # Staleness: if the saved record's source checksum no longer matches this
+        # entry (it was edited in the .bib) or is absent (older report), the cache is
+        # not trustworthy -- ignore it for this entry so every requested phase is
+        # recomputed from scratch. This is what makes "edit the .bib, re-run" re-verify
+        # exactly the changed entries without naming them.
+        cp = None if (checkpoint and checkpoint.is_stale(e.key, checksum)) else checkpoint
+
         # Resume bookkeeping: which phases this entry still needs (only the
         # requested-and-missing ones), and which prior phases to carry forward
         # unchanged. The carry-forward runs even when this entry is NOT analyzed
         # online this run (e.g. an --offline resume over a report that already holds
         # online/llm results) so the rewritten report never drops earlier work.
-        if checkpoint:
-            to_run = checkpoint.needs(e.key, requested)
+        if cp:
+            to_run = cp.needs(e.key, requested)
             to_run.discard("offline")            # offline already ran above
-            reuse = (checkpoint.phases_by_key.get(e.key, set()) - to_run) \
+            reuse = (cp.phases_by_key.get(e.key, set()) - to_run) \
                 & {"online", "llm"}
             if reuse:
                 # Replay the prior findings for the reused phases, and reuse the saved
                 # resolution/status so the score and JSON are complete without
                 # re-resolving.
-                rep.seed_findings(checkpoint.seed_findings_for(e.key, reuse))
-                if e.key in checkpoint.results:
-                    results[e.key] = checkpoint.results[e.key]
-                    st, conf = checkpoint.statuses.get(e.key, ("", 0.0))
+                rep.seed_findings(cp.seed_findings_for(e.key, reuse))
+                if e.key in cp.results:
+                    results[e.key] = cp.results[e.key]
+                    st, conf = cp.statuses.get(e.key, ("", 0.0))
                     statuses[e.key] = (st, conf)
                     # Restore the header status/detail/link so the reused entry
                     # prints its saved verdict (and reason) instead of a bare line.
                     if st:
                         rep.set_status(e.key, st, conf,
-                                       checkpoint.details.get(e.key, ""))
-                    if checkpoint.links.get(e.key):
-                        rep.set_link(e.key, checkpoint.links[e.key])
+                                       cp.details.get(e.key, ""))
+                    if cp.links.get(e.key):
+                        rep.set_link(e.key, cp.links[e.key])
                 phases_by_key[e.key] |= reuse
         else:
             to_run = set(requested) - {"offline"}
@@ -401,26 +405,37 @@ def main(argv=None):
             # same pass as online (only when llm is in to_run); pass no provider for
             # an online-only phase.
             run_llm = "llm" in to_run
-            analyze_entry(e, results, statuses, rep, delay=delay, timeout=timeout,
-                          provider=(provider if run_llm else None), model=model,
-                          contexts=contexts, by_key=by_key)
-            phases_by_key[e.key].add("online")
-            if run_llm:
+            res = analyze_entry(e, results, statuses, rep, delay=delay, timeout=timeout,
+                                provider=(provider if run_llm else None), model=model,
+                                contexts=contexts, by_key=by_key)
+            # Mark a phase complete only if it actually SUCCEEDED. A transient online
+            # failure (online_error) or a failed LLM call (llm_error) leaves the phase
+            # UNDONE so a second pass retries it -- the phase flags must reflect real
+            # completion, not merely that the attempt was made.
+            if not res.online_error:
+                phases_by_key[e.key].add("online")
+            if run_llm and not res.llm_error:
                 phases_by_key[e.key].add("llm")
 
+        # Build this entry's canonical record -- the single source the summary parses
+        # and (with --json) the line written to the log. Built for EVERY entry, even
+        # without --json, so the in-memory summary derives from the same records.
+        res = results.get(e.key)
+        st, conf = statuses.get(e.key, (None, None))
+        rec = entry_record(
+            e.key, res, st, conf, phases_by_key[e.key],
+            rep.issues_for(e.key), verify=rep.links.get(e.key),
+            entry_type=e.etype, line=e.lineno,
+            status_detail=rep.status_detail(e.key), bib_year=e.get("year"),
+            checksum=checksum)
+        records.append(rec)
         # Incremental checkpoint: APPEND this entry's record to the NDJSON log. One
         # O(1) append per entry, so an interruption loses at most the entry in
         # flight; a re-run appends a fresh record (last line wins on load). Every
         # entry gets a line (offline-only entries too), so the log holds the whole
-        # bibliography. The final summary/file records are appended after the loop.
+        # bibliography.
         if args.json:
-            res = results.get(e.key)
-            st, conf = statuses.get(e.key, (None, None))
-            append_record(args.json, entry_record(
-                e.key, res, st, conf, phases_by_key[e.key],
-                rep.issues_for(e.key), verify=rep.links.get(e.key),
-                entry_type=e.etype, line=e.lineno,
-                status_detail=rep.status_detail(e.key)))
+            append_record(args.json, rec)
         # --key focuses the REPORT on one entry, not just the online lookup: print
         # only the selected entry's block (the offline checks still RUN for every
         # entry -- file-level rules like duplicate detection need them -- but the
@@ -444,26 +459,21 @@ def main(argv=None):
     else:
         any_emitted |= rep.emit_remaining(skip_notes=args.skipnotes, only_key=args.key)
 
-    # Layer 6: bibliography integrity score + coverage. Rates are computed over the
-    # entries actually checked online (in --tex mode, the cited subset; otherwise
-    # every entry) -- uncited entries are skipped by design, not failures, so they
-    # do not drag the score of the references that were examined. File-wide defects
-    # (duplicate keys/DOIs) still count regardless of citation.
-    summary = integrity(entries, statuses, results, rep) if online else None
+    # Layer 6: bibliography integrity score + coverage. DERIVED by parsing the
+    # per-entry records (the single source of truth) plus the live file-level
+    # findings (duplicates etc., recomputed every run) -- never a stored aggregate.
+    # Rates are over the entries actually checked online; uncited/never-resolved ones
+    # are skipped by design, so they do not drag the score.
+    summary = integrity(records, rep) if online else None
 
     rep.render_summary(len(entries), len(contexts), skip_notes=args.skipnotes,
                        tex_mode=tex_mode, any_findings=any_emitted, integrity=summary)
 
     if args.json:
-        # Append the file-level findings (duplicates, brace balance, dropped cited
-        # keys -- only known after the loop) and the summary as their reserved
-        # records, then COMPACT the log: rewrite it once, atomically, with one line
-        # per key in bib order (dropping the superseded duplicate lines a resumed or
-        # multi-phase run appended). The summary is the integrity roll-up online, or
-        # the honest offline stub (null score) -- never a fabricated 100.
-        json_summary = summary if summary is not None else offline_summary_stub(rep)
-        append_record(args.json, file_record(rep.issues_for("<file>")))
-        append_record(args.json, summary_record(json_summary))
+        # COMPACT the log: rewrite it once, atomically, with one line per entry key in
+        # bib order (dropping the superseded duplicate lines a resumed or multi-phase
+        # run appended). No reserved <file>/<summary> records: file-level findings and
+        # the summary are recomputed each run from the records, not persisted.
         compact(args.json, [e.key for e in entries])
         print(f"\nJSON report written to {args.json}")
 

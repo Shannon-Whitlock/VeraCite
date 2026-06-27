@@ -65,12 +65,16 @@ def _phases(rec):
 
 
 def _refs_by_key(path):
-    """The entry records (excluding the reserved <file>/<summary>) plus the summary
-    dict, as (refs, summary) -- the NDJSON analogue of the old object's references +
-    summary, so the assertions below read the same."""
+    """The entry records (the NDJSON holds nothing else) plus the summary DERIVED
+    from them, as (refs, {summary, references}). The summary is no longer a stored
+    record -- it is re-parsed from the entry records, so we derive it here the same
+    way the tool does, with an empty Report (these fixtures carry no file-level
+    findings, so duplicate/conflict counts are 0)."""
+    from veracite.report import Report
+    from veracite.verify import integrity
     recs = _read_ndjson(path)
     refs = {k: v for k, v in recs.items() if k not in ("<file>", "<summary>")}
-    summary = recs.get("<summary>", {}).get("summary", {})
+    summary = integrity(list(refs.values()), Report(color=False))
     return refs, {"summary": summary, "references": list(refs.values())}
 
 
@@ -81,15 +85,37 @@ def _write_ndjson(path, records):
             fh.write(json.dumps(r) + "\n")
 
 
-def _entry_line(key, phases, status=None, conf=None, doi=None, rec=None):
-    """A per-entry NDJSON record for test fixtures, matching checkpoint.entry_record."""
+def _bib_checksums():
+    """The source checksum of each entry in _BIB, keyed by citation key -- so a
+    hand-built fixture record stamps the SAME checksum the live run computes, and the
+    staleness check treats it as unmodified (otherwise a missing/mismatched checksum
+    forces a recompute, by design)."""
+    from veracite.parser import parse_bib
+    from veracite.checkpoint import entry_checksum
+    entries, _ = parse_bib(_BIB)
+    return {e.key: entry_checksum(e.raw) for e in entries}
+
+
+_CHECKSUMS = _bib_checksums()
+
+
+def _entry_line(key, phases, status=None, conf=None, doi=None, rec=None,
+                checksum=...):
+    """A per-entry NDJSON record for test fixtures, matching checkpoint.entry_record.
+    Stamps the checksum of `key` in _BIB by default so the entry reads as unmodified;
+    pass checksum=None to simulate an older (pre-checksum) record."""
     from veracite.checkpoint import PHASES
-    return {"key": key, "phases": {p: (p in phases) for p in PHASES},
-            "status": status, "confidence": conf,
-            "verify": f"https://doi.org/{doi}" if doi else None,
-            "identifiers": {"doi": doi, "arxiv": None, "isbn": None},
-            "sources": ["crossref"] if status else [],
-            "canonical_record": rec, "issues": []}
+    if checksum is ...:
+        checksum = _CHECKSUMS.get(key)
+    rec_out = {"key": key, "phases": {p: (p in phases) for p in PHASES},
+               "status": status, "confidence": conf,
+               "verify": f"https://doi.org/{doi}" if doi else None,
+               "identifiers": {"doi": doi, "arxiv": None, "isbn": None},
+               "sources": ["crossref"] if status else [],
+               "canonical_record": rec, "issues": []}
+    if checksum:
+        rec_out["checksum"] = checksum
+    return rec_out
 
 
 # --- phase bookkeeping -----------------------------------------------------
@@ -119,6 +145,157 @@ def test_needs_couples_llm_to_online():
     # everything satisfied
     cp.phases_by_key = {"a": {"offline", "online", "llm"}}
     assert cp.needs("a", {"offline", "online", "llm"}) == set()
+
+
+def test_needs_retries_online_after_transient_error():
+    # An entry whose online phase RAN but failed on a transient API error (429/5xx/
+    # network) is NOT settled: a resumed online run must redo it, so the rate-limited
+    # 'record_unresolved' is retried rather than replayed. A normally-resolved entry
+    # in the same run is left alone.
+    cp = Checkpoint("x")
+    cp.phases_by_key = {"good": {"offline", "online"}, "rl": {"offline", "online"}}
+    cp._online_error = {"rl"}
+    assert cp.needs("good", {"offline", "online"}) == set()       # settled -> nothing
+    assert cp.needs("rl", {"offline", "online"}) == {"online"}    # transient -> retry
+    # but an OFFLINE-only resume does not drag the online retry in (online not requested)
+    assert cp.needs("rl", {"offline"}) == set()
+
+
+def test_online_error_round_trips_through_checkpoint(tmp_path):
+    # entry_record persists online_error only when set, and Checkpoint.load re-flags
+    # the key so a resumed run knows to retry it.
+    from veracite.checkpoint import entry_record
+    from veracite.record import Resolution
+    res_ok = Resolution(arxiv_id="2501.00001")
+    res_rl = Resolution(arxiv_id="2501.00002", online_error=True)
+    rec_ok = entry_record("ok", res_ok, "VERIFIED", 1.0, {"offline", "online"}, [])
+    rec_rl = entry_record("rl", res_rl, "UNVERIFIED", 0.1, {"offline", "online"}, [])
+    assert "online_error" not in rec_ok           # clean record stays unchanged
+    assert rec_rl["online_error"] is True
+    out = tmp_path / "r.ndjson"
+    _write_ndjson(str(out), [rec_ok, rec_rl])
+    cp = Checkpoint.load(str(out))
+    assert cp._online_error == {"rl"}
+
+
+def test_llm_error_round_trips_and_needs_retries_llm(tmp_path):
+    # A FAILED llm call (not a 'no abstract' skip) must not settle the llm phase: the
+    # record carries llm_error and the phase is left undone, so a resumed --llm retries.
+    from veracite.checkpoint import entry_record
+    from veracite.record import Resolution
+    res_ok = Resolution(arxiv_id="2501.00001")
+    res_fail = Resolution(arxiv_id="2501.00002", llm_error=True)
+    rec_ok = entry_record("ok", res_ok, "VERIFIED", 1.0, {"offline", "online", "llm"}, [])
+    # phase 'llm' deliberately NOT in the set for the failed entry (the cli does this).
+    rec_fail = entry_record("fail", res_fail, "VERIFIED", 1.0, {"offline", "online"}, [])
+    assert "llm_error" not in rec_ok
+    assert rec_fail["llm_error"] is True
+    out = tmp_path / "r.ndjson"
+    _write_ndjson(str(out), [rec_ok, rec_fail])
+    cp = Checkpoint.load(str(out))
+    assert cp._llm_error == {"fail"}
+    # The settled entry needs nothing; the failed one needs llm (and online, coupled).
+    assert cp.needs("ok", {"offline", "online", "llm"}) == set()
+    assert cp.needs("fail", {"offline", "online", "llm"}) == {"llm", "online"}
+
+
+@pytest.fixture
+def stub_llm_fails(monkeypatch):
+    """An LLM provider that always FAILS (connection/CLI error), counting its calls."""
+    calls = {"n": 0}
+
+    def failing_provider(prompt, model, timeout):
+        calls["n"] += 1
+        return {"error": "connection refused"}
+
+    # cli.py imports these names into its own namespace, so patch them on cli.
+    monkeypatch.setattr(cli, "resolve_provider", lambda name, rep: failing_provider)
+    monkeypatch.setattr(cli, "preflight_provider", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "find_citation_contexts",
+                        lambda files, base: {"a": [{"file": "m.tex", "context": "c"}],
+                                             "b": [{"file": "m.tex", "context": "c"}]})
+    return calls
+
+
+def test_failed_llm_phase_is_not_marked_complete_and_retries(tmp_path, stub_online,
+                                                             stub_llm_fails):
+    """A run whose --llm calls FAIL must not record llm as done; a later --llm pass
+    therefore retries them (the failure left the phase genuinely incomplete)."""
+    bib = tmp_path / "r.bib"
+    bib.write_text(_BIB, encoding="utf-8")
+    out = tmp_path / "rep.json"
+    tex = _tex(tmp_path)
+    # First --llm pass: the provider errors on both, so neither gets the llm phase.
+    cli.main(["--bib", str(bib), "--tex", tex, "--llm", "--no-color", "--json", str(out)])
+    refs, _ = _refs_by_key(out)
+    assert all("llm" not in _phases(r) for r in refs.values())     # not falsely settled
+    assert all(r.get("llm_error") for r in refs.values())          # failure recorded
+    first_calls = stub_llm_fails["n"]
+    assert first_calls == 2                                        # both attempted
+    # A second --llm pass RETRIES them (they were never settled), not skips them.
+    cli.main(["--bib", str(bib), "--tex", tex, "--llm", "--no-color", "--json", str(out)])
+    assert stub_llm_fails["n"] == first_calls + 2                  # retried, not skipped
+
+
+def test_edited_entry_is_recomputed_on_resume(tmp_path, stub_online):
+    """The source checksum makes a resumed run recompute exactly the entries whose
+    .bib text changed -- editing one entry re-resolves only it, not the whole bib."""
+    bib = tmp_path / "r.bib"
+    bib.write_text(_BIB, encoding="utf-8")
+    out = tmp_path / "rep.json"
+    cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])
+    assert stub_online["crossref"] == 2                            # both resolved once
+    # Edit ONLY entry 'b' (change its title); 'a' is byte-identical.
+    edited = _BIB.replace("The Second Paper About Stuff", "The Second Paper, Revised")
+    bib.write_text(edited, encoding="utf-8")
+    cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])
+    # 'a' unchanged -> reused (no new resolve); 'b' edited -> recomputed (one resolve).
+    assert stub_online["crossref"] == 3
+    refs, _ = _refs_by_key(out)
+    assert refs["b"]["checksum"] != _CHECKSUMS["b"]                # 'b' restamped
+
+
+def test_complete_resume_is_byte_identical(tmp_path, stub_online):
+    """A resume over a COMPLETE report reprints the same report: the summary and every
+    record are a parse of the stored records, so fresh and resumed output match."""
+    bib = tmp_path / "r.bib"
+    bib.write_text(_BIB, encoding="utf-8")
+    out = tmp_path / "rep.json"
+    cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])
+    first = out.read_text()
+    cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])
+    assert out.read_text() == first                               # identical NDJSON
+    assert stub_online["crossref"] == 2                           # no re-resolve on resume
+
+
+def test_ndjson_is_forward_compatible(tmp_path):
+    """A report written by a FUTURE version must still load: unknown fields on an
+    entry record are ignored (not rejected), an unknown reserved (<...>) record kind
+    is skipped rather than mis-loaded as a bib entry, and BOTH survive a compaction
+    round-trip through this version (so an old tool never silently strips new data)."""
+    from veracite.checkpoint import compact, _read_records
+    out = tmp_path / "future.json"
+    future_entry = {
+        "key": "k", "veracite_version": "9.9.9", "checksum": "deadbeef",
+        "phases": {"offline": True, "online": True, "llm": False},
+        "status": "VERIFIED", "confidence": 1.0,
+        "identifiers": {"doi": "10.1/x", "arxiv": None, "isbn": None},
+        "sources": ["crossref"],
+        "canonical_record": {"title": "T", "year": 2020},
+        "issues": [], "future_field": {"new": "data"},      # field this version lacks
+    }
+    future_kind = {"key": "<provenance>", "tool_chain": ["a", "b"]}  # unknown record kind
+    _write_ndjson(out, [future_entry, future_kind])
+
+    cp = Checkpoint.load(str(out))
+    assert cp is not None
+    assert "k" in cp.phases_by_key                     # real entry loads
+    assert "<provenance>" not in cp.phases_by_key      # NOT mis-loaded as an entry
+
+    compact(str(out), ["k"])
+    recs, _ = _read_records(str(out))
+    assert "future_field" in recs["k"]                 # unknown field preserved
+    assert "<provenance>" in recs                      # unknown record kind preserved
 
 
 # --- offline persists phase info -------------------------------------------
@@ -344,9 +521,10 @@ def test_appends_grow_then_compaction_dedupes(tmp_path, stub_online):
     cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])   # resume online
     lines = [l for l in out.read_text().splitlines() if l.strip()]
     keys = [json.loads(l)["key"] for l in lines]
-    # After compaction: exactly one line per entry + <file> + <summary>, no dups.
+    # After compaction: exactly one line per entry, nothing else (no reserved
+    # <file>/<summary> records -- the summary and file findings are recomputed).
     assert keys.count("a") == 1 and keys.count("b") == 1
-    assert sorted(keys) == ["<file>", "<summary>", "a", "b"]
+    assert sorted(keys) == ["a", "b"]
 
 
 def test_last_line_per_key_wins(tmp_path):
@@ -370,6 +548,4 @@ def test_entry_order_preserved_through_compaction(tmp_path, stub_online):
     bib.write_text(_BIB, encoding="utf-8")
     cli.main(["--bib", str(bib), "--no-color", "--json", str(out)])
     keys = [json.loads(l)["key"] for l in out.read_text().splitlines() if l.strip()]
-    entry_keys = [k for k in keys if k not in ("<file>", "<summary>")]
-    assert entry_keys == ["a", "b"]                 # bib order
-    assert keys[-2:] == ["<file>", "<summary>"]     # reserved records last
+    assert keys == ["a", "b"]      # bib order, one record per entry, nothing else

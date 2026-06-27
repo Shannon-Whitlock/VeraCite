@@ -431,6 +431,23 @@ def bare_doi(doi):
 # prefix) because here we must also CAPTURE the suffix and stop it at URL syntax.
 _DOI_IN_URL_RE = re.compile(r"(10\.\d{4,9}/[^\s?#]+)", re.I)
 
+# Nature is the one common publisher whose article URL carries the DOI SUFFIX but not
+# the '10.<registrant>/' prefix: 'nature.com/articles/s41586-025-09367-3' is the DOI
+# '10.1038/s41586-025-09367-3'. The prefix is unrecoverable from the URL or by search
+# (a bare suffix is not a DOI -- doi.org 400s, a suffix search returns thousands of
+# unrelated hits), so the host supplies it. This is a SINGLE host, not a publisher
+# table: Science/APS/IOP/Springer all embed the full '10.x/' DOI in their paths and
+# need nothing. The suffix shape is pinned tight (the Nature article-id forms) so a
+# non-article Nature path or a stray segment never reconstructs a bogus DOI; whatever
+# is reconstructed is then resolved and identity-checked, so a wrong guess fails to
+# verify rather than corrupting the entry.
+_NATURE_SUFFIX_RE = re.compile(
+    r"nature\.com/articles/"
+    r"((?:s\d{4,5}-\d{3}-\d{4,5}-[0-9a-z]"   # modern: s41586-025-09367-3
+    r"|n[a-z]+\d{3,}"                          # legacy:  nphys2259, nature12345
+    r"|d\d{5}-\d{3}-[0-9a-z-]+))",            # magazine/News&Views: d41586-022-01029-y
+    re.I)
+
 
 def extract_doi_from_url(*values):
     """A DOI mined from a URL/note string (publisher landing pages carry the DOI in
@@ -443,12 +460,17 @@ def extract_doi_from_url(*values):
         if not v:
             continue
         m = _DOI_IN_URL_RE.search(v)
-        if not m:
-            continue
-        # Trim trailing URL/sentence punctuation that is not part of the DOI.
-        cand = bare_doi(m.group(1)).rstrip(").,;'\"/")
-        if DOI_FULL_RE.match(cand):
-            return cand
+        if m:
+            # Trim trailing URL/sentence punctuation that is not part of the DOI.
+            cand = bare_doi(m.group(1)).rstrip(").,;'\"/")
+            if DOI_FULL_RE.match(cand):
+                return cand
+        # Nature: reconstruct '10.1038/<suffix>' from the prefixless article URL.
+        nm = _NATURE_SUFFIX_RE.search(v)
+        if nm:
+            cand = "10.1038/" + nm.group(1)
+            if DOI_FULL_RE.match(cand):
+                return cand
     return ""
 
 

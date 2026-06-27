@@ -524,39 +524,78 @@ def _confidence_kind(status, res):
     return "trusted"
 
 
-def integrity(entries, statuses, results, rep):
-    """Compute the bibliography integrity summary from per-reference statuses and
-    the collected findings. `statuses` is {key: (status, confidence)}, `results`
-    is {key: Resolution}. Returns a dict of summary metrics (also used by --json).
-    The score is a transparent weighted blend, documented in the README.
+# Mirror normalize.is_article_like (which keys off Entry.etype) for the record-dict
+# path: the entry's persisted `entry_type`. Kept in sync with normalize._ARTICLE_LIKE_TYPES.
+_ARTICLE_LIKE_TYPES_LOWER = {"article", "inproceedings", "conference"}
 
-    All rates are computed over the *checked* entries only -- the ones actually
-    resolved online (in --tex mode, the cited subset; otherwise every entry).
-    Uncited entries are skipped by design, not verification failures, so counting
-    them in the denominator would understate the score of the references that were
-    examined. `statuses` holds exactly the checked keys (only the analysis pipeline
-    writes it), so it defines the denominator."""
-    checked = [e for e in entries if e.key in statuses]
+
+def _rec_confidence_kind(status, rec):
+    """`_confidence_kind` for a record dict -- reads the persisted score inputs
+    (dead_doi/found_by_search/sources) so a reprint buckets identically to the run
+    that produced it."""
+    if status == "MISMATCH":
+        return "mismatch"
+    if status == "UNVERIFIED":
+        return "unverified"
+    if rec.get("dead_doi"):
+        return "dead_recovered"
+    if rec.get("found_by_search"):
+        return "search"
+    if set(rec.get("sources") or []) <= {"arxiv"}:
+        return "arxiv"
+    return "trusted"
+
+
+def _rec_has_pid(rec):
+    ids = rec.get("identifiers") or {}
+    return bool(ids.get("doi") or ids.get("arxiv") or ids.get("isbn"))
+
+
+def integrity(records, rep):
+    """Compute the bibliography integrity summary by PARSING the per-entry records --
+    the single source of truth -- never from live Resolution objects. `records` is the
+    list of entry-record dicts (`checkpoint.entry_record` shape) the run just built;
+    `rep` supplies the live file-level findings (duplicates/conflicts/superseded),
+    which are recomputed every run and not stored. Returns the summary dict.
+
+    Deriving from records (not objects) is what makes a fresh run and a resumed run
+    take the IDENTICAL path: the summary is a parse of the records, so a saved report
+    reprints byte-stable. The score weighting is a transparent blend, documented in
+    the README.
+
+    All rates are over the *checked* entries: those actually resolved online (a record
+    with a 'online' phase). Uncited entries and never-resolved ones are skipped by
+    design -- not failures -- so they do not drag the denominator."""
+    def status_of(rec):
+        return rec.get("status")
+    # 'checked' = records that carry an online resolution (status set by the pipeline).
+    # An uncited or offline-only record has status None and is excluded, matching the
+    # old "key in statuses" denominator.
+    checked = [r for r in records if not r.get("uncited") and status_of(r) is not None]
     n = len(checked)
-    verified = sum(1 for s, _ in statuses.values() if s == "VERIFIED")
-    # Of the verified, how many carry a caveat (confidence < 1.0: a field differs,
-    # sources disagree, or only arXiv confirms). Reported separately so the roll-up
-    # still distinguishes a clean pass from a checked-the-detail pass.
-    verified_with_caveat = sum(1 for s, c in statuses.values()
-                               if s == "VERIFIED" and c < 1.0)
-    unverified = sum(1 for s, _ in statuses.values() if s == "UNVERIFIED")
-    mismatch = sum(1 for s, _ in statuses.values() if s == "MISMATCH")
+    verified = sum(1 for r in checked if status_of(r) == "VERIFIED")
+    # Of the verified, how many carry a caveat (confidence < 1.0).
+    verified_with_caveat = sum(1 for r in checked if status_of(r) == "VERIFIED"
+                               and float(r.get("confidence") or 0.0) < 1.0)
+    unverified = sum(1 for r in checked if status_of(r) == "UNVERIFIED")
+    mismatch = sum(1 for r in checked if status_of(r) == "MISMATCH")
+
+    def rec_year(rec):
+        y = str(rec.get("bib_year") or "").strip()
+        if y[:4].isdigit():
+            return int(y[:4])
+        cy = (rec.get("canonical_record") or {}).get("year")
+        return cy if isinstance(cy, int) else None
 
     # DOI coverage over *eligible* records (post-2005 article-likes) among checked.
-    eligible = [e for e in checked if is_article_like(e)
-                and (_entry_year(e, results.get(e.key, _Empty())) or 9999) >= 2005]
-    eligible_with_doi = sum(1 for e in eligible
-                            if (results.get(e.key) and results[e.key].doi))
+    eligible = [r for r in checked
+                if (r.get("entry_type") or "").lower() in _ARTICLE_LIKE_TYPES_LOWER
+                and (rec_year(r) or 9999) >= 2005]
+    eligible_with_doi = sum(1 for r in eligible
+                            if (r.get("identifiers") or {}).get("doi"))
     doi_cov = eligible_with_doi / len(eligible) if eligible else 1.0
     # PID coverage over checked entries (any strong id present).
-    with_pid = sum(1 for e in checked
-                   if results.get(e.key) and (results[e.key].doi or results[e.key].arxiv_id
-                                              or results[e.key].isbn))
+    with_pid = sum(1 for r in checked if _rec_has_pid(r))
     pid_cov = with_pid / n if n else 1.0
 
     cat = lambda c: sum(1 for f in rep.live_findings() if f.category == c)
@@ -564,30 +603,22 @@ def integrity(entries, statuses, results, rep):
     conflicts = cat("source_conflict")
     superseded = cat("preprint_superseded")
 
-    # Per-entry findings, for the per-entry defect lookup.
-    fcats_by_key = {}
-    for f in rep.live_findings():
-        fcats_by_key.setdefault(f.key, set()).add(f.category)
+    # Per-entry finding categories: from the record's own issues (the single source),
+    # so the per-entry defect lookup matches what is persisted/printed.
+    def fcats(rec):
+        return {(i.get("category") or "") for i in (rec.get("issues") or [])}
 
     # INTEGRITY (0-100): mean per-entry credit by the worst author-fixable defect,
-    # minus a flat penalty per duplicate (a file-level defect not tied to one entry).
-    # A clean bibliography scores 100; a wrong/unverifiable reference costs far more
-    # than a transcription slip. Corroboration depth does NOT enter here.
-    credit_sum = 0.0
-    for e in checked:
-        status, _ = statuses[e.key]
-        res = results.get(e.key)
-        has_pid = bool(res and (res.doi or res.arxiv_id or res.isbn))
-        credit_sum += _INTEGRITY_CREDIT[
-            _integrity_defect(status, fcats_by_key.get(e.key, set()), has_pid)]
+    # minus a flat penalty per duplicate. Clean bib = 100; a wrong/unverifiable
+    # reference costs far more than a transcription slip. Corroboration depth excluded.
+    credit_sum = sum(
+        _INTEGRITY_CREDIT[_integrity_defect(status_of(r), fcats(r), _rec_has_pid(r))]
+        for r in checked)
     integrity_score = (max(0, round(100 * credit_sum / n - _DUP_PENALTY * duplicates))
                        if n else None)
 
-    # CONFIDENCE (0-100): mean trust in the verification source. High whenever a
-    # trusted source confirmed the entry; not docked for single-source or a field
-    # discrepancy (those are corroboration depth / integrity, not our uncertainty).
-    conf_sum = sum(_CONFIDENCE[_confidence_kind(statuses[e.key][0], results.get(e.key))]
-                   for e in checked)
+    # CONFIDENCE (0-100): mean trust in the verification source.
+    conf_sum = sum(_CONFIDENCE[_rec_confidence_kind(status_of(r), r)] for r in checked)
     confidence_score = round(100 * conf_sum / n) if n else None
 
     return {

@@ -49,7 +49,6 @@ from .parser import parse_bib
 from .pipeline import analyze_entry
 from .report import Report, Severity
 from .rules import run_entry_rules, run_file_rules, syntax_pass
-from .verify import integrity
 
 # The public demo bounds work per request: at most this many entries are checked
 # online (the rest are dropped and flagged via the `truncated` envelope field).
@@ -177,9 +176,10 @@ def _run(raw, max_entries, delay, timeout, fast):
         phases_by_key[e.key].add("online")
 
     run_file_rules(entries, rep)
-    summary = integrity(entries, statuses, results, rep)
-
-    out = rep.to_json(summary=summary, results=results, statuses=statuses,
+    # to_json builds the per-entry records and DERIVES the summary from them (the
+    # single source of truth) plus the live file-level findings -- no separate
+    # integrity() call, so the web payload matches the CLI's parse path exactly.
+    out = rep.to_json(results=results, statuses=statuses,
                       phases_by_key=phases_by_key, entries=entries)
     out["veracite_version"] = VERSION
     out["n_entries"] = n_entries

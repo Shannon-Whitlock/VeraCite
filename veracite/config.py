@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     from urllib.parse import quote as _urlquote
     HTTP_BACKEND = "urllib"
 
-VERSION = "0.1.4"
+VERSION = "0.2.0"
 
 # Fallbacks used when no settings file or environment override is present.
 DEFAULT_SETTINGS = {
@@ -74,6 +74,7 @@ DEFAULT_SETTINGS = {
         "llm_config": "warning",          # LLM run misconfigured (e.g. unknown provider)
         "preprint_superseded": "warning", # a published version now exists
         "preprint_version": "note",       # bib year matches an earlier arXiv version
+        "preprint_retitled": "note",      # arXiv renamed the preprint in a later version
         "related_work": "warning",        # erratum/correction/comment/reply linked
         "duplicate": "error",             # duplicate citation key or DOI (two entries collide)
         "duplicate_field": "note",        # a field repeated within ONE entry, values agree (benign)
