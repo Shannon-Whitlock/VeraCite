@@ -49,9 +49,42 @@ def _surname_match(a, b):
     return long[:-len(short)] in _PARTICLE_PREFIXES
 
 
-def _author_diff(left, right):
-    """Surnames in `left` with no match in `right` (particle-aware)."""
-    return [x for x in left if not any(_surname_match(x, y) for y in right)]
+def _reconstructed_surnames(rec_authors, given_full):
+    """Folded surnames a registry author may ALSO be known by once a mis-split
+    compound surname is rejoined. Crossref sometimes files 'A. Lecavelier des Etangs'
+    as given='A. Lecavelier', family='des Etangs' (or 'Alain Lecavelier' / 'des
+    Etangs'); the real surname 'Lecavelier des Etangs' then never matches the bib.
+
+    The leading given tokens are the actual first name(s); only a TRAILING run of them
+    is the shifted surname part. We don't know how many, so we emit every suffix
+    rejoin: for given 'Alain Lecavelier' + family 'des Etangs' we yield both
+    'lecavelierdesetangs' (drop 'Alain') and 'alainlecavelierdesetangs', so the bib's
+    'Lecavelier des Etangs' matches the first without the real first name 'Alain'
+    polluting it. Initial-only tokens ('A.') are never surname parts and stop the run
+    (an ordinary 'Alan Smith' yields nothing once initials/first-name-only are gone)."""
+    extra = []
+    for surname in rec_authors:
+        full = (given_full or {}).get(surname, "")
+        if not full:
+            continue
+        toks = full.split()
+        # Build suffix rejoins from the shortest (just the last given token) upward,
+        # stopping at an initial (a first-initial is not part of a surname).
+        for start in range(len(toks) - 1, -1, -1):
+            if _is_initial(toks[start]):
+                break
+            rejoined = _clean_name_key("".join(toks[start:]) + surname)
+            if rejoined and rejoined != surname:
+                extra.append(rejoined)
+    return extra
+
+
+def _author_diff(left, right, right_extra=()):
+    """Surnames in `left` with no match in `right` (particle-aware). `right_extra`
+    adds reconstructed compound surnames a `right` author may also be known by, so a
+    bib's correct compound surname is not falsely reported as 'not in record'."""
+    pool = list(right) + list(right_extra)
+    return [x for x in left if not any(_surname_match(x, y) for y in pool)]
 
 
 def _is_initial(name):
@@ -63,15 +96,25 @@ def _is_initial(name):
 
 def _clean_name_key(name):
     """A surname reduced to its comparable form for DEVIATION detection: deaccented,
-    lowercased, with internal whitespace collapsed and hyphens/apostrophes/periods
-    (all legitimate in names) normalized away. What remains is the bare letters --
-    so 'Cohen' and 'Cohén' and 'Cohen.' all match, but 'Cohen1' (a stray digit) or
-    'Cohen*' (a footnote mark) does NOT, since the extra character survives. This is
-    how the deviation check stays robust without enumerating bad-character classes:
+    lowercased, with internal whitespace collapsed and name punctuation
+    (hyphens/apostrophes/periods/commas -- all legitimate in or around names, or
+    record noise) normalized away. What remains is the bare letters -- so 'Cohen' and
+    'Cohén' and 'Cohen.' all match, but 'Cohen1' (a stray digit) or 'Cohen*' (a
+    footnote mark) does NOT, since the extra character survives. The comma is included
+    because Crossref sometimes leaves a trailing comma in the `family` field ('Gaume,',
+    'Wilson,') -- record noise, not a real deviation of the bib's clean surname. This
+    is how the deviation check stays robust without enumerating bad-character classes:
     anything that is not an accent/case/punctuation difference shows up as a real
-    deviation from the record's clean name."""
+    deviation from the record's clean name.
+
+    The stripped punctuation covers Unicode hyphen/dash variants too (U+2010 hyphen,
+    U+2011 non-breaking hyphen, the U+2012-2015 dashes, U+2212 minus), not just the
+    ASCII '-': Crossref serves a hyphenated surname with a real Unicode hyphen
+    ('Glover‐Kapfer', U+2010) while the bib uses the ASCII '-' ('Glover-Kapfer') -- the
+    SAME name, so it must not read as a deviation (and never be 'corrected' toward the
+    non-ASCII form). Same idea as the curly apostrophe (U+2019) already handled."""
     s = deaccent(name).lower()
-    return re.sub(r"[\s.'’-]+", "", s)
+    return re.sub(r"[\s.,'’‐-―−-]+", "", s)
 
 
 # Words whose interior capital is a LEGITIMATE camelCase name form, where the bib and
@@ -98,14 +141,30 @@ def _miscapitalized_ok(name):
     return True
 
 
+# Unicode hyphen/dash variants that are TYPOGRAPHIC equivalents of the ASCII '-':
+# U+2010 hyphen, U+2011 non-breaking hyphen, U+2012-2015 figure/en/em/horizontal-bar
+# dashes, U+2212 minus. Crossref serves a hyphenated title/name with one of these
+# ('Camera‐trapping', U+2010) where the bib uses ASCII '-' -- the SAME punctuation, so
+# it must not register as a deviation (nor be 'corrected' toward the non-ASCII form).
+_UNICODE_DASHES = "‐‑‒–—―−"
+
+
+def _norm_dashes(s):
+    """Fold every Unicode hyphen/dash variant to the ASCII '-' so a codepoint-only
+    difference is not mistaken for a punctuation difference."""
+    return re.sub("[" + _UNICODE_DASHES + "]", "-", s)
+
+
 def _title_punct_key(title):
     """A title reduced to a CASE- and ACCENT-insensitive form that PRESERVES
     punctuation -- so a hyphen, '&', colon or spacing difference survives while a
     casing or accent difference does not. Used to detect a title that matches the
     record as the same work (title_key equal) but whose written PUNCTUATION deviates
     from the record's canonical form (e.g. 'open source' vs 'open-source'). De-TeX
-    first so brace-protection ('{Yb}') is not counted as a difference."""
-    s = deaccent(clean_tex(title)).lower()
+    first so brace-protection ('{Yb}') is not counted as a difference; fold Unicode
+    dash variants to ASCII so 'Camera-trapping' vs 'Camera‐trapping' (U+2010) is NOT a
+    deviation (same hyphen, different codepoint)."""
+    s = _norm_dashes(deaccent(clean_tex(title))).lower()
     return re.sub(r"\s+", " ", s).strip()
 
 
@@ -171,11 +230,41 @@ def _compare_authors(e, rec, source, rep):
             rep.withdraw(e.key, "author_truncated_marker")
     if not (bib_authors and rec_authors):
         return False
-    bib_only = _author_diff(bib_authors, rec_authors)
-    rec_only = _author_diff(rec_authors, bib_authors)
-    first_differs = not _surname_match(bib_authors[0], rec_authors[0])
+    # Crossref may mis-split a compound surname into given+family ('A. Lecavelier' /
+    # 'des Etangs' for 'Lecavelier des Etangs'); reconstruct the real surname so the
+    # bib's correct form is not falsely flagged as a different author in either
+    # direction. `rec_aug` is the record surname pool with the rejoined forms added.
+    given_full = rec.get("given_full") or {}
+    rec_extra = _reconstructed_surnames(rec_authors, given_full)
+    bib_only = _author_diff(bib_authors, rec_authors, rec_extra)
+    # rec_only: a record author is "missing from bib" only if NEITHER its filed
+    # surname NOR its reconstructed compound surname matches a bib author -- so the
+    # mis-split 'des Etangs' (real surname 'Lecavelier des Etangs') is found in the
+    # bib and not falsely reported missing.
+    def _rec_in_bib(surname):
+        if any(_surname_match(surname, b) for b in bib_authors):
+            return True
+        rejoined = _reconstructed_surnames([surname], given_full)
+        return any(_surname_match(r, b) for r in rejoined for b in bib_authors)
+    rec_only = [x for x in rec_authors if not _rec_in_bib(x)]
+    # First-author match privileges position: fold the first record author plus any
+    # reconstruction OF that first author, not the whole list.
+    first_extra = _reconstructed_surnames(rec_authors[:1], rec.get("given_full"))
+    first_differs = not (_surname_match(bib_authors[0], rec_authors[0])
+                         or any(_surname_match(bib_authors[0], y) for y in first_extra))
 
+    # Drop empty surnames (a malformed author like '{}, A.' folds to '') -- listing
+    # them yields a finding with an empty name ('author(s) in bib not in record: '),
+    # which states nothing actionable. A blank author IS a defect, but it is reported
+    # by the offline author-format rule pointing at the exact token, not here.
+    bib_only = [a for a in bib_only if show(a).strip()]
+    rec_only = [a for a in rec_only if show(a).strip()]
+    # When the first author already differs, the same person also shows up in bib_only
+    # and rec_only -- the 'first author differs' line says it once, so don't restate it
+    # two more ways. Suppress the first-author pair from the set-difference lists.
     if first_differs:
+        bib_only = [a for a in bib_only if not _surname_match(a, bib_authors[0])]
+        rec_only = [a for a in rec_only if not _surname_match(a, rec_authors[0])]
         rep.add(Severity.WARN, e, f"[{source}] first author differs: "
                 f"bib={show(bib_authors[0])!r} vs {source}={show(rec_authors[0])!r}",
                 "record", category="metadata_mismatch")
@@ -187,11 +276,24 @@ def _compare_authors(e, rec, source, rep):
         rep.add(Severity.WARN, e, f"[{source}] author(s) in record missing from bib: "
                 + ", ".join(sorted(show(a) for a in rec_only)), "record",
                 category="metadata_mismatch")
+    # Order check: same set, different sequence. Compare position-by-position with
+    # the same surname matching (particles + compound reconstruction) so a mis-split
+    # surname that lines up in order is NOT misread as a re-ordering.
+    def _same_position(b, r):
+        if _surname_match(b, r):
+            return True
+        return any(_surname_match(b, x) for x in _reconstructed_surnames([r], given_full))
+    in_order = len(bib_authors) == len(rec_authors) and \
+        all(_same_position(b, r) for b, r in zip(bib_authors, rec_authors))
     if not truncated and not bib_only and not rec_only and not first_differs \
-            and bib_authors != rec_authors:
+            and not in_order:
         rep.add(Severity.WARN, e, f"[{source}] same authors but in a different order "
                 f"than the record", "record", category="metadata_mismatch")
-    initials = [a for a in bib_authors if len(a) <= 1]
+    # A surname folded to a single letter looks like a mis-parsed initial. An EMPTY
+    # surname ('' from a malformed '{}, A.') is excluded: it would render as an empty
+    # '()' that names nothing, and the offline author-format rule already flags the
+    # malformed token at its exact line.
+    initials = [a for a in bib_authors if 0 < len(a) <= 1 and show(a).strip()]
     if initials and not truncated:
         rep.add(Severity.INFO, e, f"[{source}] author surname(s) reduced to initials "
                 f"({', '.join(show(a) for a in initials)}); check name parsing", "record",
@@ -312,7 +414,13 @@ def _is_iso4_abbrev(abbrev, full):
     word equal to or a prefix of its full word. Every significant full-title word
     must be accounted for, so 'Nature' does NOT abbreviate 'Nature Physics'."""
     aw = _journal_words(abbrev)
-    fw = [w for w in _journal_words(full) if w not in _ISO4_STOPWORDS]
+    # A single letter the abbreviation keeps is a SERIES designator, not an article:
+    # 'J. Phys. A' / 'Phys. Rev. B' keep the A/B that names the series, so 'Journal of
+    # Physics A' must NOT drop that 'a' as the article 'a'. Don't stopword-strip a
+    # token the abbreviation itself carries (an article is never a standalone abbrev
+    # token), so the series letter survives and the word counts line up.
+    kept = _ISO4_STOPWORDS - set(aw)
+    fw = [w for w in _journal_words(full) if w not in kept]
     if not aw or len(aw) != len(fw):
         return False
     return all(f.startswith(a) for a, f in zip(aw, fw))
@@ -340,7 +448,18 @@ def _journal_equiv(a, b):
         return ca == cb
     if (ca or ka) == (cb or kb):
         return True   # one side known to the table maps onto the other's key
-    return _is_iso4_abbrev(a, b) or _is_iso4_abbrev(b, a)
+    if _is_iso4_abbrev(a, b) or _is_iso4_abbrev(b, a):
+        return True
+    # A registry full name often carries a trailing ':'-delimited subtitle the bib
+    # drops ('Physica D' vs 'Physica D: Nonlinear Phenomena'). The part BEFORE the
+    # colon is the journal's common name, so when one side equals the other's
+    # pre-colon head they denote the same journal. Restricted to a COLON subtitle (not
+    # any prefix), so 'Nature'/'Nature Physics' and 'ApJ'/'ApJL' -- which have no colon
+    # boundary -- are NOT equated.
+    head_a, head_b = _journal_key(a.split(":", 1)[0]), _journal_key(b.split(":", 1)[0])
+    if ((":" in a) != (":" in b)) and head_a and head_a == head_b and (ka == head_a or kb == head_b):
+        return True
+    return False
 
 
 # --- record comparison + parity --------------------------------------------
@@ -369,12 +488,33 @@ _MARKUP_RE = re.compile(r"<\s*/?\s*[a-z][\w:-]*[^>]*>|&[a-z]+;|&#\d+;", re.I)
 
 def _has_markup(s):
     """True if a (title) string contains embedded XML/HTML/MathML markup or a stray
-    control character -- a value that must NOT be suggested as a verbatim bib edit."""
+    control character -- a value that must NOT be suggested as a verbatim bib edit.
+
+    Whitespace control chars (tab/newline/carriage return) are NOT markup: a .bib
+    field value legitimately wraps across lines, so a multi-line bib title carries a
+    '\\n'. Counting that as "markup" would (via the rec_has_markup guard) wrongly
+    conclude the BIB is the markup-bearing side and let the RECORD's real markup
+    ('<scp>', '<i>') leak into a suggested edit. Only genuinely corrupt control
+    bytes count."""
     if not s:
         return False
     if _MARKUP_RE.search(s):
         return True
-    return any(ord(c) < 32 and c not in "\t" for c in s)
+    return any(ord(c) < 32 and c not in "\t\n\r" for c in s)
+
+
+def _safe_suggestion(value):
+    """A registry value cleaned for use as a verbatim `suggested` edit, or None when
+    it cannot be made safe. Crossref serves names with HTML entities ('Astronomy
+    &amp; Astrophysics') and sometimes markup tags; pasting '&amp;' into a .bib is a
+    corrupting edit. Decode entities first, then withhold entirely if any real markup
+    survives -- never push a value the user would have to hand-fix."""
+    if not value:
+        return None
+    decoded = html.unescape(value).strip()
+    if not decoded or _has_markup(decoded):
+        return None
+    return decoded
 
 
 def _strip_markup(s):
@@ -382,13 +522,38 @@ def _strip_markup(s):
     so the clean (non-math) parts remain comparable: '...in <mml:math>...171...Yb
     </mml:math> Atoms' -> '...in 171Yb Atoms'. The result is good enough to COMPARE
     against the bib (so deviations in the prose parts are still caught), but it has
-    lost the math FORMATTING, so it must not be offered as a verbatim suggestion."""
+    lost the math FORMATTING, so it must not be offered as a verbatim suggestion.
+
+    A tag is replaced by a SPACE when it sits between two LETTERS, because Crossref
+    drops the spaces around an inline tag and removing it with nothing would MERGE the
+    surrounding words ('An<i>SIRTF</i>Legacy' -> 'AnSIRTFLegacy', deflating the title
+    overlap into a false mismatch); with a space it becomes 'An SIRTF Legacy', which
+    matches the bib. A tag adjacent to a digit (math/isotope like '<...>171</...>Yb')
+    is removed with NOTHING so '171Yb' is not split into '171 Yb'."""
     if not s:
         return s
-    s = re.sub(r"<[^>]+>", "", s)            # drop tags
+    # Tag between two letters -> space (un-merge words); any other tag -> removed.
+    s = re.sub(r"(?<=[A-Za-z])<[^>]+>(?=[A-Za-z])", " ", s)
+    s = re.sub(r"<[^>]+>", "", s)            # drop the remaining tags
     s = re.sub(r"&[a-z]+;|&#\d+;", "", s, flags=re.I)  # drop entities
     s = "".join(c for c in s if ord(c) >= 32 or c == "\t")
     return re.sub(r"\s+", " ", s).strip()
+
+
+# LaTeX math/symbol constructs a .bib title may carry that a registry often drops or
+# mangles: inline '$...$' math, '\ensuremath{...}', and bare symbol macros ('\lambda',
+# '\alpha', ...). When the bib has one of these, the record is the side more likely to
+# be degraded, so a record-derived title must NOT be pushed as a verbatim suggestion.
+_BIB_MATH_RE = re.compile(r"\$[^$]*\$|\\ensuremath|\\[a-zA-Z]+")
+
+
+def _bib_has_math(btitle):
+    """True if the bib title carries LaTeX math/symbol markup ('$...$',
+    '\\ensuremath{...}', a '\\lambda'-style macro). Such a title encodes a symbol the
+    registry frequently drops (Crossref served 'He i 10830', the bib has 'He I
+    \\ensuremath{\\lambda}10830'); the bib is then the more complete side, so we never
+    offer the record's value as the title suggestion."""
+    return bool(_BIB_MATH_RE.search(btitle or ""))
 
 
 def _bib_math_matches_record(btitle, raw_atitle):
@@ -435,12 +600,31 @@ def _soft_field_diffs(e, rec):
         bibraw = str(e.get(key, "") or "").strip()
         recraw = str(rec.get(key, "") or "").strip()
         if bibraw and recraw and norm(bibraw) != norm(recraw):
+            # Pages: a registry often stores only the START page ('3543') while the bib
+            # carries the full range ('3543-3546'). The bib is then MORE complete, not
+            # wrong -- suggesting it drop the range to match the record would degrade it
+            # (and contradicts the dash-style note that wants the range kept). So when
+            # the record's pages is exactly the start of the bib's range, it is not a
+            # difference. (The reverse -- bib has only the start, record the range -- is
+            # still flagged, so the common 'add the missing end page' case is kept.)
+            if key == "pages" and _record_pages_is_start_of_bib(norm(recraw), norm(bibraw)):
+                continue
             # The proposed value is handed back in its biblatex-canonical written
             # form (a page range as '920--926', not the registry's '920-926'), so an
             # applied suggestion does not itself trip the dash-style check.
             to = biblatex_pages(recraw) if key == "pages" else recraw
             out.append((key, label, bibraw, to))
     return out
+
+
+def _record_pages_is_start_of_bib(rec_pages, bib_pages):
+    """True when the record's page value is exactly the START page of the bib's range
+    (record '3543' vs bib '3543-3546') -- the bib is the fuller, correct form, so this
+    is not a mismatch. Only fires when the bib is a range and the record is a single
+    page equal to its start; the opposite direction stays a real finding."""
+    if "-" not in bib_pages or "-" in rec_pages:
+        return False
+    return bib_pages.split("-", 1)[0] == rec_pages
 
 def field_diffs(left, right, lname, rname, pages_substring_ok=False, skip_keys=()):
     """The soft bibliographic fields (year/volume/issue/pages) on which two records
@@ -507,11 +691,17 @@ def compare_against_record(e, rec, source, rep):
     # is offered as a verbatim suggestion (the `to` is withheld, the finding stays).
     rec_has_markup = _has_markup(raw_atitle) and not _has_markup(btitle)
     atitle = _strip_markup(raw_atitle) if rec_has_markup else raw_atitle
-    # A suggested 'to' is the record title only when it is safe to paste verbatim;
-    # when the record carried markup the stripped form lost formatting, so withhold it.
-    safe_to = None if rec_has_markup else atitle
+    # A suggested 'to' is the record title only when it is safe to paste verbatim:
+    # withheld when the record carried markup (stripped form lost formatting) OR when
+    # the BIB title carries LaTeX math the record likely dropped (e.g. the bib's
+    # '\ensuremath{\lambda}10830' vs Crossref's de-mathed '10830') -- conforming the
+    # bib toward the record there would DELETE the symbol, a corrupting edit. In both
+    # cases the finding stays (the difference is real) but without an auto-apply 'to'.
+    bib_has_math = _bib_has_math(btitle)
+    safe_to = None if (rec_has_markup or bib_has_math) else atitle
     mangle_note = " (record title contains markup; verify the exact form manually)" \
-        if rec_has_markup else ""
+        if rec_has_markup else (" (bib title has math the record may have dropped; "
+        "verify manually)" if bib_has_math else "")
 
     def _title_sug():
         return {"field": "title", "from": btitle, "to": safe_to} if safe_to else None
@@ -544,14 +734,43 @@ def compare_against_record(e, rec, source, rep):
         # toward its exact form -- a NOTE (it renders fine; this is a metadata-quality
         # improvement), not a warning. If the record carried markup the deviation in
         # the CLEAN parts is still reported, just without an auto-applicable 'to'.
+        #
+        # BUT do not push the bib toward an ALL-CAPS record: many journals (older
+        # ApJ/IOP) store titles shouted in uppercase as their house style, which is
+        # NOT the canonical .bib form -- conforming a nicely Title-Cased bib to it
+        # would be a regression. When the record is itself miscased, withhold the
+        # suggested edit (the note stays, since the punctuation does differ).
+        rec_is_shouted = title_is_miscased(atitle)
+        style_sug = None if rec_is_shouted else _title_sug()
+        caps_note = " (record is ALL-CAPS house style; keep your title's casing)" \
+            if rec_is_shouted else ""
         rep.add(Severity.INFO, e, f"[{source}] title matches the record but its "
-                f"punctuation/wording differs from the canonical form{mangle_note}",
-                "record", category="title_style", field="title", suggested=_title_sug())
-    if bt and at and bt != at:
+                f"punctuation/wording differs from the canonical form{mangle_note}{caps_note}",
+                "record", category="title_style", field="title", suggested=style_sug)
+    if bt and at and bt != at and bt.replace(" ", "") == at.replace(" ", ""):
+        # The titles differ ONLY in where a space falls inside a token -- a catalog
+        # designation written closed-up vs spaced ('NGC6334I' vs 'NGC 6334I'), or a
+        # similar spacing slip. The word-overlap metric scores this as a strong
+        # mismatch (one token split in two drops it well below 60%), but it is the same
+        # title -- a spacing nudge, not a content difference. Emit it as a style NOTE
+        # toward the record's spacing, never an overlap WARN. (safe_to already withheld
+        # when the record carried markup.)
+        rep.add(Severity.INFO, e, f"[{source}] title matches the record but its spacing "
+                f"differs from the canonical form{mangle_note}", "record",
+                category="title_style", field="title", suggested=_title_sug())
+    elif bt and at and bt != at:
         if title_is_shortened(btitle, atitle):
-            rep.add(Severity.INFO, e, f"[{source}] title is a shortened form of the "
-                    f"record's (likely a dropped subtitle)", "record",
-                    category="metadata_mismatch")
+            # One title is a clean prefix of the other (a dropped subtitle), not a
+            # different paper. Direction matters: only when the BIB is the shorter
+            # side did the bib drop the subtitle -- an actionable note to add it. When
+            # the bib is the LONGER side, the bib already has the full title and the
+            # *record* is the truncated one (Crossref often clips A&A subtitles), so
+            # there is nothing to fix -- stay silent rather than wrongly tell the user
+            # their complete title "dropped a subtitle".
+            if len(bt.split()) < len(at.split()):
+                rep.add(Severity.INFO, e, f"[{source}] title is a shortened form of the "
+                        f"record's (likely a dropped subtitle)", "record",
+                        category="metadata_mismatch")
         else:
             overlap = title_overlap(btitle, atitle)
             # A near-zero overlap against a record reached via a book/proceedings
@@ -617,12 +836,34 @@ def compare_against_record(e, rec, source, rep):
         # emit a version-pinning NOTE, not a corrective 'year 2024 -> 2023' warning
         # whose direction is the author's choice, not a fact.
         if fld == "year" and _bib_year_matches_a_version(bibval, rec):
+            # The bib year matches a REAL arXiv version -- it is not wrong, so this is
+            # never a corrective 'year differs' warning. We also do NOT prescribe a
+            # year: v1 (the first-submission year) and the latest-version year are both
+            # legitimate and mean DIFFERENT things -- the v1 year establishes
+            # precedence/priority ("first shown"), the latest year reflects the current
+            # revised content. Which is right is the author's editorial call, so the
+            # note only states the span and leaves the choice to them (no "pin the
+            # version" directive -- arXiv's own bib generator pins none).
             v1, vn = rec.get("year"), rec.get("updated_year")
-            rep.add(Severity.INFO, e, f"[{source}] bib year {bibval} matches one of the "
-                    f"arXiv versions (v1 {v1}, latest {vn}) but not the other; the year "
-                    f"depends on which version is cited -- pin the version (e.g. "
-                    f"'arXiv:ID v1') so it is unambiguous",
+            rep.add(Severity.INFO, e, f"[{source}] bib year {bibval} matches an arXiv "
+                    f"version (v1 {v1}, latest {vn}); both are valid -- v1's year marks "
+                    f"first-submission precedence, the latest year the revised content. "
+                    f"Use whichever fits why you cite it.",
                     "record", category="preprint_version", field="year")
+            continue
+        # An entry cited AS an arXiv preprint whose year matches NO arXiv version (not
+        # v1, not the latest) is a data error -- not an editorial version choice but a
+        # year that does not correspond to the cited object at all (a typo, or the
+        # published year stamped on a preprint citation). Flag it as such (WARN),
+        # naming the real versions; no suggested year (we cannot know which is intended
+        # -- never push a guessed value).
+        if fld == "year" and source == "arxiv" and is_preprint(e):
+            v1, vn = rec.get("year"), rec.get("updated_year")
+            versions = f"v1 {v1}" + (f", latest {vn}" if vn and vn != v1 else "")
+            rep.add(Severity.WARN, e, f"[{source}] bib year {bibval} matches no arXiv "
+                    f"version of this preprint ({versions}) -- likely a wrong/typo year "
+                    f"for the cited preprint", "record", category="metadata_mismatch",
+                    field="year")
             continue
         # The before -> after lives in the suggested tail, so the prose stays terse
         # ('year differs') rather than repeating 'bib=X vs crossref=Y'.
@@ -630,13 +871,43 @@ def compare_against_record(e, rec, source, rep):
                 "record", category="metadata_mismatch",
                 field=fld, suggested={"field": fld, "from": bibval, "to": recval})
 
-    bj, aj = clean_tex(e.get("journal", "")).lower(), clean_tex(rec.get("journal", "")).lower()
+    # The offline misplaced_field rule flags a year-SHAPED value in 'number'/'issue'
+    # as a probably-misplaced publication year. If the entry RESOLVED and the record
+    # carries that very value as the issue, the value belongs there after all -- the
+    # record is ground truth, so withdraw the offline guess rather than ship a finding
+    # the authoritative source contradicts (a journal really can issue, e.g., a
+    # 'number=2018'). Corroborated == the bib's number equals the record's issue. We
+    # only withdraw when the same rule's OTHER trigger (a purely numeric 'journal') did
+    # NOT also fire, since a matching issue says nothing about a numeric journal name.
+    bib_number, rec_issue = _soft(e.get("number")), _soft(rec.get("number"))
+    numeric_journal = _soft(e.get("journal")).strip("{}").strip().isdigit()
+    if bib_number and bib_number == rec_issue and not numeric_journal:
+        rep.withdraw(e.key, "misplaced_field")
+
+    raw_journal = e.get("journal", "")
+    bj, aj = clean_tex(raw_journal).lower(), clean_tex(rec.get("journal", "")).lower()
+    rec_journal_safe = _safe_suggestion(rec.get("journal", ""))
     if bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
-        # Journal renders in the citation -> WARN, with the record's name suggested.
+        # Journal renders in the citation -> WARN, with the record's name suggested
+        # (only when it is safe to paste verbatim -- an entity-laden name is withheld).
         rep.add(Severity.WARN, e, f"[{source}] journal differs", "record",
                 category="metadata_mismatch", field="journal",
-                suggested={"field": "journal", "from": e.get("journal", ""),
-                           "to": rec.get("journal", "")})
+                suggested={"field": "journal", "from": raw_journal,
+                           "to": rec_journal_safe} if rec_journal_safe else None)
+    elif not bj and raw_journal.replace("{", "").replace("}", "").strip() and aj:
+        # The journal field has content but de-TeXes to nothing: it is an unexpanded
+        # macro (e.g. the AASTeX 'journal={\pra}', or any publisher's shorthand).
+        # It is a real venue -- NOT missing -- but it only renders where that macro is
+        # defined, so it is not portable and cannot be checked against the record. Now
+        # that the entry resolved, the record gives us the canonical name to offer as a
+        # grounded, ready-to-apply replacement (no guessing -- straight from Crossref,
+        # entity-decoded and withheld if it still carries markup).
+        rep.add(Severity.INFO, e, f"[{source}] journal is an unexpanded macro "
+                f"('{raw_journal.strip()}'); it only renders where that macro is "
+                f"defined -- use the journal's name for a portable record", "record",
+                category="journal_macro", field="journal",
+                suggested={"field": "journal", "from": raw_journal,
+                           "to": rec_journal_safe} if rec_journal_safe else None)
 
     _suggest_parity(e, rec, source, rep, skip=folded_missing)
 

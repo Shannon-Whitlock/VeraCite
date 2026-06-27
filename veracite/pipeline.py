@@ -26,8 +26,12 @@ def analyze_entry(e, res_store, status_store, rep, *, delay, timeout,
     res_store[e.key] = res
     pid_check(e, res, rep, delay, timeout, offline=False)            # Layer 5
     # The 'no id to verify against' note was deferred so pid_check's DOI search
-    # could resolve the entry first; emit it only if it is still unresolved.
-    if res.no_id and res.record is None:
+    # could resolve the entry first; emit it only if it is still unresolved AND
+    # pid_check did not already warn 'no PID' for it -- those two findings share one
+    # root cause (the entry has no identifier) and one fix (add a DOI/ISBN), so emitting
+    # both is redundant. pid_missing is the more specific, actionable message, so it
+    # wins; record_unresolved still stands alone (a dead/unresolvable id, no pid_missing).
+    if res.no_id and res.record is None and not res.pid_missing:
         rep.add(Severity.INFO, e, "no DOI/arXiv id to verify against", "record",
                 category="record_unresolved")
     status_store[e.key] = classify(e, res, rep)                     # Layer 3

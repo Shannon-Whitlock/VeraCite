@@ -21,12 +21,38 @@ import re
 from dataclasses import dataclass, field
 
 from .compare import compare_against_record, compare_sources
-from .normalize import (DOI_FULL_RE, bare_doi, extract_arxiv_id,
+from .normalize import (DOI_FULL_RE, bare_doi, clean_tex, extract_arxiv_id,
                         extract_doi_from_url, extract_inspire_recid, extract_isbn,
-                        is_book, is_preprint)
+                        fold_surname, is_book, is_preprint, split_authors)
 from .report import Severity
-from .sources import (fetch_abstract_s2, fetch_arxiv, fetch_crossref,
-                      fetch_inspire, fetch_isbn, fetch_openalex, fetch_related)
+from .titles import title_overlap
+
+
+def _arxiv_abstract_by_title(e, timeout):
+    """Best-effort abstract for an entry that has no abstract from Crossref/S2/
+    OpenAlex AND no arXiv id of its own: search arXiv by title and return the top
+    hit's abstract ONLY when that hit is confirmed to be the same work (strong title
+    overlap AND first-author surname match). The confirmation is the same identity
+    gate the DOI search uses, so a wrong abstract is never fed to the LLM (a mismatched
+    abstract would mislead the relevance/wrong-paper rating -- never push a bad value).
+    Returns '' when no confirmed match is found."""
+    title = clean_tex(e.get("title", "")).strip()
+    if len(title.split()) < 3:
+        return ""   # too generic to search/confirm safely
+    bib_first = (split_authors(e.get("author", "")) or [""])[0]
+    for _aid, rec in search_arxiv(title, timeout)[:5]:
+        if not rec or not (rec.get("abstract") or "").strip():
+            continue
+        if title_overlap(title, rec.get("title", "")) < 0.8:
+            continue
+        fams = rec.get("authors") or []
+        if bib_first and fams and not _surname_match(bib_first, fams[0]):
+            continue
+        return rec.get("abstract", "")
+    return ""
+from .sources import (doi_registered_at_datacite, fetch_abstract_s2, fetch_arxiv,
+                      fetch_crossref, fetch_inspire, fetch_isbn, fetch_openalex,
+                      fetch_related, search_arxiv)
 
 # Re-exported for callers/tests that reach these as `record.X` (their logic lives
 # in compare.py now). Listed in __all__-style here so a linter sees them as used.
@@ -91,6 +117,10 @@ class Resolution:
     retracted: bool = False
     no_id: bool = False                  # had no DOI/arXiv id to start (a DOI may
                                          # still be found later by search)
+    pid_missing: bool = False            # pid_check emitted a 'no PID' warning (an
+                                         # entry with no findable identifier); the
+                                         # deferred 'record_unresolved' note is then
+                                         # redundant -- same root cause, same fix
 
 
 def resolve_entry(e, rep, delay, timeout):
@@ -171,9 +201,20 @@ def resolve_entry(e, rep, delay, timeout):
 
     if rec is None and res.record is None:
         if crossref_doi and code == 404:
-            res.dead_doi = True
-            rep.add(Severity.ERROR, e, f"DOI does not resolve on Crossref (404): {doi}",
-                    "record", category="dead_doi")
+            # A Crossref 404 means Crossref has no record -- NOT that the DOI is dead.
+            # Crossref and DataCite are separate registries; a Zenodo/Figshare/Dryad
+            # dataset or software DOI resolves fine via DataCite. Only call a DOI dead
+            # when it is absent from BOTH. If DataCite has it, the DOI is valid but
+            # carries no Crossref metadata to compare -- a record_unresolved note, not
+            # a dead-DOI error (never a false 'must fix' on a working DOI).
+            if doi_registered_at_datacite(crossref_doi, timeout):
+                rep.add(Severity.WARN, e, f"DOI is registered with DataCite, not "
+                        f"Crossref (a dataset/software DOI); no Crossref metadata to "
+                        f"verify against: {doi}", "record", category="record_unresolved")
+            else:
+                res.dead_doi = True
+                rep.add(Severity.ERROR, e, f"DOI does not resolve (404 at Crossref and "
+                        f"DataCite): {doi}", "record", category="dead_doi")
         elif crossref_doi or arxiv_id:
             rep.add(Severity.WARN, e, f"could not retrieve record "
                     f"(doi={crossref_doi or '-'}, arxiv={arxiv_id or '-'})", "record",
@@ -315,6 +356,11 @@ def resolve_entry(e, rep, delay, timeout):
     if not rec.get("abstract") and arxiv_id and source != "arxiv":
         arx = fetch_arxiv(arxiv_id, timeout)
         rec["abstract"] = (arx or {}).get("abstract", "")
+    # Last resort: the work has no arXiv id of its own, but it may still be on arXiv
+    # (e.g. an astro paper Crossref/S2 carry without an abstract). Search by title and
+    # use the confirmed hit's abstract, so the LLM has real evidence to rate against.
+    if not rec.get("abstract"):
+        rec["abstract"] = _arxiv_abstract_by_title(e, timeout)
     return res
 
 
@@ -364,9 +410,12 @@ def resolve_by_found_doi(e, doi, res, rep, delay, timeout):
     if not rec.get("abstract") and oa and oa.get("abstract"):
         rec["abstract"] = oa["abstract"]
     # Chain the same abstract fallback as resolve_entry (Crossref rarely carries an
-    # abstract, especially for older papers) so the LLM can rate this entry too.
+    # abstract, especially for older papers) so the LLM can rate this entry too,
+    # including a title-confirmed arXiv abstract when S2/OpenAlex have none.
     if not rec.get("abstract"):
         rec["abstract"] = fetch_abstract_s2(doi, timeout)
+    if not rec.get("abstract"):
+        rec["abstract"] = _arxiv_abstract_by_title(e, timeout)
     return True
 
 

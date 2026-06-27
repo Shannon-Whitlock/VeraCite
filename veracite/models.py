@@ -24,6 +24,11 @@ class Record:
     # A source may leave this empty, in which case the folded key is shown instead.
     authors_display: list = field(default_factory=list)
     given: dict = field(default_factory=dict)      # surname -> first given token
+    # surname -> the FULL given string ('A. Lecavelier'). Crossref sometimes mis-splits
+    # a compound surname, leaving its leading part in `given` (family 'des Etangs',
+    # given 'A. Lecavelier' for the surname 'Lecavelier des Etangs'); the full string
+    # lets author matching reconstruct the real surname. Empty when not carried.
+    given_full: dict = field(default_factory=dict)
     year: object = None                            # int, or None if unknown
     # arXiv-only: the year of the LATEST version (vN), when it differs from `year`
     # (which is v1's year). Lets the comparison treat a bib year that matches any

@@ -19,7 +19,7 @@ from .normalize import (ARXIV_OLD_RE, DOI_FULL_RE, bare_doi, clean_tex,
                         has_etal_marker, is_book_series_doi, is_collaboration,
                         is_preprint, norm_pages, shouted_surnames, split_authors,
                         title_is_miscased)
-from .parser import FIELD_DECL, _blank_comments, field_occurrences
+from .parser import _blank_comments, field_occurrences, iter_field_decls
 from .report import Severity
 
 ENTRY_RULES = []
@@ -71,11 +71,18 @@ _SUSPICIOUS_CHARS = {
 # --- per-entry rules -------------------------------------------------------
 
 def _nonempty(val):
-    """True if a field value has real content. A value that is only braces/whitespace
-    ('{ }', '{}', '  ') is EMPTY even though it is a non-empty string -- de-TeX it
-    first so a whitespace-only brace group ('title={{ }}') counts as missing, not
-    present. Catches a mandatory field that was left blank but brace-wrapped."""
-    return bool(clean_tex(val).strip())
+    """True if a field value has any real content. A field is present when it holds
+    ANY non-empty character once brace and whitespace wrapping is removed -- only a
+    genuinely blank value ('{ }', '{}', '  ', '{{ }}') counts as missing.
+
+    Crucially we strip ONLY braces and whitespace, NOT TeX macros: a value that is an
+    unexpanded control sequence (e.g. a journal given as the AASTeX macro
+    'journal={\\pra}', or any other publisher's shorthand) renders to a real journal
+    name and so is PRESENT -- de-TeXing it away would make a sound entry look like it
+    is missing its journal and fire a false 'missing_field' error. Whether such a
+    macro is the *right* venue, or portable, is a separate (softer) question; for
+    presence, any character is enough."""
+    return bool(val.replace("{", "").replace("}", "").strip())
 
 
 def _has_field(e, name):
@@ -137,9 +144,15 @@ def _is_web_source_url(url):
 _THESIS_URL_RE = re.compile(
     r"theses\.fr|tel\.archives-ouvertes|ethos\.bl\.uk|pqdtopen|proquest\.com/.*dissertation"
     r"|/thesis/|/theses/|/dissertation[s]?/|diss\."
-    r"|\bETD[-_/]"
-    r"|[-_/](?:thesis|dissertation)\.[a-z]+(?:[?#]|$)",
+    r"|\bETD[-_/]",
     re.I)
+# A thesis keyword as a WORD in the FILENAME (the last path segment), any separator/
+# case -- 'LIANG-DISSERTATION.pdf', 'Dissertation_Final_v2.pdf', 'PhD_thesis.pdf',
+# 'Smith-MSc.pdf'. Checked on the filename only so a journal-article URL (a DOI/
+# accession slug, never a descriptive filename) is not matched. 'master' requires a
+# word boundary so 'mastering' / a 'master' branch path does not match.
+_THESIS_FILE_RE = re.compile(
+    r"(?:^|[-_])(?:thesis|dissertation|phd|msc|masters?)(?:[-_.]|$)", re.I)
 
 
 def _is_thesis_url(url):
@@ -147,7 +160,14 @@ def _is_thesis_url(url):
     MSc thesis mis-typed as @article should be @thesis. Deterministic, high-
     confidence hosts/paths only, so a journal-article url is never matched."""
     u = url.strip()
-    return bool(u) and bool(_THESIS_URL_RE.search(u))
+    if not u:
+        return False
+    if _THESIS_URL_RE.search(u):
+        return True
+    # The 'thesis'/'dissertation' word in the FILENAME (last path segment, before any
+    # query) -- 'Dissertation_Final.pdf'. Checked on the filename only.
+    filename = re.split(r"[?#]", u)[0].rstrip("/").rsplit("/", 1)[-1]
+    return bool(_THESIS_FILE_RE.search(filename))
 
 
 # Slots biblatex's raw datamodel marks mandatory but that real .bib usage handles
@@ -267,8 +287,9 @@ def required_fields(e, rep):
         elif web_url or (not has_venue and (has_weblike or is_collaboration(e.get("author", "")))):
             rep.add(Severity.WARN, e, "@article looks like a web or press item (its "
                     "url is a news/press/grey source or it names no journal), not a "
-                    "journal article -- use @online or @misc instead", field="journal",
-                    category="entrytype_suggestion")
+                    "journal article -- use @online or @misc (or @thesis if it is a "
+                    "thesis the url does not make obvious) instead of @article",
+                    field="journal", category="entrytype_suggestion")
         elif not has_venue:
             rep.add(Severity.ERROR, e, "missing 'journal'/'journaltitle' (or eprint) "
                     "for @article", category="missing_field")
@@ -306,7 +327,11 @@ def required_fields(e, rep):
                             category="missing_locator")
 
 
-_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+# A plausible CALENDAR YEAR (1900-2099). Strict on purpose: it decides whether a
+# value sitting in 'number'/'issue' is really a misplaced publication year. A journal
+# issue number is freely 4-digit (Nature numbers issues in the 7000s), so anything
+# NOT shaped like a 1900-2099 year must not be read as a year here.
+_CALENDAR_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
 
 @rule
@@ -328,7 +353,7 @@ def misplaced_field(e, rep):
     for field in ("journal", "journaltitle"):
         val = e.get(field, "").strip().strip("{}").strip()
         if val and val.isdigit():
-            is_year = bool(_YEAR_RE.fullmatch(val))
+            is_year = bool(_CALENDAR_YEAR_RE.fullmatch(val))
             same_as_year = e.get("year", "").strip()[:4] == val
             sug = {"field": "year", "to": val} if is_year and not same_as_year else None
             tail = " -- it likely belongs in the 'year'/'date' field" if is_year \
@@ -339,7 +364,7 @@ def misplaced_field(e, rep):
             flagged = True
     for field in ("number", "issue"):
         val = e.get(field, "").strip().strip("{}").strip()
-        if _YEAR_RE.fullmatch(val):
+        if _CALENDAR_YEAR_RE.fullmatch(val):
             same_as_year = e.get("year", "").strip()[:4] == val
             sug = None if same_as_year else {"field": "year", "to": val}
             rep.add(Severity.WARN, e, f"'{field}' is a year ({val}); an issue number "
@@ -458,11 +483,12 @@ def legacy_month(e, rep):
             suggested={"field": "month", "from": shown, "to": abbr})
 
 
-# A value that is meant to be a year: a bare 4-digit run (optionally with a
-# biblatex date tail like '-05' or '/2021'). 'in press', 'forthcoming', 'n.d.'
-# and similar non-numeric placeholders are legitimate and deliberately NOT matched
-# here -- only a value that *contains digits* but no sane 4-digit year is flagged.
-_YEAR_RE = re.compile(r"\b(\d{4})\b")
+# ANY bare 4-digit run, used to scan a 'year'/'date' string for a candidate year.
+# This is deliberately permissive -- the caller (year_sanity) filters the matches
+# down to a plausible range itself -- so it is NOT a year test and must not be used
+# to classify a value as a year (use _CALENDAR_YEAR_RE for that). 'in press',
+# 'forthcoming', 'n.d.' carry no 4-digit run and so are left alone.
+_FOUR_DIGIT_RE = re.compile(r"\b(\d{4})\b")
 
 
 @rule
@@ -476,7 +502,7 @@ def year_sanity(e, rep):
         val = e.get(field, "").strip()
         if not val or not any(c.isdigit() for c in val):
             continue   # empty, or a non-numeric placeholder we do not police here
-        years = [int(y) for y in _YEAR_RE.findall(val)]
+        years = [int(y) for y in _FOUR_DIGIT_RE.findall(val)]
         plausible = [y for y in years if 1500 <= y <= next_year]
         if not plausible:
             rep.add(Severity.WARN, e, f"{field} {val!r} has no plausible 4-digit year "
@@ -734,9 +760,11 @@ def page_sanity(e, rep):
     # a leading-letter page ('L123', 'S45'), or a journal article id that is
     # letters-then-digits, optionally with a trailing letter or digits
     # ('eaam9288', 'staf1642', 'rspa20090232', 'psaf050', 'e0123456', '012345').
-    # Only a value that is NOT a recognizable locator (e.g. 'pp.', 'in press',
-    # 'ix, 277 p.', 'arXiv:...') is flagged.
-    if re.fullmatch(r"[A-Za-z]*\d+[A-Za-z]?", p):
+    # APS Rapid Communications / Letters append a parenthetical marker to the article
+    # id ('040101(R)', '060301(L)') -- a standard, valid form, not unusual. Only a
+    # value that is NOT a recognizable locator (e.g. 'pp.', 'in press', 'ix, 277 p.',
+    # 'arXiv:...') is flagged.
+    if re.fullmatch(r"[A-Za-z]*\d+[A-Za-z]?(?:\([A-Za-z]\))?", p):
         return
     rep.add(Severity.INFO, e, f"unusual pages value: {pages!r}", category="style", field="pages")
 
@@ -1038,23 +1066,25 @@ def syntax_pass(raw, entries, problems, rep):
             broken.add(km.group(1))
 
     # Per-entry: a field declaration that opens its value with '{' or '"' but has
-    # no '=' (e.g. 'title {...}') is a structural error BibTeX rejects. Only a
-    # declaration at the TOP LEVEL of the entry body counts -- an identifier
-    # followed by '{' INSIDE a field value (e.g. a multi-line braced author list
-    # '... and {Brett}, Matthew ...') is part of the value, not a new field, and
-    # BibTeX accepts it. So the match must sit at brace depth 0 within e.raw.
+    # no '=' (e.g. 'title {...}') is a structural error BibTeX rejects. We ask the
+    # PARSER where the real top-level fields are (iter_field_decls), rather than
+    # re-scanning the raw text with a brace-only heuristic: that heuristic is blind
+    # to '"..."'-delimited values, which may wrap across lines and contain commas
+    # (e.g. 'publisher = "..., Inc., New\n York"'), and so would fabricate a phantom
+    # 'york' field and flag a sound entry. iter_field_decls advances over each value
+    # with the parser's own atom reader, so it and the parser can never disagree on
+    # what is a field. A declaration whose separator is '{' or '"' (not '=') is the
+    # missing-'=' error. Offsets are into the body (after '@type{'); map back to a
+    # line via the entry's own start line.
     for e in entries:
-        for m in FIELD_DECL.finditer(e.raw):
-            if m.group(2) not in "{\"":
+        body_start = e.raw.find("{") + 1
+        if body_start <= 0:
+            continue
+        body = e.raw[body_start:]
+        for off, fld, sep in iter_field_decls(body):
+            if sep == "=":
                 continue
-            prefix = e.raw[:m.start()]
-            depth = (prefix.count("{") - prefix.count("\\{")
-                     - prefix.count("}") + prefix.count("\\}"))
-            # depth 1 == inside the entry's own braces but not inside a field value.
-            if depth != 1:
-                continue
-            fld = m.group(1).lower()
-            line = e.lineno + prefix.count("\n")
+            line = e.lineno + body[:off].count("\n")
             rep.add(Severity.ERROR, ("<file>", line),
                     f"@{e.etype}{{{e.key}}}: field '{fld}' is missing its '=' "
                     f"separator (structural BibTeX error)", "syntax", category="syntax")

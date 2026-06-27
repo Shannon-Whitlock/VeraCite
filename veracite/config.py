@@ -57,7 +57,7 @@ DEFAULT_SETTINGS = {
         "missing_entry_header": "error",  # an entry's '@type{key,' header line is missing
         "dead_doi": "error",              # the recorded DOI does not resolve (Crossref 404)
         "retraction": "error",            # cited work is retracted
-        "wrong_paper": "error",           # LLM flagged a clearly wrong paper
+        "wrong_paper": "warning",         # LLM opinion (abstract-only) -- verify, never an error (no model gates CI)
         "id_resolves_wrong_record": "error",  # doi/arXiv id resolves to a different paper
         "metadata_mismatch": "warning",   # author/title/year/vol/pages/journal differ from record
         "record_unresolved": "warning",   # no authoritative source returned a record for the id
@@ -69,6 +69,7 @@ DEFAULT_SETTINGS = {
         "identifier_format": "warning",   # malformed DOI/arXiv/ISBN/ISSN/ORCID
         "llm_relevance": "warning",       # LLM rated the citation weakly relevant
         "llm_ok": "note",                 # LLM rated the citation relevant (4-5/5) -- clean-pass note
+        "llm_unavailable": "note",        # LLM could not rate (no abstract / provider error) -- not actionable
         "llm_config": "warning",          # LLM run misconfigured (e.g. unknown provider)
         "preprint_superseded": "warning", # a published version now exists
         "preprint_version": "note",       # bib year matches an earlier arXiv version
@@ -90,7 +91,7 @@ DEFAULT_SETTINGS = {
         "style": "note",                  # casing, punctuation, dashes, month, etc.
         "citation_order": "note",         # a \cite{} group is not in chronological order
         "encoding": "note",               # non-ASCII / mojibake
-        "pid_optional": "note",           # pre-2005 work legitimately has no DOI
+        "journal_macro": "note",          # journal is an unexpanded LaTeX macro (\pra)
         "container_granularity": "note",  # id resolved to the containing volume, not the item
         "parity_suggestion": "note",      # record has data the bib could adopt
     },
@@ -104,6 +105,7 @@ DEFAULT_SETTINGS = {
         "arxiv_search": "http://export.arxiv.org/api/query?search_query={query}&max_results=5",
         "openalex_work": "https://api.openalex.org/works/https://doi.org/{doi}",
         "semanticscholar_paper": "https://api.semanticscholar.org/graph/v1/paper/DOI:{doi}?fields=abstract",
+        "datacite_doi": "https://api.datacite.org/dois/{doi}",
         "inspire_doi": "https://inspirehep.net/api/doi/{doi}",
         "inspire_arxiv": "https://inspirehep.net/api/arxiv/{id}",
         "inspire_recid": "https://inspirehep.net/api/literature/{recid}",
@@ -161,9 +163,16 @@ def endpoint(name, **params):
     """Build an API URL from the configured endpoint template. A `query` value
     is fully escaped (free-text search term); all other values keep '/' so DOIs
     and arXiv ids survive in path segments. Falls back to the default template
-    when the settings file overrides `endpoints` only partially."""
+    when the settings file overrides `endpoints` only partially.
+
+    Exception: arXiv's search wants a fielded query `ti:word+word` with the ':' and
+    '+' kept LITERAL -- percent-encoding them ('ti%3A...%2B...') makes arXiv's parser
+    return zero results. So for the arxiv_search endpoint the query keeps ':+' safe.
+    (arxiv_search builds its own query from bare word tokens, so nothing else in it
+    needs escaping.)"""
     template = SETTINGS.get("endpoints", {}).get(name) \
         or DEFAULT_SETTINGS["endpoints"][name]
-    escaped = {k: url_quote(v, safe="" if k == "query" else "/")
+    query_safe = ":+" if name == "arxiv_search" else ""
+    escaped = {k: url_quote(v, safe=query_safe if k == "query" else "/")
                for k, v in params.items()}
     return template.format(**escaped)

@@ -138,9 +138,10 @@ The three levels mean different things and call for different action:
 
 - **`[ERROR]`** — must fix. A structural/syntax error that stops BibTeX from
   parsing (unbalanced braces, a missing `=`, an unknown entry type, a dropped
-  reference); a duplicate; a retraction; a dead DOI; an id that resolves to a
-  different paper (first author **and** title both differ); or an LLM-flagged
-  clearly-wrong paper.
+  reference); a duplicate; a retraction; a dead DOI; or an id that resolves to a
+  different paper (first author **and** title both differ). Every error comes from a
+  deterministic check or an authoritative record — **never** from the LLM, whose
+  findings are always advisory warnings.
 - **`[WARN]`** — investigate. A discrepancy between the record and the bib that
   may or may not be wrong: an author/title/given-name/year/volume/pages field
   differs from the id-resolved record, a non-standard journal abbreviation, a
@@ -261,9 +262,12 @@ Checks run in layers, syntax first.
    model rates **relevance** (1–5) from the abstract and the surrounding sentences,
    and flags a clear **wrong paper**. For a grouped citation (`\cite{a,b,c}`) it also
    sees the co-cited references and drops a low-relevance (≤3) odd-one-out a further
-   point, surfacing an inappropriate citation hidden in a list of relevant ones. A
-   wrong-paper flag is an error; relevance ≤3 a warning; **4–5 leaves a `[llm]
-   context OK N/5` note**. Because an LLM call costs tokens, every rated citation
+   point, surfacing an inappropriate citation hidden in a list of relevant ones. All
+   LLM findings are **advisory warnings at most, never errors** — a wrong-paper flag
+   is a `[WARN]` to investigate (a model can be confidently wrong even with the
+   disconfirming evidence in its own input), relevance ≤3 is a `[WARN]`, and **4–5
+   leaves a `[llm] context OK N/5` note**. No model opinion ever gates CI or reads as
+   "must fix"; errors come only from the deterministic layers. Because an LLM call costs tokens, every rated citation
    always shows exactly one line in the report (clean pass, weak, wrong paper, or
    rating-unavailable) rather than vanishing silently; the clean-pass note is hidden
    by `--skipnotes` like any other note. Findings are worded as tentative,

@@ -98,6 +98,7 @@ CATEGORY_GROUP = {
     # semantic: content / metadata / identity, often needs the source of record
     "metadata_mismatch": "semantic", "source_conflict": "semantic",
     "parity_suggestion": "semantic", "missing_field": "semantic",
+    "journal_macro": "semantic",
     "missing_locator": "semantic", "entrytype_suggestion": "semantic",
     "datamodel_recommended": "semantic",
     "missing_recommended": "semantic", "pid_missing": "semantic",
@@ -106,7 +107,7 @@ CATEGORY_GROUP = {
     "title_case": "semantic", "title_style": "semantic", "author_format": "semantic",
     "author_completeness": "semantic", "author_truncated_marker": "syntax",
     "record_unresolved": "semantic", "dead_doi": "semantic",
-    "pid_optional": "semantic", "container_granularity": "semantic",
+    "container_granularity": "semantic",
     # context: the entry's relationship to the manuscript and to the work it points
     # at -- citation order/usage, whether the id resolves to the right paper, whether
     # a published version should be cited instead, and the LLM-relevance ratings.
@@ -114,6 +115,7 @@ CATEGORY_GROUP = {
     "preprint_version": "context",
     "id_resolves_wrong_record": "context", "wrong_paper": "context",
     "llm_relevance": "context", "llm_config": "context", "llm_ok": "context",
+    "llm_unavailable": "context",
 }
 
 
@@ -134,12 +136,11 @@ CATEGORY_DOC = {
     "syntax": "structural / does-not-parse BibTeX error",
     "missing_entry_header": "an entry's '@type{key,' header line is missing",
     "retraction": "cited work is retracted",
-    "wrong_paper": "LLM flagged a clearly wrong paper",
+    "wrong_paper": "LLM opinion that the cited paper looks wrong -- verify (warning, not an error)",
     "id_resolves_wrong_record": "doi/arXiv id resolves to a different paper",
     "metadata_mismatch": "author/title/year/vol/pages/journal differ from record",
     "record_unresolved": "no authoritative source returned a record for the id",
-    "dead_doi": "the recorded DOI does not resolve (Crossref 404)",
-    "pid_optional": "pre-2005 work with no DOI -- not required (reassurance)",
+    "dead_doi": "the recorded DOI resolves nowhere (404 at both Crossref and DataCite)",
     "container_granularity": "id resolved to the containing volume, not the item",
     "author_completeness": "malformed author truncation (literal 'et al.' / bare 'al.')",
     "author_truncated_marker": "author list ends in the valid 'and others' marker",
@@ -149,10 +150,11 @@ CATEGORY_DOC = {
     "pid_missing": "no persistent identifier where one is expected",
     "identifier_format": "malformed DOI/arXiv/ISBN/ISSN/ORCID or year",
     "llm_relevance": "LLM rated the citation weakly relevant (or no abstract)",
+    "llm_unavailable": "LLM could not rate (no abstract, or provider error) -- not actionable",
     "llm_ok": "LLM rated the citation relevant (4-5/5) -- a clean-pass note",
     "llm_config": "LLM run misconfigured (e.g. unknown provider)",
     "preprint_superseded": "a published version now exists",
-    "preprint_version": "bib year matches one arXiv version, not the record's (pin it)",
+    "preprint_version": "bib year matches an arXiv version (v1 precedence vs latest) -- informational",
     "related_work": "erratum/correction/comment/reply linked",
     "duplicate": "duplicate citation key or DOI (two entries collide)",
     "duplicate_field": "a field repeated within ONE entry, values agree (benign)",
@@ -160,6 +162,7 @@ CATEGORY_DOC = {
     "dropped_field": "a field outside the entry, silently dropped",
     "misplaced_field": "a value in the wrong field (e.g. a year in 'journal')",
     "missing_field": "biber-mandatory field absent (e.g. title, journal)",
+    "journal_macro": "journal is an unexpanded LaTeX macro (e.g. \\pra); offer the record's name",
     "missing_locator": "article omits volume/pages -- not mandatory, advisory only",
     "identifier_placement": "an identifier sits in the url, not a structured doi/eprint field",
     "entrytype_suggestion": "the @type looks wrong for the entry's data",
@@ -327,6 +330,9 @@ SUPERSEDES = {
     "title_case": ("static", "record layer",
         "the record carries the canonical casing, so the offline 'looks miscased' "
         "guess is replaced by 'adopt the record's casing'"),
+    "misplaced_field": ("static", "record layer",
+        "the resolved record carries the bib's 'number' as the issue, so the value "
+        "is not a misplaced year after all -- the offline guess is disproven"),
 }
 
 

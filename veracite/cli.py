@@ -286,12 +286,16 @@ def main(argv=None):
         # --llm makes one model call per cited entry that still needs rating, so a
         # large bibliography spends real LLM tokens/cost. Make that explicit up front
         # (and note that resume only rates entries not already rated, so re-running
-        # does not re-spend on completed ones).
-        n_to_rate = sum(1 for k in citedset
+        # does not re-spend on completed ones). Only entries that actually EXIST in the
+        # bib are rateable -- a cited key with no entry is reported as an error and
+        # cannot be rated -- so count the cited keys that have an entry, keeping this
+        # consistent with the "N cited of M entries" line above.
+        rateable = citedset & {e.key for e in entries}
+        n_to_rate = sum(1 for k in rateable
                         if not (checkpoint and checkpoint.has(k, "llm")))
         print(f"NOTE: --llm uses LLM tokens -- one rating call per cited entry "
               f"({n_to_rate} to rate{' more' if checkpoint else ''} of "
-              f"{len(citedset)} cited). This costs tokens/credits on the provider; "
+              f"{len(rateable)} cited). This costs tokens/credits on the provider; "
               f"with --json, already-rated entries are not re-rated on resume.",
               file=sys.stderr)
     if online:

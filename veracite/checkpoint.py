@@ -48,10 +48,10 @@ SUMMARY_KEY = "<summary>"
 _ONLINE_CATEGORIES = {
     "metadata_mismatch", "source_conflict", "record_unresolved", "dead_doi",
     "retraction", "related_work", "preprint_superseded",
-    "id_resolves_wrong_record", "doi_available", "pid_missing", "pid_optional",
-    "container_granularity",
+    "id_resolves_wrong_record", "doi_available", "pid_missing",
+    "container_granularity", "journal_macro",
 }
-_LLM_CATEGORIES = {"llm_relevance", "wrong_paper", "llm_config"}
+_LLM_CATEGORIES = {"llm_relevance", "wrong_paper", "llm_config", "llm_unavailable"}
 
 
 def finding_phase(f):

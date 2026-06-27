@@ -20,3 +20,6 @@ examples/
 report.json
 *.ndjson
 web/counter.txt
+
+# personal Claude Code settings (not committed)
+.claude/settings.local.json

@@ -51,6 +51,20 @@ def _extract_relations(msg):
 
 # --- record fetchers -------------------------------------------------------
 
+def doi_registered_at_datacite(doi, timeout):
+    """True if `doi` is registered with DataCite (HTTP 200 from its API). Crossref and
+    DataCite are SEPARATE DOI registries: a Zenodo/Figshare/Dryad dataset or software
+    DOI ('10.5281/zenodo.3937751') is a real, resolving DOI that Crossref returns 404
+    for -- so a Crossref 404 alone does NOT mean a DOI is dead. The dead-DOI check
+    consults this before declaring an error, so a valid DataCite DOI is never mis-
+    reported as unresolvable. Network failure -> False (do not assert resolution we
+    could not confirm; the caller stays conservative)."""
+    if not doi:
+        return False
+    _data, code = http_get_json(endpoint("datacite_doi", doi=doi), timeout)
+    return code == 200
+
+
 def fetch_crossref(doi, timeout):
     """Resolve a DOI to a normalized record via Crossref. Returns (record, code);
     record is None on failure, with the HTTP status in `code`. The record also
@@ -60,7 +74,7 @@ def fetch_crossref(doi, timeout):
     if code != 200 or not data:
         return None, code
     msg = data.get("message", {})
-    authors, authors_display, given = [], [], {}
+    authors, authors_display, given, given_full = [], [], {}, {}
     for a in (msg.get("author") or []):
         raw = clean_tex(a.get("family") or a.get("name") or "").strip()
         surname = fold_surname(raw)
@@ -69,10 +83,13 @@ def fetch_crossref(doi, timeout):
         authors.append(surname)
         authors_display.append(raw)          # original surname, for the message
         # keep the first given-name token for given-name verification; Crossref
-        # carries structured names, unlike arXiv's last-token-only folding.
-        g = clean_tex(a.get("given") or "").strip().split()
+        # carries structured names, unlike arXiv's last-token-only folding. Keep the
+        # FULL given string too, so a mis-split compound surname can be reconstructed.
+        given_raw = clean_tex(a.get("given") or "").strip()
+        g = given_raw.split()
         if g:
             given[surname] = g[0]
+            given_full[surname] = given_raw
     year = None
     for k in ("published-print", "published-online", "issued", "published"):
         parts = msg.get(k, {}).get("date-parts", [[None]])
@@ -83,6 +100,7 @@ def fetch_crossref(doi, timeout):
         authors=authors,
         authors_display=authors_display,
         given=given,
+        given_full=given_full,
         year=year,
         volume=str(msg.get("volume", "") or ""),
         number=str(msg.get("issue", "") or ""),

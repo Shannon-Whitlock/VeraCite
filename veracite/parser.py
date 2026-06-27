@@ -263,6 +263,53 @@ def _parse_body(body, macros=None):
     return fields, key.strip()
 
 
+def iter_field_decls(body):
+    """Walk an entry body and yield one (offset, name, sep) per top-level field
+    declaration, in order. `offset` is the index in `body` where the field name
+    starts; `name` is the lowercased field name; `sep` is the delimiter that
+    followed it -- '=' for a well-formed 'name = value', or '{'/'"' for a
+    malformed 'name {...}' / 'name "..."' whose '=' is missing.
+
+    This is the parser's single, authoritative account of where the real fields
+    are. It advances over each value with the same atom reader the parser uses
+    (`_read_value`), so a '{...}' or a possibly multi-line '"..."' value -- which
+    may itself contain commas, '=' signs, or bare words -- is skipped *wholesale*
+    and never mistaken for a new field. Any check that needs to reason about field
+    boundaries (e.g. the syntax pass's missing-'=' detection) must use this rather
+    than re-scanning the raw text with a brace-only heuristic, which is blind to
+    quote-delimited values and so fabricates phantom fields ('New\\n York' ->
+    a bogus 'york' field). Malformed declarations are reported, not stored, so the
+    walk keeps going to find the entry's remaining real fields."""
+    _, rest = _split_first_comma(body)
+    pos = len(body) - len(rest)          # offset of `rest` within `body`
+    while True:
+        stripped = rest.lstrip(" \t\r\n,")
+        pos += len(rest) - len(stripped)
+        rest = stripped
+        if not rest:
+            return
+        # A field declaration is 'name' then a separator: '=' for a well-formed
+        # field, or '{'/'"' when the '=' was dropped. A bibtex field name is a bare
+        # token with no braces or quotes, so the separator is simply the FIRST of
+        # '=', '{', '"' in what remains -- a plain first-occurrence scan (NOT a
+        # brace-depth scan, which would treat the '{' of a missing-'=' 'title {...}'
+        # as opening a value and skip right past the very error we are looking for).
+        sep_idx = next((k for k, c in enumerate(rest) if c in '={"'), -1)
+        if sep_idx == -1:
+            return
+        name = rest[:sep_idx].strip()
+        sep = rest[sep_idx]
+        if name and re.fullmatch(r"[A-Za-z][\w-]*", name):
+            yield pos, name.lower(), sep
+        # Advance past this declaration's value. For '=' the value follows the '=';
+        # for a missing-'=' separator the value starts *at* the '{'/'"' itself.
+        after = rest[sep_idx + 1:] if sep == "=" else rest[sep_idx:]
+        _, tail = _read_value(after.lstrip())
+        consumed = len(rest) - len(tail)
+        pos += consumed
+        rest = tail
+
+
 def field_occurrences(body, macros=None):
     """All values for each field name in an entry body, in order, as
     {name: [value, ...]}. Unlike _parse_body's dict (which keeps only the last

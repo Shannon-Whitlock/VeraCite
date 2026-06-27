@@ -142,6 +142,7 @@ def pid_check(e, res, rep, delay, timeout, offline):
 
     if is_book(e):
         if not (res.isbn or has_doi):
+            res.pid_missing = True
             rep.add(Severity.WARN, e, "no ISBN or DOI -- a book should carry a "
                     "persistent identifier", category="pid_missing")
         return strongest
@@ -217,20 +218,17 @@ def pid_check(e, res, rep, delay, timeout, offline):
         # No DOI found by search. A dead-DOI entry already carries the dead_doi
         # error and DOES have a DOI recorded (just unresolvable), so don't also tell
         # it "no DOI recorded" -- that would be a false, duplicate finding. The
-        # pid_missing/pid_optional note is only for an entry with no DOI field at all.
+        # pid_missing warning is only for an entry with no DOI field at all.
         if has_doi:
             return strongest
         # Only a MODERN article is expected to have one -- a pre-2005 work is not
-        # penalized for lacking a DOI.
+        # penalized for lacking a DOI, and we say nothing about it: a "DOI not
+        # required, none found" note suggests no action, so it is noise, not a
+        # finding. Every emitted message must point at something to fix.
         if modern:
+            res.pid_missing = True
             rep.add(Severity.WARN, e, "no DOI recorded for a post-2005 article "
                     "(none found in Crossref either)", category="pid_missing")
-        else:
-            # A pre-2005 work legitimately has no DOI: this is reassurance, not a
-            # defect, so it is its own note-level category (NOT 'pid_missing', which
-            # is a warning -- pinning that here would wrongly promote this to WARN).
-            rep.add(Severity.INFO, e, f"DOI not required for publication year {year} "
-                    "(< 2005) and none found", "verify", category="pid_optional")
     return strongest
 
 
@@ -249,14 +247,16 @@ def _search_doi(e, timeout):
     from .titles import title_key
     title = clean_tex(e.get("title", "")).strip()
     nwords = len(title.split())
-    # A 1-2 word title is too generic to search on (the query returns noise and a
-    # short title can collide with a different work). A SHORT (3-word) title is
-    # allowed, but only an EXACT normalized-title match counts for it -- not the
-    # tolerant title_similar overlap -- so 'Universal Quantum Simulators' resolves
-    # while a generic 3-word title cannot ride the looser overlap into a wrong hit.
-    if nwords < 3:
+    # A 1-word title is too generic to search on at all. A 2-word title ('Cavity
+    # optomechanics') is allowed ONLY under maximal corroboration -- exact title AND
+    # first author AND journal AND year must all agree (the `very_short` gate below) --
+    # so it cannot ride a generic collision into a wrong hit, yet a famous short-title
+    # paper is still recovered. A 3-word title needs an exact title match (no fuzzy
+    # overlap); a longer title may match fuzzily.
+    if nwords < 2:
         return ""
-    short_title = nwords < 4
+    very_short = nwords < 3      # 2-word title: requires journal AND year AND exact
+    short_title = nwords < 4     # 3-word title: requires exact title (no fuzzy)
     query = f"{title} {clean_tex(e.get('author', ''))}".strip()
     data, code = http_get_json(endpoint("crossref_search", query=query), timeout)
     if code != 200 or not data:
@@ -325,6 +325,16 @@ def _search_doi(e, timeout):
         # Require corroboration beyond title+author: journal, year (+-1), or an
         # exact-title match with no year contradiction. Recovered entries stay capped
         # at 0.85 (found_by_search), so the caution rides in the confidence.
+        #
+        # A VERY SHORT (2-word) title is the exception: title+author alone is too weak
+        # for so generic a title, so demand FULL corroboration -- exact title (already
+        # enforced above), first author (already enforced), AND journal AND year. All
+        # four agreeing makes a wrong hit effectively impossible, while a famous
+        # short-title work ('Cavity optomechanics', Rev. Mod. Phys. 2014) resolves.
+        if very_short:
+            if exact_title and journal_ok and year_ok:
+                return item.get("DOI", "")
+            continue
         if journal_ok or year_ok or exact_ok:
             return item.get("DOI", "")
     return ""
