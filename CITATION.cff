@@ -9,7 +9,7 @@
 # veracite/config.py).
 cff-version: 1.2.0
 message: "If you use VeraCite, please cite it as below."
-title: "VeraCite: a deterministic verifier for BibTeX/biblatex bibliographies"
+title: "VeraCite: a deterministic auditor for BibTeX/biblatex bibliographies"
 abstract: >-
   VeraCite audits BibTeX/biblatex bibliographies to catch hallucinated, mangled, or
   mis-identified citations before publication, checking each entry for syntactic

@@ -18,14 +18,15 @@ VeraCite is for authors, publishers, and AI assistants who want to vet a
 bibliography *before* publication. It checks a `.bib` file along three levels:
 
 - **Syntax** — does it conform to the BibTeX/biblatex datamodel?
-- **Semantics** — is each entry consistent with the authoritative online record
+- **Semantics** — is each entry consistent with the online record
   (Crossref, arXiv, INSPIRE-HEP, OpenAlex, Open Library)?
 - **Context** — (with `--tex`) is each work genuinely cited, and cited
   appropriately, in the manuscript?
 
 It produces both a **human-readable** report and a **machine-readable** JSON
-record, each with clear descriptions of every issue and an overall **0–100
-integrity score**.
+record, each with clear descriptions of every issue and two **0–100 scores** — an
+**integrity** score (is the bibliography sound?) and a **confidence** score (how well
+were its entries verified?).
 
 VeraCite **never modifies your bibliography or your LaTeX** — it only *flags*
 issues, with the offending line and (where possible) a suggested fix, for an author
@@ -48,7 +49,7 @@ VeraCite does that checking for you — deterministically, against the record �
   account, no logins, no setup; it works out of the box and needs no extra
   software installed.
 - **Trustworthy** — it doesn't guess. Every issue it reports comes from an
-  explicit rule or a comparison against an authoritative record, so you can see
+  explicit rule or a comparison against a registry record, so you can see
   exactly why each was flagged.
 - **Standards-based** — it checks your entries against the official BibTeX/biblatex
   rules, standard journal-name abbreviations, and validated identifiers (DOI,
@@ -140,7 +141,7 @@ The three levels mean different things and call for different action:
 - **`[ERROR]`** — must fix (rarely issued). A syntax error that stops BibTeX parsing (unbalanced
   braces, a missing `=`, an unknown entry type, a dropped reference), a duplicate, a
   retraction, a dead DOI, or an id that resolves to a different paper. Always from a
-  deterministic check or an authoritative record — **never** the LLM.
+  deterministic check or a registry record — **never** the LLM.
 - **`[WARN]`** — investigate. A discrepancy with the record that may or may not be
   wrong: an author/title/year/volume/pages field differs, a non-standard journal
   abbreviation, a preprint with a published version, a linked erratum, an LLM
@@ -412,22 +413,21 @@ reference managers can import the metadata directly.
 
 A biblatex entry (the title is brace-protected so a style that lowercases titles keeps
 `VeraCite`/`BibTeX` cased correctly). The `doi` is the Zenodo **concept DOI**, which
-always resolves to the latest version:
+always resolves to the latest version — so the entry needs no version field to keep
+up to date:
 
 ```bibtex
 @software{whitlock_veracite,
-  author       = {Whitlock, Shannon},
-  title        = {{VeraCite}: a deterministic verifier for {BibTeX}/{biblatex} bibliographies},
-  year         = {2026},
-  version      = {0.1.3},
-  doi          = {10.5281/zenodo.20963060},
-  url          = {https://github.com/Shannon-Whitlock/VeraCite},
+  author = {Whitlock, Shannon},
+  title  = {{VeraCite}: a deterministic auditor for {BibTeX}/{biblatex} bibliographies},
+  year   = {2026},
+  doi    = {10.5281/zenodo.20963060},
+  url    = {https://github.com/Shannon-Whitlock/VeraCite},
 }
 ```
 
-Plain text: Shannon Whitlock. *VeraCite: a deterministic verifier for
-BibTeX/biblatex bibliographies*, version 0.1.3, 2026.
-https://doi.org/10.5281/zenodo.20963060
+Plain text: Shannon Whitlock. *VeraCite: a deterministic auditor for
+BibTeX/biblatex bibliographies*, 2026. https://doi.org/10.5281/zenodo.20963060
 
 > The concept DOI `10.5281/zenodo.20963060` always points to the latest release. To
 > cite one exact version, use its version-specific DOI from the
@@ -462,8 +462,11 @@ tests/           pytest suite + .bib fixtures
 ## Known limitations
 
 VeraCite compares against registry **metadata**; errors in free text or in
-fields no registry encodes are out of reach. Correction/erratum and published-version coverage is best-effort. "No problem found" means no problem in the checkable fields, not
-that every field was verified.
+fields no registry encodes are out of reach. A `url` field is **not** fetched or
+validated (resolving an arbitrary URL from a `.bib` is a security risk, especially
+server-side), so link rot is not detected. Correction/erratum and published-version
+coverage is best-effort. "No problem found" means no problem in the checkable fields,
+not that every field was verified.
 
 ## Tests
 

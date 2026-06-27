@@ -103,6 +103,12 @@ must be written here so it is enforced in the next.
 - Every cycle ships positive and negative tests for the class — the suite is the
   ratchet that keeps the cycle monotonic.
 
+## Known gaps / deferred (with constraints)
+
+- **`url` is not validated.** A dead or wrong link in a `@misc`/`@online`/`@software`
+  entry passes silently. Checking it means VeraCite would **fetch a URL from an
+  untrusted `.bib`**, which is an SSRF risk. 
+
 ## Before proposing a patch
 
 1. Reproduce and find the **true root cause** (not a diagnostic artifact).

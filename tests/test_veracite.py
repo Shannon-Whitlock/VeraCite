@@ -2981,6 +2981,52 @@ def test_datacite_journalarticle_gets_full_comparison(monkeypatch):
     assert vol, "a DataCite-registered ARTICLE must still get the volume comparison"
 
 
+def test_software_version_mismatch_flagged(monkeypatch):
+    # A @software entry whose `version` disagrees with the DataCite record's version
+    # pins the wrong release -> a metadata_mismatch on the version field, with the
+    # record's version suggested.
+    from veracite import record
+    e = _entry("@software{k, author={Whitlock, Shannon}, title={VeraCite: a verifier}, "
+               "year={2026}, version={0.1.2}, doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    rec = _datacite_record(software_version="v0.1.4")
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (rec, 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    vm = [f for f in rep.findings if f.category == "metadata_mismatch"
+          and "version" in f.message]
+    assert vm and vm[0].suggested == {"field": "version", "from": "0.1.2", "to": "v0.1.4"}
+
+
+def test_software_version_v_prefix_folded(monkeypatch):
+    # 'v0.1.4' and '0.1.4' are the same version -> no false mismatch.
+    from veracite import record
+    e = _entry("@software{k, author={Whitlock, Shannon}, title={VeraCite: a verifier}, "
+               "year={2026}, version={v0.1.4}, doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    rec = _datacite_record(software_version="0.1.4")
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (rec, 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    assert not any(f.category == "metadata_mismatch" and "version" in f.message
+                   for f in rep.findings), "a leading 'v' must not cause a false version mismatch"
+
+
+def test_software_no_version_field_not_flagged(monkeypatch):
+    # The bib omits `version` (optional); the record has one. Absence is a completeness
+    # matter, not a mismatch -> no version finding.
+    from veracite import record
+    e = _entry("@software{k, author={Whitlock, Shannon}, title={VeraCite: a verifier}, "
+               "year={2026}, doi={10.5281/zenodo.1}}\n")
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    rec = _datacite_record(software_version="v0.1.4")
+    monkeypatch.setattr(record, "fetch_datacite", lambda doi, t: (rec, 200))
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, 0, 5)
+    assert not any(f.category == "metadata_mismatch" and "version" in f.message
+                   for f in rep.findings)
+
+
 def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
     # A recorded DOI that 404'd (dead_doi) should fall through to the title search
     # just like a missing DOI, and recover the real DOI -- worded as a REPLACEMENT of
@@ -4114,3 +4160,27 @@ def test_report_is_stamped_with_veracite_version(tmp_path, capfd):
     summary = [json.loads(l) for l in out.read_text().splitlines()
                if l.strip() and json.loads(l)["key"] == "<summary>"][0]
     assert summary["veracite_version"] == __version__
+
+
+def test_version_is_consistent_across_files():
+    """The version lives in ONE place (veracite/config.VERSION); pyproject.toml reads
+    it dynamically. The only other hand-kept copy is CITATION.cff -- guard it so a
+    release bump that forgets it fails CI instead of shipping a mismatched citation.
+    (The README citation entry deliberately carries NO version field, so there is
+    nothing to drift there.)"""
+    import os
+    import re
+    from veracite.config import VERSION
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    cff = open(os.path.join(root, "CITATION.cff"), encoding="utf-8").read()
+    m = re.search(r"(?m)^version:\s*(\S+)\s*$", cff)
+    assert m, "CITATION.cff has no 'version:' line"
+    assert m.group(1) == VERSION, (
+        f"CITATION.cff version {m.group(1)!r} != config.VERSION {VERSION!r} -- "
+        "bump CITATION.cff to match (see RELEASING.md step 1)")
+    # pyproject.toml must NOT carry a hardcoded version (it is dynamic now).
+    pyproject = open(os.path.join(root, "pyproject.toml"), encoding="utf-8").read()
+    assert 'dynamic = ["version"]' in pyproject, \
+        "pyproject.toml should read the version dynamically from config.py"
+    assert not re.search(r'(?m)^version\s*=\s*"', pyproject), \
+        "pyproject.toml has a hardcoded version = \"...\"; it must be dynamic"

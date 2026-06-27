@@ -735,6 +735,19 @@ def compare_against_record(e, rec, source, rep):
                 f"-- use {target} instead of @{e.etype}", "record",
                 category="entrytype_suggestion", field="journal")
 
+    # Software/dataset VERSION: a DataCite record carries the release version
+    # (attributes.version). When the bib's `version` field disagrees with it, the
+    # entry pins the wrong release -- a render-affecting metadata difference. Compare
+    # only when BOTH sides have a version (the field is optional, and absence is a
+    # completeness matter, not a mismatch); fold a leading 'v' so 'v0.1.2' == '0.1.2'.
+    bib_ver = clean_tex(e.get("version", "")).strip()
+    rec_ver = (rec.get("software_version") or "").strip()
+    if nonarticle and bib_ver and rec_ver and \
+            bib_ver.lstrip("vV") != rec_ver.lstrip("vV"):
+        rep.add(Severity.WARN, e, f"[{source}] version differs", "record",
+                category="metadata_mismatch", field="version",
+                suggested={"field": "version", "from": bib_ver, "to": rec_ver})
+
     first_differs = _compare_authors(e, rec, source, rep)
 
     # Title: with identity fixed by the id, a strong mismatch is a discrepancy to

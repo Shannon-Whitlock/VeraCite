@@ -4,8 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "veracite"
-version = "0.1.4"
-description = "A deterministic verifier for BibTeX/biblatex bibliographies."
+# Single source of truth: VERSION lives in veracite/config.py and is read here
+# dynamically (see [tool.setuptools.dynamic] below), so the package version is bumped
+# in ONE place. test_version_consistency guards the remaining hand-kept copies
+# (CITATION.cff).
+dynamic = ["version"]
+description = "A deterministic auditor for BibTeX/biblatex bibliographies."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
@@ -38,6 +42,11 @@ veracite = "veracite.cli:main"
 
 [tool.setuptools]
 packages = ["veracite"]
+
+[tool.setuptools.dynamic]
+# Read the version from veracite/config.py's VERSION at build time, so it is never
+# hand-copied into this file. Bump it in config.py alone.
+version = { attr = "veracite.config.VERSION" }
 
 [tool.setuptools.package-data]
 # the biblatex datamodel ships inside the package

@@ -1,4 +1,4 @@
-"""VeraCite -- a deterministic verifier for BibTeX/biblatex bibliographies.
+"""VeraCite -- a deterministic auditor for BibTeX/biblatex bibliographies.
 
 Public API: parse a .bib, run the checks, render a report. See cli.main for the
 command-line entry point.

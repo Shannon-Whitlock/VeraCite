@@ -45,6 +45,10 @@ class Record:
     # 'proceedings', 'article', ...). Lets the entry-type check confirm e.g. a
     # @article that is really a thesis. Empty when the source does not report it.
     document_type: str = ""
+    # DataCite-only: the release version a software/dataset record carries
+    # (attributes.version, e.g. 'v0.1.2'), so a software entry's `version` field can
+    # be checked against the record. Empty when the source does not report it.
+    software_version: str = ""
     # arXiv-only: the published version it links to, when one exists.
     published_doi: str = ""
     journal_ref: str = ""

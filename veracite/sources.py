@@ -239,6 +239,7 @@ def fetch_datacite(doi, timeout):
         # carried for completeness only.
         journal=(attr.get("publisher") or ""),
         document_type=_datacite_doc_type(rtg),
+        software_version=str(attr.get("version") or "").strip(),
     ), code
 
 
