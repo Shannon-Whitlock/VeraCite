@@ -395,29 +395,26 @@ If VeraCite is useful in your work, please cite it. The repository ships a
 reference managers can import the metadata directly.
 
 A biblatex entry (the title is brace-protected so a style that lowercases titles keeps
-`VeraCite`/`BibTeX` cased correctly). With no DOI yet, it cites the *project* at its
-canonical URL rather than pinning a version that would go stale — `urldate` records
-when the page was consulted:
+`VeraCite`/`BibTeX` cased correctly). The `doi` is the Zenodo **concept DOI**, which
+always resolves to the latest version:
 
 ```bibtex
 @software{whitlock_veracite,
   author       = {Whitlock, Shannon},
   title        = {{VeraCite}: a deterministic verifier for {BibTeX}/{biblatex} bibliographies},
   year         = {2026},
+  version      = {0.1.2},
+  doi          = {10.5281/zenodo.20963060},
   url          = {https://github.com/Shannon-Whitlock/VeraCite},
-  urldate      = {2026-06-27},
-  % Once a Zenodo DOI is minted, add it (concept DOI -> always the latest version)
-  % and a version= for the release of record:
-  % doi        = {10.5281/zenodo.XXXXXXX},
 }
 ```
 
 Plain text: Shannon Whitlock. *VeraCite: a deterministic verifier for
-BibTeX/biblatex bibliographies*, 2026. https://github.com/Shannon-Whitlock/VeraCite
+BibTeX/biblatex bibliographies*, version 0.1.2, 2026.
+https://doi.org/10.5281/zenodo.20963060
 
-> To cite a **specific version**, mint a persistent **DOI** by archiving a release on
-> Zenodo; the concept DOI then always resolves to the latest version. Once minted it
-> goes in `CITATION.cff` and the entry above, alongside a `version` field.
+> The concept DOI `10.5281/zenodo.20963060` always points to the latest release; to
+> cite this exact version, use the v0.1.2 DOI `10.5281/zenodo.20963061` instead.
 
 ## Layout
 
