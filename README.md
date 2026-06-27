@@ -279,7 +279,7 @@ balance, dropped cited keys) and `"<summary>"` (the integrity roll-up):
  "sources": ["crossref", "inspire"], "canonical_record": {"title": "...", "year": 2009},
  "issues": []}
 {"key": "<file>", "issues": []}
-{"key": "<summary>", "veracite_version": "0.1.2",
+{"key": "<summary>", "veracite_version": "0.1.3",
  "summary": {"checked": 152, "verified": 151, "verified_with_caveat": 8,
  "unverified": 1, "mismatch": 0, "doi_coverage": 0.94, "pid_coverage": 0.97,
  "integrity_score": 97}}
@@ -409,18 +409,20 @@ always resolves to the latest version:
   author       = {Whitlock, Shannon},
   title        = {{VeraCite}: a deterministic verifier for {BibTeX}/{biblatex} bibliographies},
   year         = {2026},
-  version      = {0.1.2},
+  version      = {0.1.3},
   doi          = {10.5281/zenodo.20963060},
   url          = {https://github.com/Shannon-Whitlock/VeraCite},
 }
 ```
 
 Plain text: Shannon Whitlock. *VeraCite: a deterministic verifier for
-BibTeX/biblatex bibliographies*, version 0.1.2, 2026.
+BibTeX/biblatex bibliographies*, version 0.1.3, 2026.
 https://doi.org/10.5281/zenodo.20963060
 
-> The concept DOI `10.5281/zenodo.20963060` always points to the latest release; to
-> cite this exact version, use the v0.1.2 DOI `10.5281/zenodo.20963061` instead.
+> The concept DOI `10.5281/zenodo.20963060` always points to the latest release. To
+> cite one exact version, use its version-specific DOI from the
+> [Zenodo record](https://doi.org/10.5281/zenodo.20963060) (e.g. v0.1.2 is
+> `10.5281/zenodo.20963061`).
 
 ## Layout
 
