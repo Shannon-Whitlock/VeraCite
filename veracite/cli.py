@@ -463,7 +463,7 @@ def main(argv=None):
         for key in sorted(citedset - parsed_keys):
             rep.add_file(Severity.ERROR, f"cited key '{key}' has no entry in the .bib "
                          "(entry missing or failed to parse)", "syntax", category="syntax")
-    run_file_rules(entries, rep)
+    run_file_rules(entries, rep, cited_keys=citedset if tex_mode else None)
     if args.sort == "severity":
         any_emitted |= rep.emit_by_severity(skip_notes=args.skipnotes, only_key=args.key)
     else:

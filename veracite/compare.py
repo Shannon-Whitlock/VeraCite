@@ -1055,10 +1055,28 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                             f"        {source}: {atitle[:90]}", "record",
                             category="metadata_mismatch", field="title", suggested=_title_sug())
             else:
-                rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}:\n"
-                        f"        bib:    {btitle[:90]}\n"
-                        f"        {source}: {atitle[:90]}",
-                        "record", category="metadata_mismatch", field="title", suggested=_title_sug())
+                # Even at high overlap, an arXiv preprint may have been retitled
+                # between versions (e.g. v1 "computer" vs v2 "simulator" at 83%).
+                # Check before emitting "differs slightly" — the bib may be correct.
+                if source == "arxiv":
+                    retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
+                    if retitle:
+                        matched_v, latest_v, latest_title = retitle
+                        rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
+                                f"in a later version: the cited title matches v{matched_v}, but "
+                                f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
+                                f"cited title if you mean the current version", "record",
+                                category="preprint_retitled", field="title")
+                        retitle = True  # sentinel: skip the "differs slightly" below
+                    else:
+                        retitle = False
+                else:
+                    retitle = False
+                if not retitle:
+                    rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}:\n"
+                            f"        bib:    {btitle[:90]}\n"
+                            f"        {source}: {atitle[:90]}",
+                            "record", category="metadata_mismatch", field="title", suggested=_title_sug())
 
     # The single genuine wrong-paper error: identity-level fields ALL point
     # elsewhere, so the id itself is probably wrong (copy-paste). Both the first

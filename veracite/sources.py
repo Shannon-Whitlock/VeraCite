@@ -457,7 +457,7 @@ def fetch_inspire(doi=None, arxiv_id=None, recid=None, timeout=20):
         year=int(year) if str(year).isdigit() else None,
         volume=str(pub.get("journal_volume", "") or ""),
         number=str(pub.get("journal_issue", "") or ""),
-        pages=str(pub.get("page_start", "") or ""),
+        pages=str(pub.get("page_start", "") or "") if not pub.get("artid") else "",
         title=(titles[0].get("title") or "") if titles else "",
         journal=pub.get("journal_title", "") or "",
         abstract=strip_tags((md.get("abstracts") or [{}])[0].get("value", "")),

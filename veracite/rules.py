@@ -21,6 +21,7 @@ from .normalize import (ARXIV_OLD_RE, DOI_FULL_RE, bare_doi, clean_tex,
                         title_is_miscased)
 from .parser import _blank_comments, field_occurrences, iter_field_decls
 from .report import Severity
+from .titles import title_key
 
 ENTRY_RULES = []
 FILE_RULES = []
@@ -1255,25 +1256,85 @@ def identifier_formats(e, rep):
 
 # --- file-wide rules -------------------------------------------------------
 
-@file_rule
-def duplicate_keys_and_dois(entries, rep):
+def duplicate_keys_and_dois(entries, rep, cited_keys=None):
+    """Flag entries that refer to the same work: first by duplicate citation key,
+    then by shared DOI (unambiguous), then by title+year+first-author similarity
+    (catches duplicates that lack a DOI or where one entry is a preprint and the
+    other the published version).
+
+    When `cited_keys` is supplied (--tex mode), a duplicate pair where NEITHER
+    key is cited is noise -- the reader never sees both in the reference list, so
+    it is not flagged. A pair where BOTH keys are cited produces a harder warning
+    (the same work appears twice in the reference list); a pair where only one is
+    cited is still flagged (the uncited entry is a latent collision).
+    """
+    # Build a fast lookup: is a given key cited (or are we in non-tex mode)?
+    def _cited(key):
+        return cited_keys is None or key in cited_keys
+
     seen_keys, seen_dois = {}, {}
+    # Secondary check: (title_key, year, folded_first_surname) -> (key, lineno)
+    seen_fingerprints = {}
+
     for e in entries:
         if e.key in seen_keys:
             rep.add(Severity.ERROR, e, f"duplicate citation key (also at line {seen_keys[e.key]})",
                     category="duplicate")
         else:
             seen_keys[e.key] = e.lineno
+
+        # --- DOI deduplication (unambiguous) ---
         # Compare DOIs in their bare, lowercased form so a URL-wrapped DOI
         # ('https://doi.org/10.1/x') and the same DOI written bare ('10.1/x') --
         # a very common mix within one .bib -- are recognized as the same work.
         doi = bare_doi(e.get("doi", "").strip()).lower()
         if doi:
             if doi in seen_dois:
-                rep.add(Severity.WARN, e, f"DOI shared with '{seen_dois[doi]}': {doi}",
-                        category="duplicate")
+                other_key = seen_dois[doi]
+                # Skip if neither key is cited (bib maintenance noise, not a reader problem).
+                if not _cited(e.key) and not _cited(other_key):
+                    pass
+                else:
+                    both_cited = _cited(e.key) and _cited(other_key)
+                    sev = Severity.ERROR if both_cited else Severity.WARN
+                    msg = (f"DOI shared with '{other_key}': {doi}"
+                           + (" -- same paper cited twice under different keys"
+                              if both_cited else ""))
+                    rep.add(sev, e, msg, category="duplicate")
             else:
                 seen_dois[doi] = e.key
+
+        # --- Title+year+first-author fingerprint (secondary, no DOI match needed) ---
+        # This catches the common preprint-vs-published case where the bib has two
+        # entries for the same paper with different DOIs (or one has no DOI), as
+        # long as the title, year, and first author all agree. The title key is
+        # already normalized (lowercased, de-TeXed, stopwords removed); the year
+        # must match exactly; the first surname must fold equal. This is conservative:
+        # all three must agree to avoid flagging distinct papers that share a title word.
+        tk = title_key(e.get("title", ""))
+        year = str(e.get("year", "") or "").strip()
+        bib_authors = split_authors(e.get("author", ""))
+        first = bib_authors[0] if bib_authors else ""   # already folded by split_authors
+        if tk and year and first:
+            fp = (tk, year, first)
+            if fp in seen_fingerprints:
+                other_key, other_line = seen_fingerprints[fp]
+                # Skip if the DOI match already reported this pair.
+                if doi and doi in seen_dois and seen_dois[doi] == other_key:
+                    pass
+                # Skip if neither key is cited.
+                elif not _cited(e.key) and not _cited(other_key):
+                    pass
+                else:
+                    both_cited = _cited(e.key) and _cited(other_key)
+                    sev = Severity.WARN
+                    msg = (f"possible duplicate of '{other_key}' (line {other_line}): "
+                           f"same title, year, and first author"
+                           + (" -- same paper cited twice under different keys"
+                              if both_cited else ""))
+                    rep.add(sev, e, msg, category="duplicate")
+            else:
+                seen_fingerprints[fp] = (e.key, e.lineno)
 
 
 def _is_personal_name_token(a):
@@ -1426,9 +1487,12 @@ def run_entry_rules(e, rep):
         fn(e, rep)
 
 
-def run_file_rules(entries, rep):
+def run_file_rules(entries, rep, cited_keys=None):
     """Apply every registered whole-file @file_rule once (duplicate keys/DOIs,
-    author-format and arXiv-style consistency). Run after the per-entry pass."""
+    author-format and arXiv-style consistency). Run after the per-entry pass.
+    `cited_keys` is the set of keys actually cited in the manuscript (--tex mode);
+    when None (no .tex), all entries are treated as cited."""
+    duplicate_keys_and_dois(entries, rep, cited_keys=cited_keys)
     for fn in FILE_RULES:
         fn(entries, rep)
 

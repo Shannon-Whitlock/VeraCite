@@ -9,7 +9,7 @@ import pytest
 from veracite.config import load_settings
 from veracite.parser import parse_bib
 from veracite.report import Report, Severity
-from veracite.rules import run_static, syntax_pass
+from veracite.rules import run_static, run_file_rules, syntax_pass
 from veracite import record, normalize, verify
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
@@ -5224,3 +5224,167 @@ def test_version_is_consistent_across_files():
         "pyproject.toml should read the version dynamically from config.py"
     assert not re.search(r'(?m)^version\s*=\s*"', pyproject), \
         "pyproject.toml has a hardcoded version = \"...\"; it must be dynamic"
+
+
+# ---------------------------------------------------------------------------
+# FP-1: INSPIRE page_start == artid suppression
+# ---------------------------------------------------------------------------
+
+def _inspire_response(pub_info, authors=None):
+    """Build a minimal INSPIRE-HEP API response dict for testing."""
+    return {
+        "metadata": {
+            "authors": authors or [{"full_name": "Islam, R."}],
+            "titles": [{"title": "Test Paper"}],
+            "document_type": ["article"],
+            "earliest_date": str(pub_info.get("year", "2014")),
+            "publication_info": [pub_info],
+        }
+    }
+
+
+def test_inspire_artid_suppresses_page_field(monkeypatch):
+    # INSPIRE stores the article identifier in both page_start and artid for
+    # journal articles that use article IDs (not page ranges). When artid is
+    # present, page_start is NOT a real page number and must not cause a
+    # source_conflict against the bib's pages field.
+    from veracite import sources
+    pub_info = {"page_start": "2014", "artid": "2014", "journal_volume": "6",
+                "year": 2014, "journal_title": "Optics Letters"}
+    monkeypatch.setattr(sources, "http_get_json",
+                        lambda *a, **k: (_inspire_response(pub_info), 200))
+    result = sources.fetch_inspire(doi="10.1364/OL.39.002014", timeout=1)
+    assert result is not None
+    assert result.pages == "", (
+        "pages must be empty when artid is present -- page_start is the article "
+        "ID, not a page number")
+
+
+def test_inspire_no_artid_keeps_page_start(monkeypatch):
+    # When artid is absent, page_start is a genuine start-page and must be kept.
+    from veracite import sources
+    pub_info = {"page_start": "123", "journal_volume": "10",
+                "year": 2020, "journal_title": "Phys. Rev. Lett."}
+    monkeypatch.setattr(sources, "http_get_json",
+                        lambda *a, **k: (_inspire_response(pub_info), 200))
+    result = sources.fetch_inspire(doi="10.1103/PhysRevLett.10.123", timeout=1)
+    assert result is not None
+    assert result.pages == "123"
+
+
+# ---------------------------------------------------------------------------
+# Q3: duplicate detection with cited_keys context
+# ---------------------------------------------------------------------------
+
+def test_duplicate_doi_both_cited_is_error_with_note():
+    # When both entries sharing a DOI appear in cited_keys, the finding is an
+    # ERROR and the message notes they are "cited twice under different keys".
+    bib = ("@article{A2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n"
+           "@article{B2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n")
+    entries, _ = parse_bib(bib)
+    rep = Report(color=False)
+    run_file_rules(entries, rep, cited_keys={"A2020", "B2020"})
+    errs = [f for f in rep.findings
+            if f.category == "duplicate" and "DOI shared" in f.message]
+    assert errs, "both-cited DOI pair must produce a duplicate finding"
+    assert errs[0].severity is Severity.ERROR
+    assert "same paper cited twice under different keys" in errs[0].message
+
+
+def test_duplicate_doi_neither_cited_is_suppressed():
+    # When neither entry with a shared DOI appears in cited_keys, suppress the
+    # duplicate finding entirely (uncited entries have no render impact).
+    bib = ("@article{A2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n"
+           "@article{B2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n")
+    entries, _ = parse_bib(bib)
+    rep = Report(color=False)
+    run_file_rules(entries, rep, cited_keys={"C2021"})  # neither A nor B cited
+    assert not any(f.category == "duplicate" and "DOI shared" in f.message
+                   for f in rep.findings), (
+        "uncited-only duplicate pair must be suppressed")
+
+
+def test_duplicate_doi_one_cited_is_flagged_without_double_cite_note():
+    # When only one of a DOI-sharing pair is cited, the finding is still raised
+    # (the uncited entry is a latent collision) but the message does NOT add the
+    # "same paper cited twice" note, which is reserved for the both-cited case.
+    bib = ("@article{A2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n"
+           "@article{B2020, title={T}, author={X}, journal={J}, year={2020},"
+           " doi={10.1/x}}\n")
+    entries, _ = parse_bib(bib)
+    rep = Report(color=False)
+    run_file_rules(entries, rep, cited_keys={"A2020"})
+    dups = [f for f in rep.findings if f.category == "duplicate" and "DOI shared" in f.message]
+    assert dups, "one-cited DOI pair must still produce a duplicate finding"
+    assert "same paper cited twice" not in dups[0].message
+
+
+def test_duplicate_title_year_author_fingerprint_catches_preprint_vs_published():
+    # The secondary fingerprint (title_key, year, folded_first_surname) catches
+    # a preprint entry and its published-journal counterpart that share no DOI
+    # but are the same paper.
+    bib = ("@article{Smith2020pre, title={Quantum dynamics of spin chains},"
+           " author={Smith, A. B. and Jones, C.}, year={2020}, journal={arXiv}}\n"
+           "@article{Smith2020pub, title={Quantum dynamics of spin chains},"
+           " author={Smith, A. B. and Jones, C.}, year={2020},"
+           " journal={Phys. Rev. B}, volume={102}, pages={014301}}\n")
+    entries, _ = parse_bib(bib)
+    rep = Report(color=False)
+    run_file_rules(entries, rep, cited_keys={"Smith2020pre", "Smith2020pub"})
+    dups = [f for f in rep.findings
+            if f.category == "duplicate" and "possible duplicate" in f.message]
+    assert dups, "same title/year/author with no DOI must still be flagged as duplicate"
+
+
+# ---------------------------------------------------------------------------
+# Q4: arXiv preprint retitled at high overlap → preprint_retitled, not mismatch
+# ---------------------------------------------------------------------------
+
+def test_arxiv_retitled_at_high_overlap_is_preprint_retitled_not_mismatch(monkeypatch):
+    # When a bib's arXiv title differs at 60-100% overlap and the cited title
+    # matches an earlier version, the finding must be preprint_retitled (INFO),
+    # not "title differs slightly" (metadata_mismatch). The shapira2023 class:
+    # bib cites v1 "computer", arXiv latest is v2 "simulator", overlap ~83%.
+    from veracite import sources
+    rec = {"authors": ["shapira"], "authors_display": ["Shapira"], "given": {},
+           "title": "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+           "year": 2023, "journal": "arXiv", "arxiv_id": "2307.04922"}
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+        2: "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions"})
+    e = _entry("@article{shapira2023, author={Yotam Shapira and Lior Gazit},\n"
+               " title={Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions},\n"
+               " year={2023}, eprint={2307.04922}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep, timeout=1)
+    mismatch = [f for f in rep.findings
+                if f.category == "metadata_mismatch" and "title differs" in f.message]
+    assert not mismatch, "faithfully-cited v1 title at high overlap must not be a mismatch"
+    retitled = [f for f in rep.findings if f.category == "preprint_retitled"]
+    assert retitled and retitled[0].severity is Severity.INFO
+    assert "v1" in retitled[0].message
+
+
+def test_arxiv_high_overlap_genuine_title_diff_stays_as_mismatch(monkeypatch):
+    # Negative twin: bib title differs from arXiv record at high overlap, and
+    # it does NOT match any earlier version — must remain "title differs slightly".
+    from veracite import sources
+    rec = {"authors": ["shapira"], "authors_display": ["Shapira"], "given": {},
+           "title": "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+           "year": 2023, "journal": "arXiv", "arxiv_id": "2307.04922"}
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+        2: "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions"})
+    e = _entry("@article{shapira2023, author={Yotam Shapira and Lior Gazit},\n"
+               " title={Towards Analog Simulations of Lattice Gauge Theories using Trapped Ions},\n"
+               " year={2023}, eprint={2307.04922}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep, timeout=1)
+    assert not any(f.category == "preprint_retitled" for f in rep.findings)
+    assert any(f.category == "metadata_mismatch" and "title differs" in f.message
+               for f in rep.findings)
