@@ -89,6 +89,7 @@ DEFAULT_SETTINGS = {
         "missing_recommended": "warning", # field biber doesn't require but we advise (year)
         "biblatex_validity": "note",      # field invalid under biblatex datamodel
         "title_case": "note",             # title looks miscased (mostly UPPERCASE)
+        "title_capitalization": "warning",  # CamelCase term will be silently mangled by some styles -- check it
         "title_style": "note",            # title matches record but punctuation/wording deviates
         "style": "note",                  # casing, punctuation, dashes, month, etc.
         "citation_order": "note",         # a \cite{} group is not in chronological order

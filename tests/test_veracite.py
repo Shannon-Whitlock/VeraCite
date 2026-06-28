@@ -186,7 +186,7 @@ def test_en_dash_fix_offered():
 def test_brace_protection_fix_offered():
     rep, _ = check("style.bib")
     assert any(s.get("from") == "Python" and s["to"] == "{Python}"
-               for s in suggestions(rep, "style"))
+               for s in suggestions(rep, "title_capitalization"))
 
 
 def test_doi_url_to_bare_fix():
@@ -1903,6 +1903,27 @@ def test_urldate_not_nudged_for_stable_landing_page_url():
         run_static([e], rep)
         assert not any("urldate" in f.message for f in rep.findings), \
             f"stable landing page must not get a urldate nudge: {url}"
+
+
+def test_urldate_not_nudged_for_misc_with_stable_id():
+    # A stable identifier suppresses the nudge REGARDLESS of type: an arXiv preprint is
+    # commonly @misc with eprint=<id> (+ an arxiv.org url), a fixed source of record --
+    # it must NOT be nudged just because @misc is an online-ish type. (Found auditing a
+    # real bib: a @misc arXiv entry was wrongly nudged because the stable-id guard only
+    # covered the web-source branch, not the online-type branch.)
+    for entry in (
+        "@misc{k, author={A. Sheremet and B. Petrov}, title={A Preprint},\n"
+        " year={2021}, eprint={2103.06824}, archivePrefix={arXiv},\n"
+        " url={https://arxiv.org/abs/2103.06824}}\n",
+        # eprint absent but the arXiv id is mineable from the url -> still stable.
+        "@misc{k, author={A}, title={A Preprint}, year={2021},\n"
+        " url={https://arxiv.org/abs/2103.06824}}\n",
+        # a DOI-bearing @misc landing page is likewise stable.
+        "@misc{k, author={A}, title={A Dataset}, year={2021}, doi={10.5281/zenodo.123}}\n"):
+        e = _entry(entry)
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any("urldate" in f.message for f in rep.findings), entry
 
 
 def test_urldate_nudged_for_grey_web_article():
@@ -4173,6 +4194,70 @@ def test_normal_title_keeps_acronym_protection_notes():
                 if "acronym" in f.message and f.suggested]
     assert "BGK" in acronyms and "DNA" in acronyms
     assert not any(f.category == "title_case" for f in rep.findings)
+
+
+def _title_flags(title):
+    """The set of title terms VeraCite suggests brace-protecting for this title."""
+    e = _entry("@article{k, author={A. B}, title={%s}, journal={J}, year={2020},\n"
+               " volume={1}, pages={1}}\n" % title)
+    rep = Report(color=False)
+    run_static([e], rep)
+    return {f.suggested["from"] for f in rep.findings
+            if f.suggested and f.suggested.get("field") == "title"}
+
+
+def test_title_first_char_preserved_not_first_word():
+    # BibTeX sentence-casing (change.case$ 't') keeps only the FIRST CHARACTER, then
+    # lowercases the rest at brace depth 0 (Tame the BeaST). So a first-word term with
+    # NO interior capital ('Rydberg') is safe -- its 'R' is kept, 'ydberg' already
+    # lower -- but a first-word term WITH interior capitals ('QED', 'DNA') is mangled
+    # ('Qed') and must still be flagged.
+    assert _title_flags("Rydberg blockade in cold gases") == set()        # safe at start
+    assert "QED" in _title_flags("QED effects in waveguides")             # acronym, mangled
+    assert "DNA" in _title_flags("DNA origami for sensing")
+    assert "Rydberg" in _title_flags("Cold Rydberg gases")                # mid-title -> flag
+
+
+def test_camelcase_title_term_is_warned():
+    # A CamelCase / interior-capital term in a sentence-case title is a WARN: the author
+    # likely intended the casing (a software/proper name) and sentence-casing would
+    # mangle it ('QuantumCumulants' -> 'Quantumcumulants'), so they should check it.
+    from veracite.report import Severity
+    e = _entry("@misc{k, author={A. B}, title={QuantumCumulants.jl: a julia framework},\n"
+               " year={2021}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    camel = [f for f in rep.findings if f.suggested
+             and f.suggested.get("from") == "QuantumCumulants.jl"]
+    assert camel and camel[0].severity is Severity.WARN
+
+
+def test_author_title_case_suppresses_all_brace_nudges():
+    # When the WHOLE title is in author Title Case (every significant word capitalized),
+    # capitalized/acronym/CamelCase words are the author's styling (biber re-cases per
+    # style), not standout proper nouns -- so NONE of the brace-protection nudges fire.
+    for title in ("Rydberg Atoms",
+                  "Superradiance for Atoms Trapped along a Photonic Crystal Waveguide",
+                  "Creation of Polar and Nonpolar Long-Range Rydberg Molecules"):
+        assert _title_flags(title) == set(), title
+    # The sentence-case twin still flags the standout proper noun.
+    assert "Rydberg" in _title_flags("Quantum information with Rydberg atoms")
+
+
+def test_title_brace_protection_is_a_warning():
+    # A proper noun or acronym a style will lowercase ('rydberg', 'qed') is a common,
+    # real defect, so the brace-protection finding is a WARN (investigate), not a quiet
+    # note -- all three title-capitalization checks share the same warning category.
+    from veracite.report import Severity
+    for title, term in (("Quantum information with Rydberg atoms", "Rydberg"),
+                        ("Modeling waveguide QED systems", "QED")):
+        e = _entry("@article{k, author={A. B}, title={%s}, journal={J}, year={2020},\n"
+                   " volume={1}, pages={1}}\n" % title)
+        rep = Report(color=False)
+        run_static([e], rep)
+        hits = [f for f in rep.findings if f.category == "title_capitalization"
+                and f.suggested and f.suggested.get("from") == term]
+        assert hits and hits[0].severity is Severity.WARN, title
 
 
 def test_record_casing_refines_and_withdraws_offline_miscase():

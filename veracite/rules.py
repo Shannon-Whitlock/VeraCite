@@ -523,6 +523,16 @@ def year_sanity(e, rep):
 # Acronym scan (2+ capitals not adjacent to a brace/backslash). Compiled once.
 _ACRONYM_RE = re.compile(r"(?<![\\{])\b([A-Z]{2,})\b(?![}])")
 
+# CamelCase / mixed-case scan: a word with an INTERIOR capital -- a lowercase letter
+# immediately followed by an uppercase one ('QuantumCumulants', 'BibTeX', 'arXiv',
+# 'MoSe2', 'McClung'). Distinct from an all-caps acronym (no lowercase, handled above).
+# Such casing is almost always a deliberate proper noun / software / chemical name that
+# sentence-casing would mangle ('Quantumcumulants'), so the author should check/protect
+# it. The token may carry trailing non-letters ('.jl', '2'); we capture the run from
+# its first letter through any following letters/digits/dots so the suggested {..} wraps
+# the whole name. Anchored so a token inside braces or after a backslash is excluded.
+_CAMELCASE_RE = re.compile(r"(?<![\\{])\b([A-Za-z]*[a-z][A-Z][A-Za-z0-9.]*)\b(?![}])")
+
 # Per-term (occurrence, protected?) patterns for the configured protected_terms,
 # compiled once and cached: the list is fixed for a run, so rebuilding a pair of
 # re.escape patterns per term *per entry* (title_caps is one of the hottest rules)
@@ -550,6 +560,59 @@ def _protected_in_braces(word, title):
     return re.search(rf"\{{[^}}]*{re.escape(word)}[^}}]*\}}", title)
 
 
+def _title_start(title):
+    """Index of the title's first alphanumeric char (skipping a leading brace/quote)."""
+    return next((i for i, c in enumerate(title) if c.isalnum()), 0)
+
+
+# Short function words ignored when judging whether a title is in author Title Case.
+_TITLE_FUNCTION_WORDS = frozenset((
+    "a", "an", "the", "of", "in", "on", "at", "to", "for", "and", "or", "nor", "but",
+    "with", "by", "from", "as", "into", "onto", "via", "per", "vs", "versus", "near",
+    "over", "under", "between", "through"))
+
+
+def _is_author_title_case(title):
+    """True if the title is written in author TITLE CASE -- (nearly) every significant
+    word capitalized -- rather than sentence case with a few standout proper nouns.
+
+    Why it matters: the brace-protection nudges (a capitalized proper noun, an acronym,
+    a CamelCase term) only signal a real risk when the capital is the EXCEPTION in an
+    otherwise-lowercase title; then a style that sentence-cases will mangle that one
+    word. When the WHOLE title is capitalized, that is just the author's casing style
+    (biber re-cases it per the chosen style anyway), so singling out individual words
+    is noise -- suppress all three nudges. Significant = not a short function word; a
+    word counts as capitalized if its first letter is upper OR it has an interior
+    capital (CamelCase). Title Case when every significant word is capitalized, or at
+    least four are (broadly capitalized even if a stray word is lower)."""
+    t = re.sub(r"\$[^$]*\$", " ", title)        # drop math
+    t = re.sub(r"[{}\\]", " ", t)                # drop braces/control chars
+    words = re.findall(r"[A-Za-z][A-Za-z0-9.'-]*", t)
+    sig = [w for w in words if w.lower() not in _TITLE_FUNCTION_WORDS]
+    if not sig:
+        return False
+    capped = sum(1 for w in sig if w[0].isupper() or any(c.isupper() for c in w[1:]))
+    return capped >= 4 or capped == len(sig)
+
+
+def _safe_at_title_start(term, occ_re, title):
+    """True if `term` needs NO brace protection purely because of its position.
+
+    BibTeX/biber sentence-casing (change.case$ "t") lowercases every letter at brace
+    depth 0 EXCEPT the very first character of the title (Tame the BeaST). So only the
+    first CHARACTER is preserved, NOT the whole first word: a first-word term with
+    INTERIOR capitals ('QuantumCumulants', 'QED', 'RNA') would still be mangled
+    ('Quantumcumulants', 'Qed', 'Rna') and must be flagged. A term is position-safe
+    only when (a) every occurrence is the title's first word AND (b) it has no interior
+    uppercase (its only capital, if any, is its first letter) -- e.g. 'Rydberg', whose
+    'R' is preserved and 'ydberg' is already lowercase."""
+    start = _title_start(title)
+    matches = list(occ_re.finditer(title))
+    if not matches or any(m.start() != start for m in matches):
+        return False
+    return not any(c.isupper() for c in term[1:])
+
+
 @rule
 def title_caps(e, rep):
     """Flag proper nouns/acronyms in a title that are not brace-protected and so
@@ -569,17 +632,56 @@ def title_caps(e, rep):
                 "to title/sentence case (and brace-protect any genuine acronyms)",
                 category="title_case", field="title")
         return
+    # If the WHOLE title is in author Title Case, capitalized words are the author's
+    # styling (which biber re-cases per style anyway), not standout proper nouns -- so
+    # none of the per-word brace-protection nudges below apply. Only in a sentence-case
+    # title does a capitalized/acronym/CamelCase word signal a term at real risk.
+    if _is_author_title_case(title):
+        return
+    # All three checks below flag a title term that a style sentence-casing the title
+    # will silently lowercase -- a proper noun, an acronym, or a CamelCase name. This is
+    # a common, real defect (the rendered reference shows 'rydberg'/'qed'), so they
+    # share the WARN-level `title_capitalization` category, not a quiet style note.
     for hint, occ_re, prot_re in _protected_term_patterns():
-        if occ_re.search(title) and not prot_re.search(title):
+        if (occ_re.search(title) and not prot_re.search(title)
+                and not _safe_at_title_start(hint, occ_re, title)):
             rep.add(Severity.WARN, e, "title term not brace-protected; may be lowercased "
-                    "by some styles", category="style", field="title",
+                    "by some styles", category="title_capitalization", field="title",
                     suggested={"field": "title", "from": hint, "to": "{" + hint + "}"})
+    seen_acronyms = set()
     for m in _ACRONYM_RE.finditer(title):
         word = m.group(1)
-        if word not in ("A", "I") and not _protected_in_braces(word, title):
-            rep.add(Severity.INFO, e, "acronym in title not brace-protected",
-                    category="style", field="title",
+        if word in ("A", "I") or word in seen_acronyms:
+            continue
+        seen_acronyms.add(word)
+        # An all-caps acronym ALWAYS has interior capitals, so it is never position-safe
+        # ('QED' as the first word still mangles to 'Qed'); _safe_at_title_start returns
+        # False for it. Use a word-boundary occurrence regex for the position check.
+        occ_re = re.compile(rf"\b{re.escape(word)}\b")
+        if _safe_at_title_start(word, occ_re, title):
+            continue
+        if not _protected_in_braces(word, title):
+            rep.add(Severity.WARN, e, "acronym in title not brace-protected; some "
+                    "styles will lowercase it", category="title_capitalization",
+                    field="title",
                     suggested={"field": "title", "from": word, "to": "{" + word + "}"})
+    # CamelCase / interior-capital terms (a WARN: the author very likely intended this
+    # casing -- a package/proper/chemical name like 'QuantumCumulants.jl', 'BibTeX',
+    # 'MoSe2' -- and sentence-casing would silently mangle it, so they should check and
+    # brace-protect it). Skipped when already brace-protected, and (like acronyms) an
+    # interior capital is never position-safe so first-word ones still fire.
+    seen_camel = set()
+    for m in _CAMELCASE_RE.finditer(title):
+        word = m.group(1)
+        if word in seen_camel:
+            continue
+        seen_camel.add(word)
+        if not _protected_in_braces(word, title):
+            rep.add(Severity.WARN, e, "title has a mixed-case (CamelCase) term that "
+                    "some styles will lowercase; if the casing is intentional (a "
+                    "software/proper name) brace-protect it", category="title_capitalization",
+                    field="title", suggested={"field": "title", "from": word,
+                                              "to": "{" + word + "}"})
 
 
 @rule
@@ -923,11 +1025,18 @@ def online_needs_urldate(e, rep):
     url = e.get("url").strip()
     if e.get("urldate").strip() or not url:
         return
-    online_type = e.etype in ("online", "electronic", "www", "misc")
+    # A STABLE identifier (a doi/eprint field, or a DOI/arXiv id mineable from the
+    # url) makes this a fixed source of record -- an access date adds nothing -- so it
+    # never gets the nudge, REGARDLESS of entry type. This is the key guard: an arXiv
+    # preprint is commonly @misc with eprint=<id> + an arxiv.org url, and must not be
+    # nudged just because @misc is an online-ish type.
     has_stable_id = bool(e.get("doi").strip() or e.get("eprint").strip()
                          or extract_doi_from_url(url, e.get("note"))
                          or extract_arxiv_id(url, e.get("note")))
-    if online_type or (_is_web_source_url(url) and not has_stable_id):
+    if has_stable_id:
+        return
+    online_type = e.etype in ("online", "electronic", "www", "misc")
+    if online_type or _is_web_source_url(url):
         rep.add(Severity.INFO, e, "online/url-cited entry has no 'urldate' (access "
                 "date); biblatex recommends one for online sources",
                 category="style", field="urldate")
