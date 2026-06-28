@@ -93,6 +93,15 @@ _TEX_LETTER_SUBS = [(re.compile(re.escape(pat) + r"\b"), repl)
                     for pat, repl in (("\\o", "o"), ("\\O", "O"), ("\\l", "l"),
                                       ("\\ss", "ss"), ("\\aa", "a"), ("\\AA", "a"),
                                       ("\\ae", "ae"), ("\\oe", "oe"))]
+# TeX typographic dash macros that encode a specific punctuation character: map them
+# to their Unicode equivalents BEFORE _TEX_MACRO_RE strips them entirely. Without this
+# '\textendash' would vanish (leaving 'input{}output' -> 'inputoutput') while the
+# record's '–' normalises through _norm_dashes to '-', so the two keys never match
+# even though the author intended exactly the same character. Applied as whole-word
+# matches (\b) so a path like '\textendash' does not partially match some longer macro.
+_TEX_DASH_SUBS = [(re.compile(r"\\textemdash\b"), "—"),   # — em dash
+                  (re.compile(r"\\textendash\b"), "–"),    # – en dash
+                  (re.compile(r"\\textdash\b"),   "–")]    # alias (rare)
 _TEX_MACRO_RE = re.compile(r"\\[a-zA-Z]+")
 _WS_RE = re.compile(r"\s+")
 
@@ -112,6 +121,8 @@ def clean_tex(s):
     s = _ACCENT_MACRO_RE.sub(lambda m: m.group(1) or m.group(2), s)
     s = _DOTLESS_RE.sub(r"\1", s)    # bare '\i'/'\j' -> 'i'/'j'
     for pat_re, repl in _TEX_LETTER_SUBS:
+        s = pat_re.sub(repl, s)
+    for pat_re, repl in _TEX_DASH_SUBS:
         s = pat_re.sub(repl, s)
     s = _TEX_MACRO_RE.sub("", s)
     s = s.replace("{", "").replace("}", "").replace("$", "")

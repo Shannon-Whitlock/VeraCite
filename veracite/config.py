@@ -100,6 +100,7 @@ DEFAULT_SETTINGS = {
         "journal_macro": "note",          # journal is an unexpanded LaTeX macro (\pra)
         "container_granularity": "note",  # id resolved to the containing volume, not the item
         "parity_suggestion": "note",      # record has data the bib could adopt
+        "isbn_unresolved": "note",        # ISBN valid but not found in OL/Google Books (coverage gap)
     },
     # External API endpoints. Centralized so they can be repointed from the
     # settings file if a service moves, without editing the code. {id}, {doi}

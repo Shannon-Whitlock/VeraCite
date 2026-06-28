@@ -1041,6 +1041,87 @@ def test_title_punctuation_deviation_nudged():
     assert not any(f.category == "title_style" for f in rep2.findings)
 
 
+def test_tex_dash_macro_equivalent_to_unicode_dash_in_title():
+    # '\textendash'/'\textemdash' are TeX's typographic en/em-dash macros -- the
+    # SAME character as the Unicode '–'/'—' Crossref serves, just written a
+    # different way. clean_tex must map them to the Unicode form (not silently drop
+    # them) so a bib title using the TeX macro is not falsely flagged as differing
+    # from a record title using the literal dash character (the words either side of
+    # the dash would otherwise glue together with the macro stripped: 'inputoutput'
+    # vs 'input output', a false title_style/mismatch).
+    from veracite.normalize import clean_tex
+    from veracite.compare import _title_punct_key
+    from veracite.titles import title_key
+
+    bib_title = r"a generalized input{\textendash}output formalism"
+    rec_title = "a generalized input–output formalism"
+    assert title_key(bib_title) == title_key(rec_title)
+    assert _title_punct_key(bib_title) == _title_punct_key(rec_title)
+    assert clean_tex(r"\textendash") == "–"
+    assert clean_tex(r"\textemdash") == "—"
+
+    e = _entry("@article{k, author={Caneva, Tommaso}, title={" + bib_title + "}, "
+               "year={2015}, doi={10.1/x}}\n")
+    rec = {"authors": ["caneva"], "given": {"caneva": "Tommaso"},
+           "authors_display": ["Caneva"], "title": rec_title, "year": 2015}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.category in ("title_style", "metadata_mismatch") for f in rep.findings)
+
+
+def test_title_punct_key_ignores_whitespace_wrapping_around_colon():
+    # A multi-line .bib title field ('Colloquium\n\t\t: Strongly...', the literal
+    # form some APS BibTeX exports use) carries an embedded newline/tab before the
+    # colon -- wrapping noise from how the field was written, not an authored space.
+    # It must compare equal to a record title with no such whitespace
+    # ('Colloquium: Strongly...'), e.g. after stripping an HTML '<i>' tag the record
+    # served around the word 'Colloquium'. A genuine word-level spacing difference
+    # ('open source' vs 'open-source') has no punctuation mark at that position and
+    # must still be detected (the control case).
+    from veracite.compare import _title_punct_key
+
+    bib_wrapped = "Colloquium\n\t\t: Strongly interacting photons"
+    rec_clean = "Colloquium: Strongly interacting photons"
+    assert _title_punct_key(bib_wrapped) == _title_punct_key(rec_clean)
+
+    # Control: a real punctuation deviation elsewhere in the title still survives.
+    assert _title_punct_key("Pulser: An open source package") != \
+        _title_punct_key("Pulser: An open-source package")
+
+
+def test_isbn_container_granularity_suppresses_journal_source_conflict():
+    # An @inbook/@incollection chapter resolved by ISBN gets the CONTAINER book's
+    # data (its 'journal' slot holds the publisher/series label), while Crossref
+    # resolves the CITED CHAPTER and names the book as a container title. These are
+    # two granularities of the SAME work, not sources disagreeing about a fact --
+    # the container_granularity note already flags the real issue (check the entry
+    # type), so cross-source comparison must not also raise a 'sources disagree on
+    # the journal' conflict for this pair.
+    from veracite.compare import compare_sources
+
+    e = _entry("@inbook{k, author={A, B}, title={A Chapter}, year={2012}, "
+               "isbn={978-1-4614-1347-9}, doi={10.1007/978-1-4614-1347-9_6}}\n")
+    records = {
+        "crossref": {"journal": "Selected Works of Terry Speed", "year": 2012},
+        "isbn": {"journal": "Springer New York", "year": 2012},
+    }
+    rep = Report(color=False)
+    compare_sources(e, records, rep)
+    assert not any(f.category == "source_conflict" for f in rep.findings)
+
+    # Control: the same journal disagreement between two non-ISBN sources (no
+    # granularity excuse) must still fire.
+    e2 = _entry("@article{k2, author={A, B}, title={T}, year={2012}, "
+                "doi={10.1/x}}\n")
+    records2 = {
+        "crossref": {"journal": "Nature Physics", "year": 2012},
+        "inspire": {"journal": "Phys. Rev. B", "year": 2012},
+    }
+    rep2 = Report(color=False)
+    compare_sources(e2, records2, rep2)
+    assert any(f.category == "source_conflict" for f in rep2.findings)
+
+
 def test_et_al_marker_not_read_as_mixed_author_format():
     # A 'Last, First' list ending in a literal 'et al.' is uniform -- 'et al.' is a
     # completeness marker (already flagged by author_completeness), not a name in a
@@ -1655,7 +1736,7 @@ def test_book_missing_title_with_booktitle_present_gets_cross_reference_hint():
     # missing_field message should name the cause, not just the absence.
     msgs = _missing("@book{k, author={A, B}, booktitle={T}, year={2020}, "
                      "publisher={P}}")
-    assert any("title" in m and "booktitle" in m and "did you mean" in m
+    assert any("title" in m and "booktitle" in m and "@inbook" in m
                for m in msgs)
 
     # A real @incollection legitimately uses BOTH title (chapter) and booktitle
@@ -1807,6 +1888,36 @@ def test_parity_suggestion_carries_structured_value():
     # A page RANGE is suggested in biblatex form ('--'), not the registry's single
     # hyphen, so an applied suggestion does not itself trip the dash-style check.
     assert any(s == {"field": "pages", "to": "920--926"} for s in par.values())
+
+
+def test_parity_issue_to_number_rename_shows_field_names():
+    # M-6: when 'issue' holds the numeric issue number and the record agrees,
+    # the suggested edit must show the field-name rename ('issue' -> 'number'),
+    # not a value-to-value suggestion that reads confusingly as '12' -> '12'.
+    e = _entry("@article{k, author={A, B}, title={T}, year={2024}, journal={J},"
+               " issue={12}}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["a"], "given": {}, "title": "T", "year": 2024, "number": "12"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    rename = [f for f in rep.findings if f.category == "parity_suggestion"
+              and f.suggested and f.suggested.get("field") == "number"]
+    assert rename, "expected parity_suggestion for issue->number rename"
+    assert rename[0].suggested == {"field": "number", "from": "issue", "to": "number"}, \
+        "suggested must show field-name rename not value-to-value"
+
+
+def test_title_style_bibtex_endash_vs_unicode_endash_is_silent():
+    # FN-4/M-1: BibTeX '--' and Unicode '–' (U+2013) are the same en-dash; a title
+    # that uses '--' in the bib while Crossref serves '–' must NOT fire title_style.
+    e = _entry("@article{k, author={A, B}, title={Rydberg-atom--ion molecules},"
+               " year={2021}, journal={J}, doi={10.1/x}}\n")
+    rep = Report(color=False)
+    # Record has the Unicode en-dash form
+    record.compare_against_record(
+        e, {"authors": ["a"], "given": {}, "title": "Rydberg-atom–ion molecules",
+            "year": 2021}, "crossref", rep)
+    assert not any(f.category == "title_style" for f in rep.findings), \
+        "BibTeX -- vs Unicode en-dash must not fire title_style"
 
 
 def test_pages_mismatch_suggested_in_biblatex_dash_form():
@@ -2381,6 +2492,19 @@ def test_iso4_abbreviation_accepted():
     assert eq("Sci Rep", "Scientific Reports")                  # NLM no-period form
     assert eq("Rep. Prog. Phys.", "Reports on Progress in Physics")
     assert eq("Nano Lett.", "Nano Letters")
+
+
+def test_journal_typo_of_known_abbreviation_not_equated():
+    # A bib journal that is a single-character typo of a known curated abbreviation
+    # must NOT be accepted as equivalent -- it is a mistake, not a valid alternative.
+    # 'Nat. Phy.' is 'Nat. Phys.' with one character dropped; the ISO-4 prefix check
+    # would previously accept 'phy' as a prefix of 'physics' (wrong).
+    eq = record._journal_equiv
+    assert not eq("Nat. Phy.", "Nature Physics")    # missing 's'
+    assert not eq("Nat. Ph.", "Nature Physics")     # 2-char abbreviation 'ph'
+    assert eq("Nat. Phys.", "Nature Physics")       # correct abbreviation still works
+    # Single-character typos of other curated abbreviations are likewise rejected.
+    assert not eq("Nat. Chemi.", "Nature Chemistry")  # 'natchemi' vs 'natchem'
 
 
 def test_journal_genuine_mismatch_still_differs():
@@ -4026,6 +4150,23 @@ def test_genuinely_bad_isbn_still_flagged():
     assert any("ISBN fails" in f.message for f in rep.findings)
 
 
+def test_isbn_not_in_openlibrary_is_info_not_warn(monkeypatch):
+    # A syntactically valid ISBN that Open Library and Google Books don't carry
+    # (coverage gap) must be INFO / isbn_unresolved, not WARN / metadata_mismatch.
+    # The bib is not wrong -- the lookup source simply doesn't have the record.
+    monkeypatch.setattr(record, "fetch_isbn", lambda isbn, timeout: None)
+    e = _entry("@book{k, title={T}, author={A}, year={2020},\n"
+               " isbn={978-0-7503-1635-4}, publisher={IOP}}\n")
+    rep = Report(color=False)
+    record.resolve_entry(e, rep, delay=0, timeout=1)
+    unresolved = [f for f in rep.findings if f.category == "isbn_unresolved"]
+    assert unresolved, "expected isbn_unresolved note"
+    assert all(f.severity == Severity.INFO for f in unresolved), \
+        "isbn_unresolved must be INFO not WARN"
+    assert not any(f.category == "metadata_mismatch" for f in rep.findings), \
+        "must not emit metadata_mismatch for a coverage-gap ISBN"
+
+
 def test_nature_ep_page_form_reduced_to_start_page():
     # Item 11: 'NNN EP -' is the Nature electronic-page form (start page only).
     assert normalize.norm_pages("412 EP -") == "412"
@@ -4183,7 +4324,7 @@ def test_related_works_checked_on_search_resolved_entry(monkeypatch):
     # Stub fetch_related to echo the passed-in relations as (label, target, title)
     # tuples (its real output shape), so no network is touched.
     monkeypatch.setattr(rec_mod, "fetch_related",
-                        lambda doi, title, t, relations=None:
+                        lambda doi, title, t, relations=None, **k:
                         [(lbl, tgt, "") for lbl, tgt in (relations or [])])
     e = _entry("@article{Acharya2024, author={Acharya, R.}, title={QEC below threshold},\n"
                " journal={Nature}, year={2024}, url={https://www.nature.com/articles/x}}\n")
@@ -4192,6 +4333,51 @@ def test_related_works_checked_on_search_resolved_entry(monkeypatch):
     verify.pid_check(e, res, rep, 0, 1, offline=False)
     cor = [f for f in rep.findings if f.category == "related_work"]
     assert cor and "10.1038/s41586-026-10559-8" in cor[0].message
+
+
+def test_fetch_related_author_crosscheck_rejects_unrelated_erratum(monkeypatch):
+    # FP-1/FP-2: a title-search hit whose authors share NO author with the bib entry
+    # must be dropped, even when its title overlaps well. The author cross-check
+    # protects against errata for unrelated papers that share field vocabulary.
+    from veracite.sources import fetch_related
+    from veracite import sources as src_mod
+
+    # Simulate a Crossref title-search hit for "Erratum: Rydberg scattering ..."
+    # by a completely different author (Saha, not Karule).
+    fake_result = {"message": {"items": [{
+        "title": ["Erratum: Rydberg scattering cross-sections [Phys. Rev. A 41, 123]"],
+        "DOI": "10.1103/PhysRevA.99.099901",
+        "author": [{"family": "Saha", "given": "H."}],
+    }]}}
+    monkeypatch.setattr(src_mod, "http_get_json",
+                        lambda url, timeout: (fake_result, 200))
+
+    # entry_authors contains "karule" -- no overlap with "saha"
+    result = fetch_related("10.1103/PhysRevA.41.123",
+                           "Rydberg scattering cross-sections", timeout=1,
+                           entry_authors=["karule"])
+    assert result == [], "unrelated-author erratum must not be reported"
+
+    # Positive: same entry_authors but candidate author IS karule -> kept
+    fake_result["message"]["items"][0]["author"] = [{"family": "Karule", "given": "E."}]
+    result2 = fetch_related("10.1103/PhysRevA.41.123",
+                            "Rydberg scattering cross-sections", timeout=1,
+                            entry_authors=["karule"])
+    assert result2, "matching-author erratum must still be reported"
+
+
+def test_fetch_related_machine_links_bypass_author_check(monkeypatch):
+    # Machine-readable `relations` from the publisher are trusted unconditionally;
+    # they must NOT be filtered by the author cross-check.
+    from veracite.sources import fetch_related
+    from veracite import sources as src_mod
+
+    monkeypatch.setattr(src_mod, "http_get_json", lambda url, timeout: ({}, 200))
+    result = fetch_related("10.1/x", "Some Title", timeout=1,
+                           relations=[("correction", "10.1/erratum")],
+                           entry_authors=["differentauthor"])
+    assert any(t == "10.1/erratum" for _, t, _ in result), \
+        "machine-readable relation must bypass author cross-check"
 
 
 def test_url_doi_nudge_withdrawn_when_doi_available_fires(monkeypatch):

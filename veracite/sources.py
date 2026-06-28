@@ -522,7 +522,7 @@ def _classify_related_title(title):
     return None
 
 
-def fetch_related(doi, title, timeout, relations=None):
+def fetch_related(doi, title, timeout, relations=None, entry_authors=()):
     """Works related to this entry by an erratum/correction/comment/reply
     relationship. Returns (relationship, doi, title) tuples. Two methods:
 
@@ -536,11 +536,18 @@ def fetch_related(doi, title, timeout, relations=None):
        keep results whose title starts with a relationship phrase and shares most
        words with the entry.
 
+    `entry_authors` is a set of folded surname keys from the bib entry (used only
+    for the title-search path). A genuine erratum for paper X must share at least
+    one author with X; an unrelated paper whose title overlaps by accident will not.
+    Machine-readable `relations` links deposited by the publisher are trusted
+    unconditionally -- they do not go through the author check.
+
     Coverage is best-effort: recall depends on the publisher depositing the link
     or the related work ranking in the title-search results."""
     found = [(label, target, "") for label, target in (relations or [])]
 
     base_words = _title_words(strip_math(title))
+    entry_auth_set = set(entry_authors)
     if len(base_words) >= 4:   # too-short titles give noisy searches
         res, code = http_get_json(
             endpoint("crossref_search", query=clean_tex(title)), timeout)
@@ -553,8 +560,23 @@ def fetch_related(doi, title, timeout, relations=None):
                 continue
             # the related work embeds the original title; require strong overlap
             body = re.sub(r"\[.*?\]", "", re.sub(r"^[^:]*:", "", ct))
-            if len(_title_words(body) & base_words) >= 0.6 * len(base_words):
-                found.append((label, w["DOI"], ct))
+            if len(_title_words(body) & base_words) < 0.6 * len(base_words):
+                continue
+            # Author cross-check: at least one author of the candidate must match
+            # a bib author. This rejects unrelated papers whose titles overlap
+            # purely by shared field vocabulary (e.g. a "Rydberg scattering"
+            # erratum matching any "Rydberg scattering" paper). Only applied when
+            # entry_authors is non-empty; when it is absent the check is skipped
+            # (conservative -- we do not silently drop a genuine link).
+            if entry_auth_set:
+                cand_authors = {
+                    fold_surname(a.get("family") or a.get("name") or "")
+                    for a in (w.get("author") or [])
+                    if (a.get("family") or a.get("name") or "").strip()
+                }
+                if cand_authors and not (entry_auth_set & cand_authors):
+                    continue
+            found.append((label, w["DOI"], ct))
 
     seen, out = set(), []
     for label, target, ct in found:

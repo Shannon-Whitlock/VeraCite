@@ -187,8 +187,9 @@ def resolve_entry(e, rep, delay, timeout):
                 res.record, res.source = book, "isbn"
             compare_against_record(e, book, "isbn", rep)
         else:
-            rep.add(Severity.WARN, e, f"ISBN did not resolve to a book record: {isbn}",
-                    "record", category="metadata_mismatch")
+            rep.add(Severity.INFO, e, f"ISBN not found in Open Library or Google Books: {isbn} "
+                    f"(coverage gap -- does not mean the ISBN is wrong)",
+                    "record", category="isbn_unresolved")
 
     rec, source, code = None, None, None
     if crossref_doi:
@@ -438,8 +439,10 @@ def _check_related_works(e, res, doi, timeout, rep):
     published correction is silently missed."""
     cr = res.sources.get("crossref")
     relations = cr.get("relations") if cr else None
+    entry_authors = split_authors(e.get("author", ""))
     for label, target, ct in fetch_related(doi, e.get("title", ""), timeout,
-                                           relations=relations):
+                                           relations=relations,
+                                           entry_authors=entry_authors):
         note = f" -- {strip_tags(ct)[:70]}" if ct else ""
         if label in ("correction", "erratum", "addendum", "retraction", "publisher-note"):
             # Capitalize the label so an action-needed change to the cited work

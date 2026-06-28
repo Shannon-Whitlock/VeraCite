@@ -6,7 +6,7 @@ import argparse
 import os
 import sys
 
-from .checkpoint import (Checkpoint, compact, entry_checksum,
+from .checkpoint import (Checkpoint, compact,
                          entry_record, read_records, requested_phases,
                          write_records)
 from .config import HTTP_BACKEND, SETTINGS, VERSION, load_settings
@@ -324,9 +324,6 @@ def main(argv=None):
         chronological_order(cite_groups, by_key, rep)
 
     for i, e in enumerate(entries, 1):
-        # The source checksum stamps every record so a later run can tell whether the
-        # entry was edited (see Checkpoint.is_stale). Computed once per entry here.
-        checksum = entry_checksum(e.raw)
         # In --tex (citations) mode an UNCITED entry is reduced to a single header
         # line and skipped from ALL further analysis -- no offline rules, no online
         # lookup, no notes. (Its structural soundness is still covered by the
@@ -337,8 +334,8 @@ def main(argv=None):
         if uncited:
             rep.mark_uncited(e.key)
             phases_by_key[e.key] = set()
-            # Skip if already saved with a matching checksum (uncited status is stable).
-            if (checkpoint and not checkpoint.is_stale(e.key, checksum)
+            # Skip if already saved with matching source text (uncited status is stable).
+            if (checkpoint and not checkpoint.is_stale(e.key, e.raw)
                     and e.key in checkpoint._records_raw):
                 rec = checkpoint._records_raw[e.key]
                 records.append(rec)
@@ -349,7 +346,7 @@ def main(argv=None):
             rec = entry_record(
                 e.key, None, None, None, set(), [], verify=None,
                 entry_type=e.etype, line=e.lineno, uncited=True,
-                bib_year=e.get("year"), checksum=checksum)
+                bib_year=e.get("year"), bib_source=e.raw)
             records.append(rec)
             if args.json:
                 working_records[e.key] = rec
@@ -364,7 +361,7 @@ def main(argv=None):
         # not trustworthy -- ignore it for this entry so every requested phase is
         # recomputed from scratch. This is what makes "edit the .bib, re-run" re-verify
         # exactly the changed entries without naming them.
-        cp = None if (checkpoint and checkpoint.is_stale(e.key, checksum)) else checkpoint
+        cp = None if (checkpoint and checkpoint.is_stale(e.key, e.raw)) else checkpoint
 
         # Resume bookkeeping: which phases this entry still needs (only the
         # requested-and-missing ones), and which prior phases to carry forward
@@ -450,7 +447,7 @@ def main(argv=None):
             rep.issues_for(e.key), verify=rep.links.get(e.key),
             entry_type=e.etype, line=e.lineno,
             status_detail=rep.status_detail(e.key), bib_year=e.get("year"),
-            checksum=checksum)
+            bib_source=e.raw)
         records.append(rec)
         if args.json:
             working_records[e.key] = rec

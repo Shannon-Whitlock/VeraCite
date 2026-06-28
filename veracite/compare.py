@@ -164,9 +164,25 @@ def _title_punct_key(title):
     from the record's canonical form (e.g. 'open source' vs 'open-source'). De-TeX
     first so brace-protection ('{Yb}') is not counted as a difference; fold Unicode
     dash variants to ASCII so 'Camera-trapping' vs 'Camera‐trapping' (U+2010) is NOT a
-    deviation (same hyphen, different codepoint)."""
+    deviation (same hyphen, different codepoint).
+
+    Whitespace immediately touching ':' / ';' / ',' is collapsed away (not just
+    runs of whitespace generally) so a multi-line .bib field's embedded newline/tab
+    -- 'Colloquium\\n\\t\\t: Strongly...' -- compares equal to the record's single-line
+    'Colloquium: Strongly...'. This is wrapping noise, not an authored space, so it
+    must not register as the punctuation deviation this key exists to detect; a
+    genuine word-level spacing difference ('open source' vs 'open-source') has no
+    punctuation mark there at all and is unaffected.
+
+    BibTeX '--' (two ASCII hyphens) is the en-dash separator; it must compare equal
+    to the Unicode '–' (U+2013) that registries serve for the same character. After
+    _norm_dashes folds every Unicode dash to '-', a residual '--' is still two hyphens
+    rather than the single '-' the fold produced, so fold '--' -> '-' as a second step
+    so both representations of the en-dash produce the same key."""
     s = _norm_dashes(deaccent(clean_tex(title))).lower()
-    return re.sub(r"\s+", " ", s).strip()
+    s = re.sub(r"--+", "-", s)   # BibTeX en-dash == Unicode en-dash for comparison
+    s = re.sub(r"\s+", " ", s).strip()
+    return re.sub(r"\s*([:;,])\s*", r"\1", s)
 
 
 def _given_abbreviates(short, full):
@@ -391,7 +407,9 @@ def _compare_authors(e, rec, source, rep):
 
 def _load_journal_abbrev():
     """Load the curated abbreviation->full-title table. Both directions are
-    indexed on a depunctuated key so a lookup works whichever form the bib uses."""
+    indexed on a depunctuated key so a lookup works whichever form the bib uses.
+    Also builds a reverse index (canon_key -> frozenset of abbr_keys) used by
+    _journal_near_match to detect near-typos of known abbreviations."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "data", "journal_abbrev.json")
     pairs = {}
@@ -401,11 +419,40 @@ def _load_journal_abbrev():
     except (OSError, json.JSONDecodeError):
         pairs = {}
     canon = {}
+    reverse = {}   # canon_key -> set of all abbr/full keys that point to it
     for abbr, full in pairs.items():
         key = _journal_key(full)
-        canon[_journal_key(abbr)] = key
+        ak = _journal_key(abbr)
+        canon[ak] = key
         canon[key] = key
-    return canon
+        reverse.setdefault(key, set()).add(ak)
+        reverse.setdefault(key, set()).add(key)
+    return canon, {k: frozenset(v) for k, v in reverse.items()}
+
+
+def _edit_dist_le1(a, b):
+    """True if strings a and b differ by exactly one edit (insertion, deletion,
+    or substitution). Used for fuzzy journal-typo detection only."""
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:
+        return sum(x != y for x, y in zip(a, b)) == 1
+    long, short = (a, b) if la > lb else (b, a)
+    for i in range(len(long)):
+        if long[:i] + long[i + 1:] == short:
+            return True
+    return False
+
+
+def _journal_near_match(bib_key, rec_canon_key, reverse_index):
+    """Whether bib_key is a single-character typo of any known curated
+    abbreviation key for rec_canon_key. Returns the matching curated key,
+    or None. Used to enrich the journal-mismatch message ('possible typo')."""
+    for known_key in reverse_index.get(rec_canon_key, ()):
+        if _edit_dist_le1(bib_key, known_key):
+            return known_key
+    return None
 
 
 def _journal_key(name):
@@ -438,8 +485,22 @@ def _is_iso4_abbrev(abbrev, full):
     case-insensitive, the abbreviation words map IN ORDER and ONE-TO-ONE onto the
     full title's significant words (ISO-4 stopwords dropped), each abbreviation
     word equal to or a prefix of its full word. Every significant full-title word
-    must be accounted for, so 'Nature' does NOT abbreviate 'Nature Physics'."""
+    must be accounted for, so 'Nature' does NOT abbreviate 'Nature Physics'.
+
+    A valid ISO-4 abbreviation never contains stopword tokens ('of', 'and', 'the',
+    ...) as standalone words -- stopwords are omitted entirely in ISO-4, never kept.
+    An abbreviation like 'J. of Appl. Phys.' is therefore not a valid ISO-4 form
+    and must be rejected, even though 'of' appears in the full title."""
     aw = _journal_words(abbrev)
+    # Reject immediately if any multi-letter abbreviation token is itself a stopword.
+    # ISO-4 drops stopwords entirely; an abbreviation that retains one (e.g. 'J. of
+    # Appl. Phys.', 'Quantum Sci.and Technol.') is malformed and must not be accepted
+    # as equivalent to the correctly-abbreviated form. Single-letter tokens are always
+    # series designators ('J. Phys. A', 'Phys. Rev. B'), never function words, and
+    # are excluded from this check so a legitimate series letter is not mistaken for
+    # the stopword 'a'.
+    if any(len(w) > 1 and w in _ISO4_STOPWORDS for w in aw):
+        return False
     # A single letter the abbreviation keeps is a SERIES designator, not an article:
     # 'J. Phys. A' / 'Phys. Rev. B' keep the A/B that names the series, so 'Journal of
     # Physics A' must NOT drop that 'a' as the article 'a'. Don't stopword-strip a
@@ -449,10 +510,18 @@ def _is_iso4_abbrev(abbrev, full):
     fw = [w for w in _journal_words(full) if w not in kept]
     if not aw or len(aw) != len(fw):
         return False
-    return all(f.startswith(a) for a, f in zip(aw, fw))
+    for a, f in zip(aw, fw):
+        if not f.startswith(a):
+            return False
+        # ISO-4 never abbreviates a long word to fewer than 3 characters: 'ph' for
+        # 'physics' is not a legitimate truncation. Single-letter tokens are series
+        # designators ('Phys. Rev. B') and are exempt from this floor.
+        if len(a) == 2 and len(f) >= 5:
+            return False
+    return True
 
 
-_JOURNAL_CANON = _load_journal_abbrev()
+_JOURNAL_CANON, _JOURNAL_REVERSE = _load_journal_abbrev()
 
 
 def _journal_equiv(a, b):
@@ -474,6 +543,16 @@ def _journal_equiv(a, b):
         return ca == cb
     if (ca or ka) == (cb or kb):
         return True   # one side known to the table maps onto the other's key
+    # If one side is unknown to the curated table but is a single-character typo of
+    # a known curated entry for the OTHER journal, do not accept it as equivalent --
+    # it is a typo of a known abbreviation, not a valid alternative form. Crucially,
+    # this must run BEFORE the ISO-4 heuristic so that e.g. 'Nat. Phy.' (a typo of
+    # the curated 'Nat. Phys.') is not silently accepted by the prefix check.
+    other_canon = cb or kb
+    if ca is None and _journal_near_match(ka, other_canon, _JOURNAL_REVERSE):
+        return False
+    if cb is None and _journal_near_match(kb, ca or ka, _JOURNAL_REVERSE):
+        return False
     if _is_iso4_abbrev(a, b) or _is_iso4_abbrev(b, a):
         return True
     # A registry full name often carries a trailing ':'-subtitle and/or a parenthetical
@@ -1088,7 +1167,14 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     elif bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
         # Journal renders in the citation -> WARN, with the record's name suggested
         # (only when it is safe to paste verbatim -- an entity-laden name is withheld).
-        rep.add(Severity.WARN, e, f"[{source}] journal differs", "record",
+        # If the bib name is a single-character typo of a known curated abbreviation for
+        # this journal, say so explicitly ("possible typo") to make the finding actionable.
+        rec_canon_key = _JOURNAL_CANON.get(_journal_key(aj))
+        _typo = rec_canon_key and _journal_near_match(
+            _journal_key(bj), rec_canon_key, _JOURNAL_REVERSE)
+        _jmsg = (f"[{source}] journal differs (possible typo of a known abbreviation)"
+                 if _typo else f"[{source}] journal differs")
+        rep.add(Severity.WARN, e, _jmsg, "record",
                 category="metadata_mismatch", field="journal",
                 suggested={"field": "journal", "from": raw_journal,
                            "to": rec_journal_safe} if rec_journal_safe else None)
@@ -1166,6 +1252,17 @@ def compare_sources(e, records, rep, skip_year=False):
             # clearly unrelated (neither is a prefix/abbreviation of the other at all).
             # Two genuinely different journals between INSPIRE and Crossref still fire.
             ja, jb = ra.get("journal", ""), rb.get("journal", "")
+            # An ISBN-resolved record for a chapter-in-a-volume describes the
+            # CONTAINER book, not the chapter -- its 'journal' slot holds the book's
+            # publisher/series, not a comparable venue name. Crossref (or another
+            # source) instead resolves the cited CHAPTER and names the book as its
+            # container title. The two are different granularities of the same work,
+            # not a genuine cross-source conflict -- the container_granularity note
+            # already points at the real issue (check the entry type), so do not
+            # also raise a 'sources disagree on the journal' warning here.
+            isbn_pair = "isbn" in (sa, sb)
+            if isbn_pair and is_container_granularity(e):
+                continue
             if ja and jb and "arxiv" not in ja.lower() and "arxiv" not in jb.lower() \
                     and not _journal_equiv(ja, jb):
                 inspire_pair = "inspire" in (sa, sb)
@@ -1211,6 +1308,21 @@ def _suggest_parity(e, rec, source, rep, skip=()):
                           ("pages", rec.get("pages")),
                           ("year", str(rec.get("year") or ""))):
             if rval and not e.get(fld).strip() and fld not in skip:
+                # Special case: 'number' is absent but 'issue' carries the same value.
+                # biblatex's 'issue' field holds an issue *label/title* (e.g. "Special
+                # Issue on X"), not the numeric issue number -- that belongs in 'number'.
+                # When the bib uses 'issue' for the issue number and it matches what the
+                # record reports, suggest renaming the field rather than adding a new one.
+                if fld == "number":
+                    bib_issue = e.get("issue", "").strip()
+                    if bib_issue and _soft(bib_issue) == _soft(str(rval)):
+                        rep.add(Severity.INFO, e,
+                                f"[{source}] issue number {rval!r} is in the 'issue' field; "
+                                f"biblatex uses 'number' for the issue number -- rename the field",
+                                "record", category="parity_suggestion",
+                                field="number",
+                                suggested={"field": "number", "from": "issue", "to": "number"})
+                        continue
                 # Hand back the biblatex-canonical written form so the suggested value
                 # would not itself trip a style check -- a page range uses '--', not
                 # the registry's single hyphen ('920-926' -> '920--926').

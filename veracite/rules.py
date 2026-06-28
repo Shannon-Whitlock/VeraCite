@@ -270,8 +270,9 @@ def required_fields(e, rep):
                 if slot == ["title"] and _has_field(e, "booktitle") \
                         and "booktitle" not in legal_fields(e.etype):
                     msg += (f" ('booktitle' is present but is not a valid field for "
-                            f"@{e.etype} and means something else -- did you mean "
-                            f"'title'?)")
+                            f"@{e.etype} and means something else -- rename 'booktitle' "
+                            f"to 'title' if this is a whole book, or use "
+                            f"@inbook/@incollection if this is a chapter or contribution)")
                 rep.add(Severity.ERROR, e, msg, category="missing_field")
     # biber does not mandate a date, but a reference without one is hard to use --
     # flag it as a recommendation (warning), explicitly beyond the biber datamodel.
