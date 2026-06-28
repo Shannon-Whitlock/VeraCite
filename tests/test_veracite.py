@@ -2429,7 +2429,7 @@ def test_spacing_only_title_diff_is_a_note_not_strong_mismatch():
     assert fs, "the spacing difference is still surfaced"
     assert all(f.category == "title_style" for f in fs), \
         f"spacing-only diff must be a style note, got {[f.category for f in fs]}"
-    assert any((f.suggested or {}).get("to") == "New ammonia masers towards NGC 6334I"
+    assert any((f.suggested or {}).get("to") == "New ammonia masers towards {NGC} 6334I"
                for f in fs)
     # A genuinely different title still raises the strong-mismatch metadata WARN.
     fs2 = _title_findings("Completely different words entirely",

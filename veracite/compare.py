@@ -799,7 +799,11 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     # bib toward the record there would DELETE the symbol, a corrupting edit. In both
     # cases the finding stays (the difference is real) but without an auto-apply 'to'.
     bib_has_math = _bib_has_math(btitle)
-    safe_to = None if (rec_has_markup or bib_has_math) else atitle
+    if rec_has_markup or bib_has_math:
+        safe_to = None
+    else:
+        from .rules import add_title_brace_protection
+        safe_to = add_title_brace_protection(atitle)
     mangle_note = " (record title contains markup; verify the exact form manually)" \
         if rec_has_markup else (" (bib title has math the record may have dropped; "
         "verify manually)" if bib_has_math else "")

@@ -273,7 +273,7 @@ def test_ndjson_is_forward_compatible(tmp_path):
     entry record are ignored (not rejected), an unknown reserved (<...>) record kind
     is skipped rather than mis-loaded as a bib entry, and BOTH survive a compaction
     round-trip through this version (so an old tool never silently strips new data)."""
-    from veracite.checkpoint import compact, _read_records
+    from veracite.checkpoint import compact, read_records as _read_records
     out = tmp_path / "future.json"
     future_entry = {
         "key": "k", "veracite_version": "9.9.9", "checksum": "deadbeef",

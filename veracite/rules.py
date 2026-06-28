@@ -613,6 +613,65 @@ def _safe_at_title_start(term, occ_re, title):
     return not any(c.isupper() for c in term[1:])
 
 
+def add_title_brace_protection(title):
+    """Return `title` with brace-protection added around any term that title_caps
+    would flag: configured protected terms, all-caps acronyms, and CamelCase words.
+    Used to post-process a plain Crossref title before offering it as a suggested
+    replacement, so the suggestion never strips protection the bib already has.
+
+    Title Case titles are returned unchanged (the whole-title suppression in
+    title_caps applies: if every significant word is capitalised, there are no
+    standout proper nouns to protect individually)."""
+    if not title or _is_author_title_case(title):
+        return title
+    result = title
+    # Apply in reverse position order so earlier replacements don't shift offsets.
+    # Collect (start, end, replacement) for each unprotected term, then apply.
+    patches = []
+
+    def _already_braced(word, text):
+        return _protected_in_braces(word, text)
+
+    for hint, occ_re, _prot_re in _protected_term_patterns():
+        if occ_re.search(result) and not _already_braced(hint, result):
+            occ_re2 = re.compile(rf"(?<![\\{{])\b{re.escape(hint)}\b(?![}}])")
+            for m in occ_re2.finditer(result):
+                if not _safe_at_title_start(hint, occ_re2, result):
+                    patches.append((m.start(), m.end(), "{" + hint + "}"))
+
+    seen = set()
+    for m in _ACRONYM_RE.finditer(result):
+        word = m.group(1)
+        if word in ("A", "I") or word in seen:
+            continue
+        seen.add(word)
+        occ_re = re.compile(rf"\b{re.escape(word)}\b")
+        if not _safe_at_title_start(word, occ_re, result) and not _already_braced(word, result):
+            for m2 in occ_re.finditer(result):
+                patches.append((m2.start(), m2.end(), "{" + word + "}"))
+
+    seen_camel = set()
+    for m in _CAMELCASE_RE.finditer(result):
+        word = m.group(1)
+        if word in seen_camel:
+            continue
+        seen_camel.add(word)
+        if not _already_braced(word, result):
+            patches.append((m.start(), m.end(), "{" + word + "}"))
+
+    # Deduplicate overlapping patches (take the first) and apply in reverse order.
+    patches.sort(key=lambda p: p[0])
+    merged = []
+    last_end = -1
+    for start, end, repl in patches:
+        if start >= last_end:
+            merged.append((start, end, repl))
+            last_end = end
+    for start, end, repl in reversed(merged):
+        result = result[:start] + repl + result[end:]
+    return result
+
+
 @rule
 def title_caps(e, rep):
     """Flag proper nouns/acronyms in a title that are not brace-protected and so
