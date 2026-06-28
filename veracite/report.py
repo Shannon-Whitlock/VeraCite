@@ -76,6 +76,7 @@ class Finding:
     # suggestion to weigh, not an instruction -- the entry's content is the
     # author's to decide, so the report frames it as 'suggested', never 'fix'.
     suggested: dict = None
+    source_file: str = ""  # non-empty for findings whose line is in a .tex file
 
 
 # Each finding category rolls up into one of three groups, so a reader (or an LLM
@@ -334,8 +335,9 @@ SUPERSEDES = {
         "the record carries the canonical casing, so the offline 'looks miscased' "
         "guess is replaced by 'adopt the record's casing'"),
     "misplaced_field": ("static", "record layer",
-        "the resolved record carries the bib's 'number' as the issue, so the value "
-        "is not a misplaced year after all -- the offline guess is disproven"),
+        "once the entry resolves, either the record corroborates the bib's value "
+        "(not a misplacement) or a metadata_mismatch already gives the correct value "
+        "with a concrete suggested fix -- the structural diagnosis adds nothing"),
     "preprint_retitled": ("record", "preprint",
         "a published version of record now exists, so citing it (the "
         "preprint_superseded suggestion) is the one fix -- the 'renamed in a later "
@@ -383,12 +385,13 @@ class Report:
         self._uncited.add(key)
 
     def add(self, severity, target, message, layer="static", category="", field="",
-            suggested=None):
+            suggested=None, source_file=""):
         """Record a finding. `target` is an Entry (uses its key/line) or a
         (key, line) pair. `severity` is the check's default; when `category` is
         given, a matching entry in SETTINGS['severity'] overrides it. When `field`
         names a bib field, the finding points at that field's line. `suggested` is
-        an optional advisory edit dict ({"field", "from"?, "to"}) surfaced in JSON."""
+        an optional advisory edit dict ({"field", "from"?, "to"}) surfaced in JSON.
+        `source_file` names the .tex file when `line` refers to a tex location."""
         if hasattr(target, "key"):           # an Entry
             key = target.key
             line = target.field_line(field) if field else target.lineno
@@ -396,7 +399,8 @@ class Report:
             key, line = target
         severity = resolve_severity(severity, category)
         self.findings.append(
-            Finding(severity, key, line, message, layer, category, suggested))
+            Finding(severity, key, line, message, layer, category, suggested,
+                    source_file))
 
     def add_file(self, severity, message, layer="static", category=""):
         self.findings.append(Finding(resolve_severity(severity, category),
@@ -558,20 +562,35 @@ class Report:
             line += self._c(f"; {_oneline(rec['verify'])}", _DIM)
         return line
 
-    def _issue_line(self, d, with_key=False):
+    def _issue_line(self, d, with_key=False, key=""):
         """One formatted finding line from an issue dict (the `_finding_dict` shape),
         the record-based twin of `_finding_line`. Shape (stable for parsing):
           [TAG] category (line N): message (suggested: X -> Y)
         The advisory tail is derived from the issue's `suggested`, so the prose stays
-        in lock-step with the structured patch."""
+        in lock-step with the structured patch. An `action` tag is appended when it
+        adds information: [fix] when a suggested patch is attached, [check manually]
+        when no fix exists but action is needed -- so the reader knows at a glance
+        whether the finding is self-contained or requires a lookup."""
         sev = Severity[d.get("severity", "INFO")]
         tag, color, _ = SEVERITY_STYLE[sev]
         pad = " " * (len("[ERROR]") - len(tag) - 2)
         code = self._c(d.get("category") or d.get("layer", ""), _DIM)
-        loc = f" (line {d['line']})" if d.get("line") else ""
+        if d.get("source_file") and d.get("line"):
+            loc = f" ({d['source_file']} line {d['line']})"
+        elif d.get("line"):
+            loc = f" (line {d['line']})"
+        else:
+            loc = ""
+        action = d.get("action", "info")
+        if action == "fix":
+            action_tag = self._c(" [fix]", _GREEN)
+        elif action == "investigate":
+            action_tag = self._c(" [check manually]", SEVERITY_STYLE[Severity.WARN][1])
+        else:
+            action_tag = ""
         msg = _oneline(d.get("message", "") + format_suggested(d.get("suggested")))
-        keytag = (self._c(d.get("key", ""), _BOLD) + " ") if with_key else ""
-        return f"    {self._c(f'[{tag}]', color)}{pad} {keytag}{code}{loc}: {msg}"
+        keytag = (self._c(key, _BOLD) + " ") if with_key and key else ""
+        return f"    {self._c(f'[{tag}]', color)}{pad} {keytag}{code}{loc}:{action_tag} {msg}"
 
     def emit_remaining(self, out=None, skip_notes=False, only_key=None):
         """Print any findings not yet emitted by emit_entry -- the file-level group
@@ -592,7 +611,8 @@ class Report:
             return False
         print(self._c("file-level", _BOLD), file=out)
         for i in sorted(rest, key=lambda i: (self.findings[i].key, self.findings[i].severity)):
-            print(self._issue_line(self._finding_dict(self.findings[i]), with_key=True), file=out)
+            f = self.findings[i]
+            print(self._issue_line(self._finding_dict(f), with_key=True, key=f.key), file=out)
         print(file=out)
         return True
 
@@ -615,7 +635,7 @@ class Report:
         for sev in (Severity.ERROR, Severity.WARN, Severity.INFO):
             group = sorted((f for f in live if f.severity is sev), key=lambda f: f.key)
             for f in group:
-                line = self._issue_line(self._finding_dict(f), with_key=True)
+                line = self._issue_line(self._finding_dict(f), with_key=True, key=f.key)
                 if self.links.get(f.key) and f.layer in self._ONLINE_LAYERS:
                     line += self._c(f"; {_oneline(self.links[f.key])}", _DIM)
                 print(line, file=out)
@@ -754,11 +774,28 @@ class Report:
         return lines
 
     def _finding_dict(self, f):
+        # `action` classifies what the reader should do, independent of severity:
+        #   "fix"         -- a structured `suggested` patch is attached; a tool can
+        #                    apply it or a human can follow it directly.
+        #   "investigate" -- a real problem was detected but the right value is unknown
+        #                    or uncertain; human judgement required.
+        #   "info"        -- no action needed, or the action is fully described in the
+        #                    prose (e.g. a portability nudge the author may choose to act
+        #                    on or ignore).
+        has_fix = bool(f.suggested and f.suggested.get("to"))
+        if has_fix:
+            action = "fix"
+        elif f.severity in (Severity.ERROR, Severity.WARN):
+            action = "investigate"
+        else:
+            action = "info"
         d = {"severity": f.severity.name, "layer": f.layer,
              "category": f.category, "group": finding_group(f.category),
-             "key": f.key, "line": f.line, "message": f.message}
-        if f.suggested:
-            d["suggested"] = f.suggested
+             "line": f.line, "action": action,
+             "message": f.message,
+             "suggested": f.suggested if f.suggested else None}
+        if f.source_file:
+            d["source_file"] = f.source_file
         return d
 
     def issues_for(self, key):

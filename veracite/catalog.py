@@ -32,7 +32,11 @@ _DEF_RE = re.compile(r'^(\s*)(?:async\s+)?def (\w+)\s*\(')
 # findings to one level. Listed here -- the single source of truth, referenced by
 # config.py's comment and asserted by tests/test_catalog.py -- so a new
 # mixed-severity category is a conscious choice, not an accidental gap.
-INTENTIONALLY_UNPINNED = frozenset({"author_format"})
+INTENTIONALLY_UNPINNED = frozenset({
+    "author_format",      # mixed severities: note for ALL-CAPS, warn for glued 'and'
+    "record_unresolved",  # mixed severities: WARN for fetch failures and post-2005
+                          # no-id; INFO/note for pre-2005 no-id (no DOI expected)
+})
 
 
 def category_sources():

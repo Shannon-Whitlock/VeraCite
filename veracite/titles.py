@@ -64,6 +64,25 @@ def title_is_shortened(a, b):
     return long[:len(short)] == short
 
 
+def title_is_fragment(a, b):
+    """True if all words of the shorter title appear as a contiguous subsequence
+    inside the longer one. This is the case where a bib author truncated/paraphrased
+    a title by quoting only the descriptive tail (e.g. bib has 'Spectroscopy of
+    Single Trapped Molecules' while the full title is 'Quantum-nondemolition state
+    detection and spectroscopy of single trapped molecules'). Prefix/suffix are
+    already handled by title_is_shortened; this catches interior fragments.
+    Requires the shorter side to be at least 4 words to avoid short-phrase
+    false positives."""
+    aw, bw = title_key(a).split(), title_key(b).split()
+    if not aw or not bw or aw == bw:
+        return False
+    short, long = (aw, bw) if len(aw) <= len(bw) else (bw, aw)
+    if len(short) < 4:
+        return False
+    n = len(short)
+    return any(long[i:i + n] == short for i in range(len(long) - n + 1))
+
+
 def title_similar(a, b, threshold=0.90):
     """Whether two titles are the same work up to style: equal after
     normalization, one a clean prefix (dropped subtitle) of the other, or word-token

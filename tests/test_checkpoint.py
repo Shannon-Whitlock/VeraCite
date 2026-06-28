@@ -85,36 +85,34 @@ def _write_ndjson(path, records):
             fh.write(json.dumps(r) + "\n")
 
 
-def _bib_checksums():
-    """The source checksum of each entry in _BIB, keyed by citation key -- so a
-    hand-built fixture record stamps the SAME checksum the live run computes, and the
-    staleness check treats it as unmodified (otherwise a missing/mismatched checksum
-    forces a recompute, by design)."""
+def _bib_sources():
+    """The raw source text of each entry in _BIB, keyed by citation key -- so a
+    hand-built fixture record stamps the SAME bib_source the live run stores, and the
+    staleness check treats it as unmodified."""
     from veracite.parser import parse_bib
-    from veracite.checkpoint import entry_checksum
     entries, _ = parse_bib(_BIB)
-    return {e.key: entry_checksum(e.raw) for e in entries}
+    return {e.key: e.raw for e in entries}
 
 
-_CHECKSUMS = _bib_checksums()
+_BIB_SOURCES = _bib_sources()
 
 
 def _entry_line(key, phases, status=None, conf=None, doi=None, rec=None,
-                checksum=...):
+                bib_source=...):
     """A per-entry NDJSON record for test fixtures, matching checkpoint.entry_record.
-    Stamps the checksum of `key` in _BIB by default so the entry reads as unmodified;
-    pass checksum=None to simulate an older (pre-checksum) record."""
+    Stamps the bib_source of `key` in _BIB by default so the entry reads as unmodified;
+    pass bib_source=None to simulate a record with no source text."""
     from veracite.checkpoint import PHASES
-    if checksum is ...:
-        checksum = _CHECKSUMS.get(key)
+    if bib_source is ...:
+        bib_source = _BIB_SOURCES.get(key)
     rec_out = {"key": key, "phases": {p: (p in phases) for p in PHASES},
                "status": status, "confidence": conf,
                "verify": f"https://doi.org/{doi}" if doi else None,
                "identifiers": {"doi": doi, "arxiv": None, "isbn": None},
                "sources": ["crossref"] if status else [],
                "canonical_record": rec, "issues": []}
-    if checksum:
-        rec_out["checksum"] = checksum
+    if bib_source:
+        rec_out["bib_source"] = bib_source
     return rec_out
 
 
@@ -212,8 +210,8 @@ def stub_llm_fails(monkeypatch):
     monkeypatch.setattr(cli, "resolve_provider", lambda name, rep: failing_provider)
     monkeypatch.setattr(cli, "preflight_provider", lambda *a, **k: None)
     monkeypatch.setattr(cli, "find_citation_contexts",
-                        lambda files, base: {"a": [{"file": "m.tex", "context": "c"}],
-                                             "b": [{"file": "m.tex", "context": "c"}]})
+                        lambda files, base: {"a": [{"file": "m.tex", "line": 1, "context": "c"}],
+                                             "b": [{"file": "m.tex", "line": 1, "context": "c"}]})
     return calls
 
 
@@ -252,7 +250,7 @@ def test_edited_entry_is_recomputed_on_resume(tmp_path, stub_online):
     # 'a' unchanged -> reused (no new resolve); 'b' edited -> recomputed (one resolve).
     assert stub_online["crossref"] == 3
     refs, _ = _refs_by_key(out)
-    assert refs["b"]["checksum"] != _CHECKSUMS["b"]                # 'b' restamped
+    assert refs["b"]["bib_source"] != _BIB_SOURCES["b"]           # 'b' restamped
 
 
 def test_complete_resume_is_byte_identical(tmp_path, stub_online):
@@ -396,7 +394,7 @@ def stub_llm(monkeypatch):
 
     def fake_provider(prompt, model, timeout):
         calls["n"] += 1
-        return '{"relevance": 5, "wrong_paper": false}'
+        return '[{"relevance": 5, "wrong_paper": false}]'
 
     monkeypatch.setitem(llm.LLM_PROVIDERS, "claude", fake_provider)
     # The CLI imported preflight_provider by name, so patch the CLI's reference
@@ -405,8 +403,8 @@ def stub_llm(monkeypatch):
     monkeypatch.setattr(cli, "preflight_provider", lambda *a, **k: None)
     # Pretend both keys are cited with some surrounding context.
     monkeypatch.setattr(cli, "find_citation_contexts",
-                        lambda files, base: {"a": [{"file": "m.tex", "context": "ctx a"}],
-                                             "b": [{"file": "m.tex", "context": "ctx b"}]})
+                        lambda files, base: {"a": [{"file": "m.tex", "line": 1, "context": "ctx a"}],
+                                             "b": [{"file": "m.tex", "line": 1, "context": "ctx b"}]})
     monkeypatch.setattr(cli, "find_citation_groups", lambda files: [])
     return calls
 

@@ -31,8 +31,15 @@ def analyze_entry(e, res_store, status_store, rep, *, delay, timeout,
     # root cause (the entry has no identifier) and one fix (add a DOI/ISBN), so emitting
     # both is redundant. pid_missing is the more specific, actionable message, so it
     # wins; record_unresolved still stands alone (a dead/unresolvable id, no pid_missing).
+    # Severity is year-gated: a post-2005 entry without a DOI is a real gap worth
+    # flagging (WARN); a pre-2005 work may never have received a DOI, so the same
+    # fact is a note -- informational, not a problem to fix.
     if res.no_id and res.record is None and not res.pid_missing:
-        rep.add(Severity.INFO, e, "no DOI/arXiv id to verify against", "record",
+        bib_year_str = e.get("year", "").strip()
+        bib_year = int(bib_year_str[:4]) if bib_year_str[:4].isdigit() else None
+        pre_doi = bib_year is not None and bib_year < 2005
+        sev = Severity.INFO if pre_doi else Severity.WARN
+        rep.add(sev, e, "no DOI/arXiv id to verify against", "record",
                 category="record_unresolved")
     status_store[e.key] = classify(e, res, rep)                     # Layer 3
     if res.record is not None and provider is not None \

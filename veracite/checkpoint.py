@@ -5,7 +5,7 @@ large or interrupted job is resumable and can be completed in phases
 The on-disk format is **NDJSON**: one self-contained JSON record per BIBLIOGRAPHY
 ENTRY, in bib order, exactly one line per entry:
 
-    {"key": "k0", "checksum": "...", "phases": {...}, "status": "VERIFIED", ...}
+    {"key": "k0", "bib_source": "@article{k0, ...}", "phases": {...}, "status": "VERIFIED", ...}
     {"key": "k1", ...}
 
 There are NO aggregate records (summary, file-level findings) -- those are
@@ -21,12 +21,11 @@ re-derived each run.
 - This is O(N) per changed entry; at online-lookup speeds (seconds per entry) the
   overhead is negligible up to ~10 000 entries.
 
-Staleness: each record stores a `checksum` of the entry's raw source text.  On a
-resumed run an entry whose current checksum differs from the saved one is treated
+Staleness: each record stores `bib_source` (the entry's raw source text).  On a
+resumed run an entry whose current source text differs from the saved one is treated
 as MODIFIED -- all its cached phases are discarded and it is recomputed.
 """
 
-import hashlib
 import json
 import os
 
@@ -36,11 +35,6 @@ from .report import Finding, Severity
 
 # The phase order, weakest first.
 PHASES = ("offline", "online", "llm")
-
-
-def entry_checksum(raw):
-    """A stable digest of an entry's raw source text, used to detect edits."""
-    return hashlib.sha256((raw or "").encode("utf-8")).hexdigest()[:16]
 
 
 # Which phase produces a finding, by category.  Anything not listed is 'offline'.
@@ -92,22 +86,22 @@ def canonical_record(rec, conf):
 
 def entry_record(key, res, status, conf, phases, issues, verify=None,
                  entry_type=None, line=0, uncited=False, status_detail="",
-                 bib_year=None, checksum=None):
+                 bib_year=None, bib_source=None):
     """Build the persisted record for one bib entry."""
     from .config import VERSION
     rec = (res.record if res else None) or {}
     return {
         "key": key,
         "veracite_version": VERSION,
-        **({"checksum": checksum} if checksum else {}),
         "entry_type": entry_type,
         "line": line,
         **({"bib_year": bib_year} if bib_year else {}),
         "uncited": uncited,
+        **({"bib_source": bib_source} if bib_source else {}),
         "phases": {p: (p in phases) for p in PHASES},
         "status": status,
         "confidence": conf,
-        "status_detail": status_detail or "",
+        **({"status_detail": status_detail} if status_detail else {}),
         "verify": verify,
         "identifiers": {"doi": (res.doi if res else "") or None,
                         "arxiv": (res.arxiv_id if res else "") or None,
@@ -297,7 +291,7 @@ class Checkpoint:
         self.phases_by_key = {}
         self._online_error = set()
         self._llm_error = set()
-        self._checksums = {}
+        self._bib_sources = {}
         self._findings_by_key = {}
         self._records_raw = {}
         self.loaded = False
@@ -329,8 +323,8 @@ class Checkpoint:
                 self._online_error.add(key)
             if rec.get("llm_error"):
                 self._llm_error.add(key)
-            if rec.get("checksum"):
-                self._checksums[key] = rec["checksum"]
+            if rec.get("bib_source"):
+                self._bib_sources[key] = rec["bib_source"]
             self._records_raw[key] = rec
             self.results[key] = _resolution_from_record(rec)
             self.statuses[key] = (rec.get("status"),
@@ -340,11 +334,11 @@ class Checkpoint:
             if rec.get("verify"):
                 self.links[key] = rec["verify"]
 
-    def is_stale(self, key, checksum):
-        """True if the saved record cannot be trusted: checksum differs or absent."""
+    def is_stale(self, key, raw):
+        """True if the saved record cannot be trusted: source text differs or absent."""
         if key not in self.phases_by_key:
             return False
-        return self._checksums.get(key) != checksum
+        return self._bib_sources.get(key) != raw
 
     def has(self, key, phase):
         return phase in self.phases_by_key.get(key, set())
@@ -374,7 +368,8 @@ def _finding_from_dict(fd, key):
     return Finding(severity=sev, key=key,
                    line=int(fd.get("line") or 0), message=fd.get("message", ""),
                    layer=fd.get("layer", "static"), category=fd.get("category", ""),
-                   suggested=fd.get("suggested"))
+                   suggested=fd.get("suggested"),
+                   source_file=fd.get("source_file", ""))
 
 
 def _resolution_from_record(rec):

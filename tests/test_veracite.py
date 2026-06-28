@@ -508,8 +508,8 @@ def test_field_line_points_at_field():
 # --- per-entry analysis pipeline (network-free: no doi/arxiv/url short-circuits) ---
 
 _NO_ID_BIB = (
-    "@article{cited1,\n  author = {A. One},\n  title = {T},\n  year = {2000}\n}\n"
-    "@article{uncited1,\n  author = {B. Two},\n  title = {U},\n  year = {2001}\n}\n"
+    "@article{cited1,\n  author = {A. One},\n  title = {T},\n  year = {2020}\n}\n"
+    "@article{uncited1,\n  author = {B. Two},\n  title = {U},\n  year = {2021}\n}\n"
 )
 
 
@@ -1177,9 +1177,13 @@ class _StubEntry:
 def _rate(payload, abstract="an abstract"):
     from veracite import llm
     rep = Report(color=False)
-    provider = lambda prompt, model, timeout: payload
+    # Wrap a bare object payload as a single-element array (new per-occurrence schema).
+    if payload.strip().startswith("{"):
+        provider = lambda prompt, model, timeout: f"[{payload}]"
+    else:
+        provider = lambda prompt, model, timeout: payload
     llm.rate_one(_StubEntry(), {"abstract": abstract},
-                 [{"file": "m.tex", "context": "c"}], rep, provider, "model")
+                 [{"file": "m.tex", "line": 5, "context": "c"}], rep, provider, "model")
     return rep
 
 
@@ -1231,7 +1235,7 @@ def test_prompt_lists_cocited_group():
         key = "k"
         def get(self, f, d=""):
             return {"title": "Group Mate Title", "author": "A", "year": "2020"}.get(f, d)
-    ctx = [{"file": "m.tex", "context": "cited here.", "group": ["sib1"]}]
+    ctx = [{"file": "m.tex", "line": 5, "context": "cited here.", "group": ["sib1"]}]
     prompt = llm.build_rating_prompt(_E(), {"abstract": "abs"}, ctx,
                                      by_key={"sib1": _E()})
     assert "co-cited" in prompt and "sib1" in prompt
@@ -1315,7 +1319,7 @@ class _YE:
 def test_non_chronological_group_is_noted():
     by_key = {"a": _YE("a", "2019"), "b": _YE("b", "2005")}
     rep = Report(color=False)
-    verify.chronological_order([["a", "b"]], by_key, rep)
+    verify.chronological_order([(["a", "b"], "main.tex", 5)], by_key, rep)
     assert any(f.category == "citation_order" and f.severity is Severity.INFO
                for f in rep.findings)
 
@@ -1323,14 +1327,14 @@ def test_non_chronological_group_is_noted():
 def test_chronological_group_not_noted():
     by_key = {"a": _YE("a", "2005"), "b": _YE("b", "2019")}
     rep = Report(color=False)
-    verify.chronological_order([["a", "b"]], by_key, rep)
+    verify.chronological_order([(["a", "b"], "main.tex", 5)], by_key, rep)
     assert rep.findings == []
 
 
 def test_chronological_skipped_when_year_unknown():
     by_key = {"a": _YE("a", ""), "b": _YE("b", "2019")}
     rep = Report(color=False)
-    verify.chronological_order([["a", "b"]], by_key, rep)
+    verify.chronological_order([(["a", "b"], "main.tex", 5)], by_key, rep)
     assert rep.findings == []
 
 
@@ -1338,7 +1342,10 @@ def test_find_citation_groups_only_multi_key():
     from veracite import llm
     files = [("p.tex", r"text \cite{a,b,c} and \cite{solo} and \cite{a, b, c} more")]
     groups = llm.find_citation_groups(files)
-    assert groups == [["a", "b", "c"]]   # solo excluded; duplicate group deduped
+    # solo excluded; duplicate group deduped; each element is (keys, path, lineno)
+    assert len(groups) == 1
+    assert groups[0][0] == ["a", "b", "c"]
+    assert groups[0][1] == "p.tex"
 
 
 # --- LLM context window (only the citation sentences) ----------------------
@@ -1631,12 +1638,34 @@ def _missing(bib):
 
 
 def test_biber_book_requires_author_collection_requires_editor():
-    # biber's datamodel: @book mandates author (an edited volume is @collection,
-    # which mandates editor). We follow biber exactly.
-    assert any("author" in m for m in
-               _missing("@book{k, editor={A. B}, title={T}, year={2020}, publisher={P}}"))
+    # biber's datamodel: @book mandates author; an edited volume with no overall
+    # author (only an editor) is biblatex's @collection, which mandates editor
+    # instead. So @book+editor-only is not a missing_field ERROR -- it is an
+    # entrytype_suggestion pointing at @collection (see
+    # test_book_editor_only_suggests_collection_not_missing_author_error).
+    assert _missing("@book{k, editor={A. B}, title={T}, year={2020}, publisher={P}}") == []
     assert _missing("@book{k, author={A. B}, title={T}, year={2020}}") == []
     assert _missing("@collection{k, editor={A. B}, title={T}, year={2020}}") == []
+
+
+def test_book_missing_title_with_booktitle_present_gets_cross_reference_hint():
+    # 'booktitle' means "title of the CONTAINING work" -- not a 'title' alias, and
+    # not legal on a standalone @book. A @book with booktitle but no title is a
+    # likely field-name mix-up (someone copied an @incollection-style entry); the
+    # missing_field message should name the cause, not just the absence.
+    msgs = _missing("@book{k, author={A, B}, booktitle={T}, year={2020}, "
+                     "publisher={P}}")
+    assert any("title" in m and "booktitle" in m and "did you mean" in m
+               for m in msgs)
+
+    # A real @incollection legitimately uses BOTH title (chapter) and booktitle
+    # (volume) -- booktitle IS legal there, so this hint must never fire on it.
+    assert _missing("@incollection{k, author={A}, title={T}, booktitle={B}, "
+                     "editor={E}, year={2019}}") == []
+
+    # @book with title and no booktitle: plain case, no hint text to attach.
+    assert _missing("@book{k, author={A, B}, title={T}, year={2020}, "
+                     "publisher={P}}") == []
 
 
 def test_booklet_accepts_author_or_editor():
@@ -1649,6 +1678,36 @@ def test_title_only_types_need_no_author():
     # biber mandates only a title for these standalone types.
     for t in ("manual", "dataset", "software", "misc"):
         assert _missing(f"@{t}{{k, title={{T}}, year={{2020}}}}") == [], t
+
+
+def test_misc_and_software_missing_title_is_a_note_not_an_error():
+    # biblatex's formal datamodel mandates 'title' for @misc/@software, but @misc
+    # is explicitly biblatex's catch-all/fallback type, and the dominant physics
+    # .bst convention (e.g. APS RevTeX's FUNCTION{misc}) renders the title with a
+    # plain 'output', not 'output.check' -- real .bst processing does not error on
+    # a titleless @misc. Common legitimate idioms have no natural title:
+    #   - a personal communication:  @misc{k, author=.., howpublished={personal
+    #     communication}}
+    #   - a "see Supplementary Material" pointer: @misc{k, note={See Supplementary
+    #     Material}}
+    # So this stays an advisory note (datamodel_recommended/INFO), never an ERROR
+    # that calls a common, valid idiom broken.
+    for bib in (
+        '@misc{k, author={Plessow, P. N.}, howpublished={personal communication}}',
+        '@misc{k, note={See Supplementary Material}}',
+        '@software{k, author={A}, year={2020}, url={https://x.com}}',
+    ):
+        entries, _ = parse_bib(bib)
+        rep = Report(color=False)
+        run_static(entries, rep)
+        assert not [f for f in rep.findings if f.category == "missing_field"], bib
+        rec = [f for f in rep.findings
+               if f.category == "datamodel_recommended" and "title" in f.message]
+        assert rec and all(f.severity is Severity.INFO for f in rec), bib
+
+    # Control: @online still gets the real ERROR/locator check unaffected (only
+    # misc/software are demoted).
+    assert any("url" in m for m in _missing("@online{k, title={T}}"))
 
 
 def test_online_requires_a_locator_per_biber():
@@ -1783,6 +1842,37 @@ def test_record_start_page_only_does_not_truncate_bib_range():
                                   "crossref", rep2)
     assert any(f.suggested and f.suggested.get("field") == "pages"
                for f in rep2.findings)
+
+
+def test_degenerate_record_range_same_single_page_not_flagged():
+    # Crossref sometimes stores a single-page article as 'NNN-NNN' instead of 'NNN'.
+    # Bib has the plain single page -- this is the SAME page, not a mismatch, so no
+    # 'pages differ' finding and no suggestion to rewrite '681' as '681--681'.
+    e = _entry("@article{k, author={A, B}, title={T}, year={2014}, journal={J}, "
+               "pages={681}, doi={10.1/x}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, {"title": "T", "year": 2014, "pages": "681-681"},
+                                  "crossref", rep)
+    assert not any(f.suggested and f.suggested.get("field") == "pages"
+                   for f in rep.findings), "single page vs degenerate 'N-N' record range is not a mismatch"
+
+    # Reverse: bib has the degenerate range, record has the plain single page -- same page.
+    e2 = _entry("@article{k, author={A, B}, title={T}, year={2014}, journal={J}, "
+                "pages={681--681}, doi={10.1/x}}\n")
+    rep2 = Report(color=False)
+    record.compare_against_record(e2, {"title": "T", "year": 2014, "pages": "681"},
+                                  "crossref", rep2)
+    assert not any(f.suggested and f.suggested.get("field") == "pages"
+                   for f in rep2.findings)
+
+    # Genuine range mismatch must still fire (not over-suppressed by the new check).
+    e3 = _entry("@article{k, author={A, B}, title={T}, year={2014}, journal={J}, "
+                "pages={680}, doi={10.1/x}}\n")
+    rep3 = Report(color=False)
+    record.compare_against_record(e3, {"title": "T", "year": 2014, "pages": "681-681"},
+                                  "crossref", rep3)
+    assert any(f.suggested and f.suggested.get("field") == "pages"
+               for f in rep3.findings), "different start pages must still be flagged"
 
 
 def test_mangled_markup_title_suggestion_withheld():
@@ -1988,6 +2078,35 @@ def test_misplaced_field_journal_and_number():
     assert not _mf("@article{k, author={A}, title={T}, journal={J}, number={9999}, year={2018}}\n")
 
 
+def test_date_string_in_number_field_flagged():
+    # A date string in 'number' or 'issue' (e.g. 'December 2019', '2019-12',
+    # '12/2019') is a manuscript date or cover-date label that belongs to a
+    # different field -- definitely not a valid journal issue number. The
+    # Lin2020 / Nature example: number={December 2019}.
+    from veracite.report import Severity
+
+    def _mf(bib):
+        entries, _ = parse_bib(bib)
+        rep = Report(color=False)
+        run_static(entries, rep)
+        return [f for f in rep.findings if f.category == "misplaced_field"
+                and "date string" in f.message]
+
+    base = "@article{{k, author={{A}}, title={{T}}, journal={{J}}, year={{2020}}, number={{{val}}}}}\n"
+    for val in ("December 2019", "Dec 2019", "Dec. 2019",
+                "2019-12", "12/2019", "May 20, 2020", "May"):
+        assert _mf(base.format(val=val)), f"should flag: number={{{val}}}"
+
+    # Controls: valid issue values must not fire.
+    for val in ("7808", "3", "3S", "031320", "S1", "1-2", "3 May"):
+        assert not _mf(base.format(val=val)), f"must not flag: number={{{val}}}"
+
+    # Severity is WARN (actionable -- remove or move the date).
+    findings = _mf(base.format(val="December 2019"))
+    assert findings[0].severity is Severity.WARN
+    assert findings[0].suggested is None  # no suggested value -- correct action is delete
+
+
 def test_misplaced_number_year_withdrawn_when_record_corroborates_issue():
     # Even a genuinely year-SHAPED issue (number=2018) is not a misplaced year if the
     # resolved record carries that very value as the issue -- the record is ground
@@ -2042,6 +2161,46 @@ def test_incollection_missing_editor_is_a_note_not_an_error():
     assert not [f for f in rep.findings if f.category == "missing_field"]
 
 
+def test_book_editor_only_suggests_collection_not_missing_author_error():
+    # biblatex's @collection is the dedicated type for an edited volume with no
+    # overall author (required: editor, title, year/date) -- e.g. a multi-author
+    # edited book like "Optical Magnetometry" (Budker/Kimball/Mark, eds). A @book
+    # with editor but no author should point at the real defect (wrong type), not
+    # a missing_field ERROR that calls a legitimately-typed-wrong entry broken.
+    entries, _ = parse_bib(
+        "@book{c, editor={Budker, D. and Kimball, D. F.}, "
+        "title={Optical Magnetometry}, year={2013}, publisher={Cambridge}}")
+    rep = Report(color=False)
+    run_static(entries, rep)
+    sugg = [f for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert any("collection" in f.message for f in sugg)
+    assert all(f.severity is Severity.WARN for f in sugg)
+    assert not [f for f in rep.findings if f.category == "missing_field"]
+
+    # mvbook (multi-volume) gets the same treatment, pointing at @mvcollection too.
+    entries2, _ = parse_bib(
+        "@mvbook{c, editor={A, B}, title={T}, year={2020}, publisher={P}}")
+    rep2 = Report(color=False)
+    run_static(entries2, rep2)
+    assert any(f.category == "entrytype_suggestion" for f in rep2.findings)
+    assert not [f for f in rep2.findings if f.category == "missing_field"]
+
+    # A book with NEITHER author nor editor is genuinely broken -- still an ERROR.
+    entries3, _ = parse_bib("@book{c, title={T}, year={2020}, publisher={P}}")
+    rep3 = Report(color=False)
+    run_static(entries3, rep3)
+    assert any(f.category == "missing_field" and "author" in f.message
+               for f in rep3.findings)
+
+    # A book WITH an author is unaffected (no finding either way).
+    entries4, _ = parse_bib(
+        "@book{c, author={A, B}, title={T}, year={2020}, publisher={P}}")
+    rep4 = Report(color=False)
+    run_static(entries4, rep4)
+    assert not [f for f in rep4.findings
+                if f.category in ("missing_field", "entrytype_suggestion")]
+
+
 def test_phdthesis_with_explicit_type_has_no_recommendation():
     # Supplying 'type' explicitly is also fine -- still no finding.
     entries, _ = parse_bib("@phdthesis{t, author={A}, title={T}, type={PhD thesis}, "
@@ -2058,6 +2217,11 @@ def test_historical_physrev_journal_names_match():
     assert _journal_equiv("Phys. Rev. B Condens. Matter", "Physical Review B")
     assert _journal_equiv("Phys. Rev. B: Condens. Matter Mater. Phys.", "Physical Review B")
     assert _journal_equiv("Phys. Rev. D Part. Fields", "Physical Review D")
+    # INSPIRE uses 'Tech.' where the journal's own style is 'Technol.' -- both
+    # are known aliases and should compare equivalent (not a source_conflict).
+    assert _journal_equiv(
+        "J.Res.Natl.Inst.Stand.Tech.",
+        "Journal of Research of the National Institute of Standards and Technology")
     # but distinct series must still differ (no over-matching)
     assert not _journal_equiv("Physical Review B", "Physical Review A")
 
@@ -2296,6 +2460,24 @@ def test_markup_strip_unmerges_words_but_keeps_isotopes():
     fs = _title_findings("GLIMPSE. I. An SIRTF Legacy Project to Map the Inner Galaxy",
                          "GLIMPSE. I. An<i>SIRTF</i>Legacy Project to Map the Inner Galaxy")
     assert not fs, f"markup-merged title wrongly flagged: {[f.message for f in fs]}"
+
+
+def test_less_greater_encoded_bib_title_not_flagged():
+    # Some bib-export tools encode Crossref's HTML titles into .bib with
+    # \less/\greater as TeX equivalents of < >, producing titles like
+    #   $\less$i$\greater$Ab initio$\less$/i$\greater$ study...
+    # clean_tex must map \less-><, \greater-> before macro stripping so the
+    # resulting <i>...</i> tags are visible to _strip_markup / title_key.
+    # When the bib and Crossref record encode the same title (one via \less/\greater,
+    # the other via <i>/<sup>), no mismatch should fire.
+    bib = (r'$\less$i$\greater$Ab initio$\less$/i$\greater$study on vibrational '
+           r'dipole moments of {XH}$\less$sup$\greater$$\mathplus$$\less$/sup$\greater$'
+           r'molecular ions: X =$\less$sup$\greater$24$\less$/sup$\greater$Mg')
+    crossref = ('<i>Ab initio</i> study on vibrational dipole moments of XH'
+                '<sup>+</sup>molecular ions: X =<sup>24</sup>Mg')
+    fs = _title_findings(bib, crossref)
+    assert not any(f.category == "metadata_mismatch" for f in fs), \
+        f"\\less/\\greater encoded title wrongly flagged: {[f.message for f in fs]}"
 
 
 def test_record_markup_never_leaks_into_title_suggestion():
@@ -2938,6 +3120,50 @@ def test_no_pid_entry_is_one_warning_not_doubled(monkeypatch):
     assert cats.count("record_unresolved") == 0
 
 
+def test_pre2005_no_id_entry_is_note_not_warn(monkeypatch):
+    # A pre-2005 article with no identifier (e.g. a 1985 Soviet journal article)
+    # is simply unverifiable -- DOI-era retroactive coverage is sparse for older
+    # Eastern-bloc journals. record_unresolved should fire at INFO/note severity
+    # (not WARN), since there is no actionable fix: adding a DOI that doesn't exist
+    # is not possible. A post-2005 no-id entry gets WARN (DOI strongly expected).
+    from veracite import record, pipeline
+    e = _entry("@article{k, author={Yudson, V.I.}, title={The dynamics of integrable "
+               "quantum-systems}, journal={Zh. Eksp. Teor. Fiz.}, year={1985}, "
+               "volume={88}, number={5}, pages={1757--1770}}\n")
+    monkeypatch.setattr(pipeline, "rate_one", lambda *a, **k: None)
+    # Prevent a live network call -- simulate no record found, no DOI found.
+    monkeypatch.setattr(record, "fetch_crossref", lambda doi, t: (None, 404))
+    rep = Report(color=False)
+    pipeline.analyze_entry(e, {}, {}, rep, delay=0, timeout=5, provider=None, model=None, contexts=None)
+    unresolved = [f for f in rep.findings if f.category == "record_unresolved"]
+    assert unresolved, "pre-2005 no-id should still emit record_unresolved"
+    assert all(f.severity is Severity.INFO for f in unresolved), \
+        "pre-2005 no-id record_unresolved should be INFO/note, not WARN"
+    assert not any(f.category == "pid_missing" for f in rep.findings), \
+        "pre-2005 article should not get pid_missing"
+
+
+def test_misc_no_identifier_never_fires_record_unresolved(monkeypatch):
+    # @misc is the catch-all type for works that legitimately carry no stable
+    # identifier (personal communications, grey literature, supplementary pointers).
+    # A bare @misc with no doi/arxiv must NOT produce "no DOI/arXiv id to verify
+    # against" -- that would fire actionlessly on every plain @misc entry.
+    from veracite import record, pipeline
+    for bib in (
+        "@misc{k, author={Smith, J.}, howpublished={personal communication}, year={2024}}",
+        "@misc{k, note={See Supplementary Material}}",
+        "@misc{k, author={Smith, J.}, title={Some Report}, year={2020}, url={https://example.com}}",
+    ):
+        monkeypatch.setattr(pipeline, "rate_one", lambda *a, **k: None)
+        e = _entry(bib)
+        rep = Report(color=False)
+        pipeline.analyze_entry(e, {}, {}, rep, delay=0, timeout=5, provider=None, model=None, contexts=None)
+        assert not any(f.category == "record_unresolved" and "no DOI" in f.message
+                       for f in rep.findings), f"@misc should not fire record_unresolved: {bib}"
+        assert not any(f.category == "pid_missing" for f in rep.findings), \
+            f"@misc should not fire pid_missing: {bib}"
+
+
 def test_arxiv_only_is_sufficient_pid():
     rep = Report(color=False)
     verify.pid_check(_YEnt(2020), _res(arxiv_id="2103.16313", record={"title": "T"}),
@@ -3150,6 +3376,89 @@ def test_search_doi_accepts_matching_journal(monkeypatch):
     monkeypatch.setattr("veracite.http.http_get_json",
                         lambda url, t: ({"message": {"items": [hit]}}, 200))
     assert verify._search_doi(_SE(), 5) == "10.1111/right"
+
+
+def test_search_doi_fragment_title_accepted_with_both_journal_and_year(monkeypatch):
+    # A bib title that is a contiguous fragment of the Crossref title (e.g. the
+    # Sinhal2020 case: bib='Spectroscopy of Single Trapped Molecules', real='Quantum-
+    # nondemolition state detection and spectroscopy of single trapped molecules') is
+    # accepted ONLY when BOTH journal and year corroborate -- a fragment alone is
+    # too weak (the phrase could appear in many titles).
+    from veracite import verify
+
+    real_title = ("Quantum-nondemolition state detection and "
+                  "spectroscopy of single trapped molecules")
+    bib_title  = "Spectroscopy of Single Trapped Molecules"
+    h = {"DOI": "10.1126/science.aaz9837", "type": "journal-article",
+         "title": [real_title],
+         "author": [{"family": "Sinhal"}],
+         "container-title": ["Science"],
+         "issued": {"date-parts": [[2020]]}}
+
+    def mock(h):
+        monkeypatch.setattr("veracite.http.http_get_json",
+                            lambda url, t: ({"message": {"items": [h]}}, 200))
+
+    # Both journal and year match -> accepted.
+    mock(h)
+    e = _SE(title=bib_title, author="Sinhal, M.", journal="Science", year="2020")
+    assert verify._search_doi(e, 5) == "10.1126/science.aaz9837"
+
+    # Journal matches but year wrong -> rejected (fragment alone insufficient).
+    mock(h)
+    e_wrong_year = _SE(title=bib_title, author="Sinhal, M.", journal="Science", year="2015")
+    assert verify._search_doi(e_wrong_year, 5) == ""
+
+    # Year matches but journal wrong -> rejected.
+    mock(h)
+    e_wrong_journal = _SE(title=bib_title, author="Sinhal, M.",
+                          journal="Physical Review Letters", year="2020")
+    assert verify._search_doi(e_wrong_journal, 5) == ""
+
+    # Neither matches -> rejected.
+    mock(h)
+    e_neither = _SE(title=bib_title, author="Sinhal, M.",
+                    journal="Physical Review Letters", year="2015")
+    assert verify._search_doi(e_neither, 5) == ""
+
+
+def test_search_doi_near_match_accepted_with_both_journal_and_year(monkeypatch):
+    # A long title with 0.80-0.90 Jaccard overlap (bib adds or drops a word vs
+    # Crossref's form) is a near-match accepted only with full corroboration.
+    # Chou2019 case: bib='Precision frequency-comb terahertz spectroscopy on pure
+    # quantum states of a single molecular ion' vs Crossref='Frequency-comb
+    # spectroscopy on pure quantum states of a single molecular ion' (86% overlap).
+    from veracite import verify
+
+    bib_title  = ("Precision frequency-comb terahertz spectroscopy on pure "
+                  "quantum states of a single molecular ion")
+    real_title = ("Frequency-comb spectroscopy on pure quantum states of "
+                  "a single molecular ion")
+    h = {"DOI": "10.1126/science.aba3628", "type": "journal-article",
+         "title": [real_title],
+         "author": [{"family": "Chou"}],
+         "container-title": ["Science"],
+         "issued": {"date-parts": [[2020]]}}
+
+    def mock(h):
+        monkeypatch.setattr("veracite.http.http_get_json",
+                            lambda url, t: ({"message": {"items": [h]}}, 200))
+
+    # Both journal and year match -> accepted.
+    mock(h)
+    e = _SE(title=bib_title, author="Chou, C.-W.", journal="Science", year="2020")
+    assert verify._search_doi(e, 5) == "10.1126/science.aba3628"
+
+    # Without year -> rejected.
+    mock(h)
+    e_no_year = _SE(title=bib_title, author="Chou, C.-W.", journal="Science", year="2015")
+    assert verify._search_doi(e_no_year, 5) == ""
+
+    # Without journal -> rejected.
+    mock(h)
+    e_no_journal = _SE(title=bib_title, author="Chou, C.-W.",
+                       journal="Physical Review Letters", year="2020")
+    assert verify._search_doi(e_no_journal, 5) == ""
 
 
 def test_search_doi_two_word_title_needs_full_corroboration(monkeypatch):
@@ -3442,6 +3751,31 @@ def test_dead_doi_search_fails_does_not_emit_pid_missing(monkeypatch):
 
 # --- _search_doi robustness to stylistic variation -------------------------
 
+def test_title_is_fragment():
+    from veracite.titles import title_is_fragment
+    # Sinhal2020 case: bib has a descriptive tail of the real title.
+    assert title_is_fragment(
+        "Spectroscopy of Single Trapped Molecules",
+        "Quantum-nondemolition state detection and spectroscopy of single trapped molecules")
+    # Trailing 5-word fragment.
+    assert title_is_fragment(
+        "an atom and a molecule",
+        "Quantum entanglement between an atom and a molecule")
+    # The 4-word minimum prevents short phrases matching spuriously.
+    assert not title_is_fragment("state detection", "quantum nondemolition state detection")
+    assert not title_is_fragment("quantum computing", "introduction to quantum computing")
+    # Identical titles: not a fragment (title_similar handles this with equality).
+    assert not title_is_fragment("Quantum entanglement between an atom and a molecule",
+                                 "Quantum entanglement between an atom and a molecule")
+    # No contiguous match.
+    assert not title_is_fragment("spectroscopy of molecules at low",
+                                 "quantum nondemolition state detection and spectroscopy "
+                                 "of single trapped molecules")
+    # Completely different.
+    assert not title_is_fragment("physics of something completely different",
+                                 "quantum nondemolition state detection and spectroscopy")
+
+
 def test_title_similar_handles_accents_greek_and_subtitle():
     from veracite.titles import title_similar
     assert title_similar("Schr{\\\"o}dinger gas dynamics here", "Schrodinger gas dynamics here")
@@ -3668,7 +4002,8 @@ def test_cite_parameter_token_not_mined_as_key():
     ctx = llm.find_citation_contexts([("/x.tex", tex)], "/")
     assert "#1" not in ctx
     assert set(ctx) == {"realkey", "a", "b"}
-    assert llm.find_citation_groups([("/x.tex", tex)]) == [["a", "b"]]
+    groups = llm.find_citation_groups([("/x.tex", tex)])
+    assert len(groups) == 1 and groups[0][0] == ["a", "b"]
 
 
 def test_issn_in_isbn_field_gets_issn_message():
@@ -3781,12 +4116,33 @@ def test_glued_and_separator_flagged():
                for f in rep.findings)
 
 
-def test_surname_with_and_not_flagged_as_glued():
-    e = _entry("@article{k, author={Anderson, P. W. and Brandt, U.},\n"
-               " title={T}, journal={J}, year={2015}}\n")
+def test_glued_and_full_given_name_flagged():
+    # 'Gabijaand Pregnolato' -- a full given name fused to the 'and' separator
+    # (missing space before 'and').  The parser reads Kirsanske + Pregnolato as one
+    # author; the offline rule should catch this and report it as a single delimiter
+    # error instead of producing downstream 'given name differs' / 'missing author'.
+    e = _entry(r"@article{k, author={Kir\v{s}ansk\.{e}, Gabijaand Pregnolato, Tommaso "
+               r"and Lodahl, Peter}, title={T}, journal={J}, year={2015}}" + "\n")
     rep = Report(color=False)
     run_static([e], rep)
-    assert not any(f.category == "author_format" for f in rep.findings)
+    glued = [f for f in rep.findings if f.category == "author_format" and "Gabijaand" in f.message]
+    assert glued, "full given-name fused to 'and' should fire glued_and_separator"
+    assert glued[0].severity.name == "WARN"
+
+
+def test_surname_with_and_not_flagged_as_glued():
+    # Surnames that end in 'and' (Anderson, Bertrand, Armand, Anand) must not fire.
+    for bib in (
+        "@article{k, author={Anderson, P. W. and Brandt, U.}, title={T}, journal={J}, year={2015}}",
+        "@article{k, author={Bertrand, Yves and Dupont, Jean}, title={T}, journal={J}, year={2020}}",
+        "@article{k, author={Armand, Guy and Moreau, L.}, title={T}, journal={J}, year={2020}}",
+        "@article{k, author={Anand, Rajeev and Kumar, S.}, title={T}, journal={J}, year={2020}}",
+    ):
+        e = _entry(bib + "\n")
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any(f.category == "author_format" and "fused" in f.message
+                       for f in rep.findings), f"false positive on: {bib}"
 
 
 def test_article_with_isbn_suggests_incollection():
@@ -4158,6 +4514,26 @@ def test_genuine_volume_mismatch_suggests_record_value():
     assert not any("(empty)" in f.message for f in rep.findings)
 
 
+def test_number_mismatch_message_names_the_bib_field_not_issue():
+    # The mismatch message must name the FIELD the user can find and edit in their
+    # .bib ('number'), not Crossref's JSON key for the same concept ('issue') --
+    # a user grepping their .bib for 'issue' after reading '[crossref] issue
+    # differs' would find nothing, since biblatex calls the field 'number'.
+    e = _entry('@article{k, author={Smith, Jane}, title={A Study}, journal={J},\n'
+               ' volume={12}, number={2}, pages={5}, year={2020}, doi={10.1/x}}\n')
+    rec = {"authors": ["smith"], "given": {"smith": "jane"}, "title": "A Study",
+           "volume": "12", "number": "3", "pages": "5", "year": "2020",
+           "journal": "J", "doi": "10.1/x"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    num = [f for f in rep.findings if f.category == "metadata_mismatch"
+           and f.suggested and f.suggested.get("field") == "number"]
+    assert len(num) == 1
+    assert "number differs" in num[0].message
+    assert "issue" not in num[0].message
+    assert num[0].suggested == {"field": "number", "from": "2", "to": "3"}
+
+
 def test_biblatex_validity_consolidates_multiple_fields():
     # Per-user request: several invalid fields on one entry collapse into a single
     # note listing each field with its line.
@@ -4434,7 +4810,7 @@ def test_offline_json_holds_only_entry_records(tmp_path):
     entry = recs["k"]
     assert entry["phases"]["offline"] is True and entry["phases"]["online"] is False
     assert entry["status"] is None         # offline: no fabricated verification
-    assert "checksum" in entry             # source-change detection is stamped
+    assert "bib_source" in entry           # raw source stored for staleness detection
 
 
 def test_llm_with_offline_is_rejected(tmp_path, capfd):

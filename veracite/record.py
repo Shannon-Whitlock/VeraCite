@@ -246,10 +246,13 @@ def resolve_entry(e, rep, delay, timeout):
                 rep.add(Severity.WARN, e, f"could not retrieve record "
                         f"(doi={crossref_doi or '-'}, arxiv={arxiv_id or '-'})", "record",
                         category="record_unresolved")
-        elif not doi and not isbn and not (e.etype == "misc" and e.get("url").strip()):
+        elif not doi and not isbn and e.etype != "misc":
             # Defer the 'no id to verify against' note: a DOI may still be found by
             # search in pid_check. The driver emits it only if the entry stays
             # unresolved (see emit of res.no_id).
+            # @misc is a catch-all for works without a stable identifier (personal
+            # communications, grey literature, supplementary pointers) -- it is
+            # never expected to have a DOI/arXiv id, so this note is always noise.
             res.no_id = True
         # The DataCite branch above may have recovered a record; if so, fall through to
         # the shared compare path. Only return early when nothing was resolved.
@@ -437,7 +440,7 @@ def _check_related_works(e, res, doi, timeout, rep):
     relations = cr.get("relations") if cr else None
     for label, target, ct in fetch_related(doi, e.get("title", ""), timeout,
                                            relations=relations):
-        note = f" -- {ct[:70]}" if ct else ""
+        note = f" -- {strip_tags(ct)[:70]}" if ct else ""
         if label in ("correction", "erratum", "addendum", "retraction", "publisher-note"):
             # Capitalize the label so an action-needed change to the cited work
             # (a CORRECTION/ERRATUM/RETRACTION) stands out from routine metadata

@@ -151,9 +151,9 @@ def _sentence_window(text, start, end, bounds, radius=1):
 
 
 def find_citation_contexts(tex_files, base):
-    """Map each cited key to [{file, context, group}] -- the 2-3 sentences around
-    each \\cite (including the preceding sentence) plus the OTHER keys cited in the
-    same \\cite{...} group. Used to flag uncited entries and to feed the LLM sweep,
+    """Map each cited key to [{file, line, context, group}] -- the 2-3 sentences
+    around each \\cite (including the preceding sentence) plus the OTHER keys cited in
+    the same \\cite{...} group. Used to flag uncited entries and to feed the LLM sweep,
     which judges a reference's fit relative to the works it is co-cited with so an
     inappropriate citation hidden in a group can be surfaced. Only this minimal
     window of the manuscript is ever sent to the LLM provider."""
@@ -163,25 +163,27 @@ def find_citation_contexts(tex_files, base):
         bounds = sentence_bounds(text)              # computed once per file
         for m in CITE_RE.finditer(text):
             snippet = _sentence_window(text, m.start(), m.end(), bounds)
+            lineno = text[:m.start()].count("\n") + 1
             keys = _cite_keys(m.group(1))
             for k in keys:
                 siblings = [s for s in keys if s != k]
                 contexts.setdefault(k, []).append(
-                    {"file": rel, "context": snippet, "group": siblings})
+                    {"file": rel, "line": lineno, "context": snippet, "group": siblings})
     return contexts
 
 
 def find_citation_groups(tex_files):
-    """Every multi-key \\cite{...} group, as an ordered list of keys (the order the
-    author wrote them). Used to advise when a group is not in chronological order.
-    Deduplicated so an identical group cited repeatedly is reported once."""
+    """Every multi-key \\cite{...} group, as (keys, filepath, lineno) tuples (the
+    order the author wrote them). Used to advise when a group is not in chronological
+    order. Deduplicated so an identical group cited repeatedly is reported once."""
     groups, seen = [], set()
-    for _path, text in tex_files:
+    for path, text in tex_files:
         for m in CITE_RE.finditer(text):
             keys = tuple(_cite_keys(m.group(1)))
             if len(keys) > 1 and keys not in seen:
                 seen.add(keys)
-                groups.append(list(keys))
+                lineno = text[:m.start()].count("\n") + 1
+                groups.append((list(keys), path, lineno))
     return groups
 
 
@@ -270,12 +272,14 @@ def _group_titles(contexts, by_key, limit=8):
 
 
 def build_rating_prompt(entry, rec, contexts, by_key=None):
-    """Prompt asking the model to rate one citation's relevance, flag a clear
-    wrong paper, and -- when the reference is cited in a GROUP -- judge whether it
-    fits among its co-cited references or is an odd one out. The preceding
-    sentence is part of the supplied context window."""
-    ctx_block = "\n".join(f"  [{i + 1}] ({c['file']}) ...{c['context']}..."
-                          for i, c in enumerate(contexts[:3]))
+    """Prompt asking the model to rate one citation's relevance per occurrence,
+    flag a clear wrong paper, and -- when the reference is cited in a GROUP -- judge
+    whether it fits among its co-cited references or is an odd one out. Returns one
+    structured result per occurrence so findings can be anchored to the exact tex
+    location. The preceding sentence is part of each supplied context window."""
+    capped = contexts[:3]
+    ctx_block = "\n".join(f"  [{i + 1}] ({c['file']} line {c['line']}) ...{c['context']}..."
+                          for i, c in enumerate(capped))
     abstract = (rec.get("abstract") or "").strip()[:1800] or "(no abstract available)"
     document = SETTINGS.get("document_context") or "a research paper"
     group = _group_titles(contexts, by_key)
@@ -285,6 +289,13 @@ whether it belongs in this group or is an odd one out -- a citation that does no
 fit a group its companions do fit is exactly what to catch):
 {group}
 """ if group else "")
+    n = len(capped)
+    schema = (
+        '[{"occurrence": 1, "relevance": <1-5>, "wrong_paper": <true|false>, '
+        '"group_misfit": <true|false>, "verdict": "<=12 words", "issue": "<short note or empty string>"}'
+        + (', {"occurrence": 2, ...}' if n > 1 else "")
+        + "]"
+    )
     return f"""You are auditing the bibliography of {document}.
 
 From the cited reference's abstract, the sentence(s) where the paper cites it \
@@ -315,16 +326,17 @@ Abstract of the referenced paper (your PRIMARY evidence -- read all of it, not j
 the first sentence or the title, before judging relevance or wrong_paper):
   {abstract}
 {group_block}
-Where the paper cites it:
+Where the paper cites it ({n} occurrence{'s' if n > 1 else ''}):
 {ctx_block or '  (no in-text citation found)'}
 
-Reply with ONLY a JSON object, no prose, in exactly this form:
-{{"relevance": <1-5>, "wrong_paper": <true|false>, "group_misfit": <true|false>, \
-"verdict": "<=12 words", "issue": "<short note or empty string>"}}"""
+Reply with ONLY a JSON array with one object per occurrence, no prose, in exactly \
+this form:
+{schema}"""
 
 
 def rate_citation(provider, model, prompt, timeout=120):
-    """Run one rating prompt through `provider` and parse the JSON reply. A provider
+    """Run one rating prompt through `provider` and parse the JSON reply. Returns a
+    list of per-occurrence dicts, or an {"error": reason} dict on failure. A provider
     returns the reply text, or an {"error": reason} dict it wants surfaced (e.g. a
     retired model id), which is passed straight through."""
     reply = provider(prompt, model, timeout)
@@ -332,11 +344,20 @@ def rate_citation(provider, model, prompt, timeout=120):
         return reply
     if not reply:
         return {"error": "no response from LLM provider"}
+    # Prefer a JSON array; fall back to a single object (wrapped as a list).
+    m = re.search(r"\[.*\]", reply, re.S)
+    if m:
+        try:
+            parsed = json.loads(m.group(0))
+            if isinstance(parsed, list):
+                return parsed
+        except json.JSONDecodeError:
+            pass
     m = re.search(r"\{.*\}", reply, re.S)
     if not m:
         return {"error": "no JSON in model reply"}
     try:
-        return json.loads(m.group(0))
+        return [json.loads(m.group(0))]
     except json.JSONDecodeError:
         return {"error": "could not parse model JSON"}
 
@@ -367,38 +388,20 @@ def preflight_provider(provider, model, timeout=30):
     return None
 
 
-def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
-    """Rate a single cited entry. Severity policy (advisory): a clear wrong-paper
-    flag is an ERROR; a group-misfit (the reference does not fit the group it is
-    co-cited in) is a WARN even if its standalone relevance is high; otherwise
-    relevance <=3 is a WARN; relevance 4-5 with no group issue leaves a 'context OK
-    N/5' NOTE. An LLM call costs tokens, so it ALWAYS leaves exactly one line in the
-    report (clean pass, weak relevance, wrong paper, or an unavailable/unusable
-    rating) rather than vanishing silently. `by_key` lets the prompt name the
-    co-cited references. This is the per-entry unit the interleaved run loop calls."""
-    if not rec or not (rec.get("abstract") or "").strip():
-        # No abstract to rate against -- the user cannot act on this (it is a registry
-        # gap, not a bib defect), so it is a NOTE, not a warning. Its own category so
-        # the note severity is not overridden by llm_relevance's warning default.
-        # This is a PERMANENT skip (re-running re-fetches the same absent abstract), so
-        # the llm phase IS settled: return True so it is not retried forever.
-        rep.add(Severity.INFO, entry, "[llm] skipped: no abstract available for rating",
-                "llm", category="llm_unavailable")
-        return True
-    result = rate_citation(provider, model, build_rating_prompt(entry, rec, ctx, by_key))
-    if "error" in result:
-        # The provider FAILED (CLI/connection/provider error) -- a tooling problem, not
-        # a bib defect, and TRANSIENT. Return False so the caller does NOT mark the llm
-        # phase complete and a second pass retries it.
-        rep.add(Severity.INFO, entry, f"[llm] rating unavailable: {result['error']}",
-                "llm", category="llm_unavailable")
-        return False
+def _rate_occurrence(entry, result, ctx, rep):
+    """Emit one finding for a single occurrence result dict from the LLM. `ctx` is the
+    corresponding {"file", "line", "context", "group"} dict for the tex location."""
+    source_file = os.path.basename(ctx["file"]) if ctx else ""
+    line = ctx.get("line", 0) if ctx else 0
+    target = (entry.key, line)
+
     rel = result.get("relevance")
     wrong = result.get("wrong_paper") is True
     misfit = result.get("group_misfit") is True
     verdict = (result.get("verdict") or "").strip()
     issue = (result.get("issue") or "").strip()
     tail = (f": {verdict}" if verdict else "") + (f" ({issue})" if issue else "")
+
     if wrong:
         # A wrong-paper flag is the most assertive LLM verdict, but it is still only a
         # model opinion from the abstract + context -- NOT a deterministic check -- so
@@ -407,18 +410,16 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
         # survey paper as "wrong" though that paper's abstract reported the very masers
         # it was cited for), and trust is the #1 priority: no model opinion may gate CI
         # or read as "must fix". The deterministic layers own the ERROR severity.
-        rep.add(Severity.WARN, entry, f"[llm] possible wrong paper (model opinion from "
+        rep.add(Severity.WARN, target, f"[llm] possible wrong paper (model opinion from "
                 f"the abstract/context only -- verify, do not treat as authoritative)"
-                f"{tail}", "llm", category="wrong_paper")
-        return True
+                f"{tail}", "llm", category="wrong_paper", source_file=source_file)
+        return
     if not isinstance(rel, int):
         # The call was made (tokens spent) but the model gave no usable rating --
-        # record that rather than vanish silently. The call SUCCEEDED (the model just
-        # gave no number), so the phase is settled -- a retry would spend tokens for the
-        # same non-answer.
-        rep.add(Severity.INFO, entry, "[llm] no usable relevance rating returned",
-                "llm", category="llm_relevance")
-        return True
+        # record that rather than vanish silently.
+        rep.add(Severity.INFO, target, "[llm] no usable relevance rating returned",
+                "llm", category="llm_relevance", source_file=source_file)
+        return
     # When the standalone relevance is already weak (<=3), a group anomaly (the
     # reference does not fit the works it is co-cited with) lowers the score by a
     # further point -- a low-relevance citation hidden in a group is the worst case.
@@ -430,13 +431,45 @@ def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
     if adjusted <= 3:
         note = (f" [dropped from {rel} to {adjusted}: appears to be an odd one out "
                 f"among its co-cited references]" if penalised else "")
-        rep.add(Severity.WARN, entry, f"[llm] relevance rated {adjusted}/5 (model "
+        rep.add(Severity.WARN, target, f"[llm] relevance rated {adjusted}/5 (model "
                 f"opinion from the abstract and cited context only -- verify, do not "
-                f"treat as authoritative){note}{tail}", "llm", category="llm_relevance")
+                f"treat as authoritative){note}{tail}", "llm", category="llm_relevance",
+                source_file=source_file)
+        return
+    # relevance 4-5 with no problem: leave a note so the LLM call (which costs tokens)
+    # always shows in the report rather than vanishing silently.
+    rep.add(Severity.INFO, target, f"[llm] context OK {adjusted}/5{tail}",
+            "llm", category="llm_ok", source_file=source_file)
+
+
+def rate_one(entry, rec, ctx, rep, provider, model, by_key=None):
+    """Rate a single cited entry, emitting one finding per cite occurrence. Severity
+    policy (advisory): a clear wrong-paper flag is a WARN; relevance <=3 is a WARN;
+    relevance 4-5 with no group issue leaves a 'context OK N/5' NOTE. An LLM call
+    costs tokens, so every occurrence always produces exactly one finding (clean pass,
+    weak relevance, wrong paper, or an unavailable/unusable rating). `by_key` lets the
+    prompt name the co-cited references. Error/unavailable findings are per-entry (not
+    per-occurrence) since they reflect a tooling or registry gap, not a cite site.
+    This is the per-entry unit the interleaved run loop calls."""
+    if not rec or not (rec.get("abstract") or "").strip():
+        # No abstract to rate against -- the user cannot act on this (it is a registry
+        # gap, not a bib defect), so it is a NOTE, not a warning. Its own category so
+        # the note severity is not overridden by llm_relevance's warning default.
+        # This is a PERMANENT skip (re-running re-fetches the same absent abstract), so
+        # the llm phase IS settled: return True so it is not retried forever.
+        rep.add(Severity.INFO, entry, "[llm] skipped: no abstract available for rating",
+                "llm", category="llm_unavailable")
         return True
-    # relevance 4-5 with no problem: still leave ONE note recording the result, so an
-    # LLM call (which costs tokens) always shows in the report rather than vanishing
-    # silently. It is a note (reassurance), hidden by --skipnotes like other notes.
-    rep.add(Severity.INFO, entry, f"[llm] context OK {adjusted}/5{tail}",
-            "llm", category="llm_ok")
+    results = rate_citation(provider, model, build_rating_prompt(entry, rec, ctx, by_key))
+    if isinstance(results, dict) and "error" in results:
+        # The provider FAILED (CLI/connection/provider error) -- a tooling problem, not
+        # a bib defect, and TRANSIENT. Return False so the caller does NOT mark the llm
+        # phase complete and a second pass retries it.
+        rep.add(Severity.INFO, entry, f"[llm] rating unavailable: {results['error']}",
+                "llm", category="llm_unavailable")
+        return False
+    capped = ctx[:3]
+    for i, result in enumerate(results):
+        occ_ctx = capped[i] if i < len(capped) else (capped[-1] if capped else None)
+        _rate_occurrence(entry, result, occ_ctx, rep)
     return True

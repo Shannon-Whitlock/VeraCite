@@ -61,7 +61,10 @@ DEFAULT_SETTINGS = {
         "wrong_paper": "warning",         # LLM opinion (abstract-only) -- verify, never an error (no model gates CI)
         "id_resolves_wrong_record": "error",  # doi/arXiv id resolves to a different paper
         "metadata_mismatch": "warning",   # author/title/year/vol/pages/journal differ from record
-        "record_unresolved": "warning",   # no authoritative source returned a record for the id
+        # record_unresolved: severity is code-assigned per case (WARN for a failed
+        # fetch on a known identifier; WARN for a post-2005 no-id entry; INFO/note
+        # for a pre-2005 no-id entry where a DOI may never have been issued).
+        # Not pinned here so the code's per-case severity is respected.
         "author_completeness": "warning", # malformed truncation: a literal 'et al.' / bare 'al.'
         "author_truncated_marker": "note", # valid 'and others' marker; dropped names not stored
         "source_conflict": "warning",     # two authoritative sources disagree on data

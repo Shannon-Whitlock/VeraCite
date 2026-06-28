@@ -191,6 +191,15 @@ _AUTOSUPPLIED_SLOTS = {
 }
 _OVERSTRICT_SLOTS = {
     "incollection": ({"editor"},),
+    # '@misc' is biblatex's explicit catch-all/fallback type, and the dominant
+    # physics .bst convention (e.g. APS's RevTeX style) renders its title with a
+    # plain 'output', not 'output.check' -- i.e. real-world style files do not
+    # error on a titleless @misc. Common legitimate idioms have no natural title:
+    # a personal communication (howpublished={personal communication}) or a
+    # 'see Supplementary Material' pointer. '@software' shares the same
+    # constraint in the datamodel and the same catch-all role.
+    "misc": ({"title"},),
+    "software": ({"title"},),
 }
 
 
@@ -239,9 +248,31 @@ def required_fields(e, rep):
                 rep.add(Severity.INFO, e, f"biblatex's datamodel lists '{shown}' as "
                         f"mandatory for @{e.etype}; consider adding it",
                         category="datamodel_recommended")
+            elif e.etype in ("book", "mvbook") and slot == ["author"] and _has_field(e, "editor"):
+                # An edited volume with NO overall author (only an editor) is not a
+                # broken @book -- biblatex has a dedicated type for exactly this:
+                # @collection ("the work as a whole has no overall author but it will
+                # usually have an editor"; required: editor, title, year/date). Point
+                # at the real defect (wrong type), not a phantom missing-author error.
+                rep.add(Severity.WARN, e, "@book has an editor but no author -- "
+                        "biblatex's @collection is the type for an edited volume with "
+                        "no overall author; use @collection (or @mvcollection if "
+                        "multi-volume) instead of @book", category="entrytype_suggestion")
             else:
-                rep.add(Severity.ERROR, e, f"missing required field '{shown}' for "
-                        f"@{e.etype}", category="missing_field")
+                msg = f"missing required field '{shown}' for @{e.etype}"
+                # If 'title' is the missing slot and the entry instead carries
+                # 'booktitle' -- a field that means something else entirely
+                # ("title of the containing work") and is not legal on this type --
+                # the two are likely confused. Only fires when booktitle is NOT a
+                # legal field here, so a real @incollection/@inbook/@inproceedings
+                # (where booktitle is the chapter's correct container-title field)
+                # never trips this.
+                if slot == ["title"] and _has_field(e, "booktitle") \
+                        and "booktitle" not in legal_fields(e.etype):
+                    msg += (f" ('booktitle' is present but is not a valid field for "
+                            f"@{e.etype} and means something else -- did you mean "
+                            f"'title'?)")
+                rep.add(Severity.ERROR, e, msg, category="missing_field")
     # biber does not mandate a date, but a reference without one is hard to use --
     # flag it as a recommendation (warning), explicitly beyond the biber datamodel.
     if e.etype not in ("misc", "online", "software", "dataset") \
@@ -335,6 +366,23 @@ def required_fields(e, rep):
 # NOT shaped like a 1900-2099 year must not be read as a year here.
 _CALENDAR_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
 
+# A DATE STRING in a number/issue field -- a month name (full or abbreviated,
+# with or without a trailing period) optionally followed by a year, or an
+# ISO-ish YYYY-MM or MM/YYYY form. All are definitively wrong in an issue field:
+# a valid issue number is a bare integer or short alphanumeric code.
+# Anchored with word-boundary so 'March' fires but 'marching' does not.
+_MONTH_NAMES = (r"Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|"
+                r"Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|"
+                r"Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?")
+_DATE_IN_NUMBER_RE = re.compile(
+    r"(?:"
+    r"(?:" + _MONTH_NAMES + r")\.?\s*(?:\d{1,2},?\s*)?\d{0,4}"  # "December 2019", "May 20, 2020"
+    r"|(?:19|20)\d{2}[-/]\d{1,2}"                                # "2019-12", "2020/05"
+    r"|\d{1,2}[-/](?:19|20)\d{2}"                                # "12/2019", "5-2020"
+    r")",
+    re.I,
+)
+
 
 @rule
 def misplaced_field(e, rep):
@@ -372,6 +420,24 @@ def misplaced_field(e, rep):
             rep.add(Severity.WARN, e, f"'{field}' is a year ({val}); an issue number "
                     "is not a year -- it likely belongs in the 'year'/'date' field",
                     category="misplaced_field", field=field, suggested=sug)
+            flagged = True
+        elif _DATE_IN_NUMBER_RE.fullmatch(val):
+            # A date string like 'October', 'December 2019', or '2019-12' in the
+            # issue field is a cover-date label placed in the wrong field (often
+            # by a reference manager). A valid issue value is a bare integer or
+            # short alphanumeric code. A bare month name belongs in 'month'; a
+            # month+year or ISO date belongs in 'month'/'date' (the year part
+            # likely duplicates 'year' already). 'note' is a last resort for forms
+            # that don't parse cleanly as a month.
+            is_bare_month = bool(re.fullmatch(
+                r"(?:" + _MONTH_NAMES + r")\.?", val, re.I))
+            if is_bare_month:
+                dest = "'month' field (use the bare three-letter macro, e.g. oct)"
+            else:
+                dest = "'month' or 'date' field (or 'note' if it is a label)"
+            rep.add(Severity.WARN, e, f"'{field}' is a date string ({val!r}); an "
+                    f"issue number is not a date -- move it to the {dest}",
+                    category="misplaced_field", field=field)
             flagged = True
     return flagged
 
@@ -701,12 +767,18 @@ def title_caps(e, rep):
     # will silently lowercase -- a proper noun, an acronym, or a CamelCase name. This is
     # a common, real defect (the rendered reference shows 'rydberg'/'qed'), so they
     # share the WARN-level `title_capitalization` category, not a quiet style note.
+    # Track every term already flagged by any sub-check so the CamelCase loop
+    # does not emit a redundant finding for the same word (e.g. 'QuTiP' in
+    # protected_terms fires the "not brace-protected" note; the CamelCase scan
+    # must not then fire a second "mixed-case term" note on the same word).
+    already_flagged = set()
     for hint, occ_re, prot_re in _protected_term_patterns():
         if (occ_re.search(title) and not prot_re.search(title)
                 and not _safe_at_title_start(hint, occ_re, title)):
             rep.add(Severity.WARN, e, "title term not brace-protected; may be lowercased "
                     "by some styles", category="title_capitalization", field="title",
                     suggested={"field": "title", "from": hint, "to": "{" + hint + "}"})
+            already_flagged.add(hint)
     seen_acronyms = set()
     for m in _ACRONYM_RE.finditer(title):
         word = m.group(1)
@@ -724,15 +796,17 @@ def title_caps(e, rep):
                     "styles will lowercase it", category="title_capitalization",
                     field="title",
                     suggested={"field": "title", "from": word, "to": "{" + word + "}"})
+            already_flagged.add(word)
     # CamelCase / interior-capital terms (a WARN: the author very likely intended this
     # casing -- a package/proper/chemical name like 'QuantumCumulants.jl', 'BibTeX',
     # 'MoSe2' -- and sentence-casing would silently mangle it, so they should check and
-    # brace-protect it). Skipped when already brace-protected, and (like acronyms) an
-    # interior capital is never position-safe so first-word ones still fire.
+    # brace-protect it). Skipped when already brace-protected, already flagged by the
+    # protected-terms or acronym loops above (same word, same fix -- no duplicate), and
+    # (like acronyms) an interior capital is never position-safe so first-word ones fire.
     seen_camel = set()
     for m in _CAMELCASE_RE.finditer(title):
         word = m.group(1)
-        if word in seen_camel:
+        if word in seen_camel or word in already_flagged:
             continue
         seen_camel.add(word)
         if not _protected_in_braces(word, title):
@@ -789,27 +863,37 @@ def truncated_authors(e, rep):
                     category="author_truncated_marker", field=field)
 
 
-# A name-separator 'and' fused to the preceding initial with no space:
-# 'Pientka, F.and Peng, Y.' (a dropped space after 'F.'). BibTeX then reads
-# 'F.and' as the given name and never sees the following author as separate, so
-# this surfaces downstream as both a 'given name differs' and a 'missing author'.
-# Anchored to an initial+period (or a lone capital) directly before 'and' + a
-# capitalized next name, so an ordinary surname containing 'and' (Anderson,
-# Brandt) is not matched.
-_GLUED_AND_RE = re.compile(r"(?:^|[\s,])([A-Z]\.?and)\s+[A-Z]")
+# A name-separator 'and' fused to the preceding name token with no space:
+# 'Pientka, F.and Peng, Y.' (initial fused) or 'Kir..., Gabijaand Pregnolato'
+# (full given name fused). BibTeX then reads the fused token as the given name
+# and never sees the following author as separate, producing a spurious 'given
+# name differs' and a 'missing author' finding against the record.
+#
+# Two sub-patterns, both requiring a capitalized next word so 'Anderson' /
+# 'Brandt' / other legitimate surnames ending in 'and' are not matched:
+#   1. An initial (single capital + optional period) directly before 'and'.
+#   2. A multi-letter word in the given-name position (after a comma) ending in
+#      'and'. Surnames ending in 'and' (Bertrand, Armand) only appear *before* a
+#      comma, so this sub-pattern never fires on them.
+_GLUED_AND_RE = re.compile(
+    r"(?:^|[\s,])([A-Z]\.?and)\s+[A-Z]"           # initial fused: 'F.and'
+    r"|,\s*([A-Za-z]{2,}and)\s+[A-Z]"              # given name fused: 'Gabijaand'
+)
 
 
 @rule
 def glued_and_separator(e, rep):
-    """The ' and ' author separator glued to the preceding initial ('F.and Peng').
-    Reported as one delimiter error, since otherwise it splinters into unrelated
-    'given name differs' and 'missing author' findings against the record."""
+    """The ' and ' author separator glued to the preceding name token with no space
+    ('F.and Peng', 'Gabijaand Pregnolato'). Reported as one delimiter error, since
+    otherwise it splinters into unrelated 'given name differs' and 'missing author'
+    findings against the record."""
     for field in ("author", "editor"):
         m = _GLUED_AND_RE.search(e.get(field, ""))
         if m:
+            fused = m.group(1) or m.group(2)
             rep.add(Severity.WARN, e, f"{field} list has 'and' fused to a name with no "
-                    f"space ({m.group(1)!r}); BibTeX reads it as one author and drops "
-                    f"the separator -- add a space (e.g. 'F. and')",
+                    f"space ({fused!r}); BibTeX reads it as one author and drops "
+                    f"the separator -- add a space before 'and'",
                     category="author_format", field=field)
 
 

@@ -19,8 +19,9 @@ import os
 import re
 
 from .normalize import (author_surnames_display, biblatex_pages, bib_given_names,
-                        clean_tex, deaccent, is_container_granularity, is_preprint,
-                        is_truncated, norm_pages, split_authors, title_is_miscased)
+                        clean_tex, deaccent, is_collaboration, is_container_granularity,
+                        is_preprint, is_truncated, norm_pages, split_authors,
+                        title_is_miscased)
 from .report import Severity
 from .titles import title_is_shortened, title_key, title_overlap
 
@@ -198,6 +199,15 @@ def _compare_authors(e, rec, source, rep):
     strongest single signal and is combined with a strong title mismatch by the
     caller into the one genuine wrong-record error. arXiv's API yields only a
     folded last token per author, so its data stays advisory either way."""
+    # If the author field already has a glued-'and' defect (caught by the offline
+    # glued_and_separator rule), skip the record comparison entirely: the parser
+    # merged two authors into one name, so every downstream finding (given-name
+    # differs, author missing from bib) is a symptom of the same root cause.
+    # The offline finding is the actionable one; the record comparison would only
+    # produce noise on top of it.
+    from .rules import _GLUED_AND_RE  # avoid module-level cycle
+    if _GLUED_AND_RE.search(e.get("author", "")):
+        return False
     bib_authors = split_authors(e.get("author", ""))
     rec_authors = rec.get("authors", [])
     # A list ending in ANY truncation marker -- the valid 'and others' OR a
@@ -262,13 +272,21 @@ def _compare_authors(e, rec, source, rep):
     # When the first author already differs, the same person also shows up in bib_only
     # and rec_only -- the 'first author differs' line says it once, so don't restate it
     # two more ways. Suppress the first-author pair from the set-difference lists.
+    # When the record indexes under a collaboration name and the bib has individual
+    # authors, the individual names being absent from the record is a consequence of
+    # the collaboration indexing -- not an independent defect. The "first author
+    # differs" finding already flags the mismatch; suppress the redundant "in bib
+    # not in record" list so the user gets one clear message, not two.
+    rec_first_is_collab = rec_authors and is_collaboration(show(rec_authors[0]))
     if first_differs:
         bib_only = [a for a in bib_only if not _surname_match(a, bib_authors[0])]
         rec_only = [a for a in rec_only if not _surname_match(a, rec_authors[0])]
         rep.add(Severity.WARN, e, f"[{source}] first author differs: "
-                f"bib={show(bib_authors[0])!r} vs {source}={show(rec_authors[0])!r}",
+                f"bib={show(bib_authors[0])!r} vs {source}={show(rec_authors[0])!r}"
+                + (f" (record uses a collaboration name; individual authors are not "
+                   f"listed separately in the record)" if rec_first_is_collab else ""),
                 "record", category="metadata_mismatch")
-    if bib_only:
+    if bib_only and not rec_first_is_collab:
         rep.add(Severity.WARN, e, f"[{source}] author(s) in bib not in record: "
                 + ", ".join(sorted(show(a) for a in bib_only)), "record",
                 category="metadata_mismatch")
@@ -340,7 +358,11 @@ def _compare_authors(e, rec, source, rep):
                 # check uses): deaccent + ligature + hyphen/punctuation folding, so an
                 # ASCII vs Unicode hyphen ('Ida-Marie' vs 'Ida‐Marie' U+2010) or an
                 # accent/ligature difference is not mistaken for a different given name.
-                rep.add(Severity.WARN, e, f"[{source}] given name differs for "
+                # Severity is INFO: most citation styles render only surnames or initials,
+                # so a given-name discrepancy (even 'Minore' vs 'Minori') does not affect
+                # how a citation renders or whether the paper is findable. It is a
+                # completeness/accuracy nudge, not a rendering-affecting data problem.
+                rep.add(Severity.INFO, e, f"[{source}] given name differs for "
                         f"{show(surname)!r}: bib={bg!r} vs {source}={rg!r}",
                         "record", category="metadata_mismatch")
             elif not _is_initial(bg) and bg != rg \
@@ -490,9 +512,12 @@ def _journal_core(name):
 # --- record comparison + parity --------------------------------------------
 
 # Soft bibliographic fields compared between two metadata sources, as
-# (key, label, normalizer). `number` is reported as "issue"; pages are
-# dash-normalized so 'pp. 10-20' and '10--20' compare equal. The normalizer maps
-# a raw value (str or int, possibly None/"") to its comparable string form.
+# (key, label, normalizer). The label names the .bib FIELD ('number'), not the
+# bibliographic concept it holds (a journal issue) -- a message must point at
+# what the user can find and edit in their .bib, not Crossref's JSON key name for
+# the same concept. Pages are dash-normalized so 'pp. 10-20' and '10--20' compare
+# equal. The normalizer maps a raw value (str or int, possibly None/"") to its
+# comparable string form.
 def _soft(v):
     return str(v or "").strip()
 
@@ -500,7 +525,7 @@ def _soft(v):
 _SOFT_FIELDS = [
     ("year", "year", _soft),
     ("volume", "volume", _soft),
-    ("number", "issue", _soft),
+    ("number", "number", _soft),
     ("pages", "pages", lambda v: norm_pages(str(v or ""))),
 ]
 
@@ -634,6 +659,8 @@ def _soft_field_diffs(e, rec):
             # still flagged, so the common 'add the missing end page' case is kept.)
             if key == "pages" and _record_pages_is_start_of_bib(norm(recraw), norm(bibraw)):
                 continue
+            if key == "pages" and _pages_same_single(norm(recraw), norm(bibraw)):
+                continue
             # The proposed value is handed back in its biblatex-canonical written
             # form (a page range as '920--926', not the registry's '920-926'), so an
             # applied suggestion does not itself trip the dash-style check.
@@ -650,6 +677,30 @@ def _record_pages_is_start_of_bib(rec_pages, bib_pages):
     if "-" not in bib_pages or "-" in rec_pages:
         return False
     return bib_pages.split("-", 1)[0] == rec_pages
+
+
+def _is_degenerate_range(p):
+    """True when p is a 'N-N' range whose start and end are identical -- a range in
+    form only, referring to a single page."""
+    if "-" not in p:
+        return False
+    start, end = p.split("-", 1)
+    return start == end
+
+
+def _pages_same_single(rec_pages, bib_pages):
+    """True when one side is a plain single page and the other is a degenerate
+    'N-N' range on that SAME page (e.g. bib='681', rec='681-681'). Crossref
+    sometimes stores a single-page article as 'NNN-NNN'; suggesting '681--681' when
+    the bib already has '681' is noise, not a correction. A genuine range on either
+    side (start != end) is never matched here, so a real mismatch still flags."""
+    rec_degenerate = _is_degenerate_range(rec_pages)
+    bib_degenerate = _is_degenerate_range(bib_pages)
+    if rec_degenerate and "-" not in bib_pages:
+        return rec_pages.split("-", 1)[0] == bib_pages
+    if bib_degenerate and "-" not in rec_pages:
+        return bib_pages.split("-", 1)[0] == rec_pages
+    return False
 
 def field_diffs(left, right, lname, rname, pages_substring_ok=False, skip_keys=()):
     """The soft bibliographic fields (year/volume/issue/pages) on which two records
@@ -852,6 +903,7 @@ def compare_against_record(e, rec, source, rep, timeout=None):
         rep.add(Severity.INFO, e, f"[{source}] title matches the record but its "
                 f"punctuation/wording differs from the canonical form{mangle_note}{caps_note}",
                 "record", category="title_style", field="title", suggested=style_sug)
+    title_style_emitted = False
     if bt and at and bt != at and bt.replace(" ", "") == at.replace(" ", ""):
         # The titles differ ONLY in where a space falls inside a token -- a catalog
         # designation written closed-up vs spaced ('NGC6334I' vs 'NGC 6334I'), or a
@@ -859,11 +911,14 @@ def compare_against_record(e, rec, source, rep, timeout=None):
         # mismatch (one token split in two drops it well below 60%), but it is the same
         # title -- a spacing nudge, not a content difference. Emit it as a style NOTE
         # toward the record's spacing, never an overlap WARN. (safe_to already withheld
-        # when the record carried markup.)
+        # when the record carried markup.) Track that it fired so the elif branch (which
+        # may also find a content mismatch on the same title) can suppress it if a
+        # metadata_mismatch is about to state the same fact more usefully.
         rep.add(Severity.INFO, e, f"[{source}] title matches the record but its spacing "
                 f"differs from the canonical form{mangle_note}", "record",
                 category="title_style", field="title", suggested=_title_sug())
-    elif bt and at and bt != at:
+        title_style_emitted = True
+    if bt and at and bt != at and not title_style_emitted:
         if title_is_shortened(btitle, atitle):
             # One title is a clean prefix of the other (a dropped subtitle), not a
             # different paper. Direction matters: only when the BIB is the shorter
@@ -921,7 +976,9 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                             f"        {source}: {atitle[:90]}", "record",
                             category="metadata_mismatch", field="title", suggested=_title_sug())
             else:
-                rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}",
+                rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}:\n"
+                        f"        bib:    {btitle[:90]}\n"
+                        f"        {source}: {atitle[:90]}",
                         "record", category="metadata_mismatch", field="title", suggested=_title_sug())
 
     # The single genuine wrong-paper error: identity-level fields ALL point
@@ -999,18 +1056,26 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                 "record", category="metadata_mismatch",
                 field=fld, suggested={"field": fld, "from": bibval, "to": recval})
 
-    # The offline misplaced_field rule flags a year-SHAPED value in 'number'/'issue'
-    # as a probably-misplaced publication year. If the entry RESOLVED and the record
-    # carries that very value as the issue, the value belongs there after all -- the
-    # record is ground truth, so withdraw the offline guess rather than ship a finding
-    # the authoritative source contradicts (a journal really can issue, e.g., a
-    # 'number=2018'). Corroborated == the bib's number equals the record's issue. We
-    # only withdraw when the same rule's OTHER trigger (a purely numeric 'journal') did
-    # NOT also fire, since a matching issue says nothing about a numeric journal name.
+    # The offline misplaced_field rule flags a value in 'number'/'issue' that looks
+    # like a date (a month name, date string, or year) as a misplaced value. Once
+    # the entry resolves, decide whether the misplaced_field finding is still useful:
+    #
+    #   * Record corroborates bib's value (bib_number == rec_issue): the offline guess
+    #     was wrong -- withdraw it.
+    #   * Record disagrees AND bib value is NOT year-shaped: the metadata_mismatch
+    #     finding above already gives the correct number with a suggested fix, making
+    #     "move to month field" redundant and contradictory -- withdraw.
+    #   * Record disagrees AND bib value IS year-shaped (e.g. number={2018}): the
+    #     misplaced_field finding still carries diagnostic value (it says the year is
+    #     wrong field), and the metadata_mismatch gives the real issue number -- both
+    #     are independently useful, so keep both.
+    import re as _re
     bib_number, rec_issue = _soft(e.get("number")), _soft(rec.get("number"))
     numeric_journal = _soft(e.get("journal")).strip("{}").strip().isdigit()
-    if bib_number and bib_number == rec_issue and not numeric_journal:
-        rep.withdraw(e.key, "misplaced_field")
+    _year_shaped = bool(_re.fullmatch(r"(?:19|20)\d{2}", bib_number.strip()))
+    if bib_number and rec_issue and not numeric_journal:
+        if bib_number == rec_issue or not _year_shaped:
+            rep.withdraw(e.key, "misplaced_field")
 
     # The journal comparison is article-only. For a software/dataset record the
     # record's "journal" is the repository name ("Zenodo") and the bib entry has no
@@ -1064,22 +1129,62 @@ def compare_sources(e, records, rep, skip_year=False):
         for j in range(i + 1, len(names)):
             sa, sb = names[i], names[j]
             ra, rb = records[sa], records[sb]
-            # Data conflicts -> WARN (one finding listing all disagreeing fields).
-            # A page value contained in the other (range vs an endpoint) is not a
-            # conflict here, since neither side is the bib being checked.
-            data = field_diffs(ra, rb, sa, sb, pages_substring_ok=True, skip_keys=skip)
-            if data:
-                rep.add(Severity.WARN, e, "sources disagree: " + "; ".join(data),
+            # Data conflicts: compare source records against each other. When the
+            # bib agrees with at least one source, it is correct and nothing is
+            # actionable -- suppress the finding entirely (the sources' internal
+            # disagreement is not the user's problem). When neither source agrees
+            # with the bib, the user should check, but since the sources disagree
+            # we cannot confidently suggest a value, so we warn without one.
+            bib_agrees, bib_conflicts = [], []
+            for key, label, norm in _SOFT_FIELDS:
+                if key in skip:
+                    continue
+                lv, rv = norm(ra.get(key)), norm(rb.get(key))
+                if not (lv and rv and lv != rv):
+                    continue
+                if key == "pages" and (lv in rv or rv in lv):
+                    continue
+                bv = norm(e.get(key, "") or "")
+                if bv and (bv == lv or bv == rv):
+                    bib_agrees.append(f"{label} ({sa}={lv} vs {sb}={rv}; bib agrees with {sa if bv == lv else sb})")
+                else:
+                    bib_conflicts.append(f"{label} ({sa}={lv} vs {sb}={rv})")
+            if bib_conflicts:
+                rep.add(Severity.WARN, e, "sources disagree and bib matches neither: "
+                        + "; ".join(bib_conflicts) + " -- verify against the record",
                         "record", category="source_conflict")
             # Journals: a full title vs its abbreviation (or any two forms
             # _journal_equiv accepts) is NOT a discrepancy -- both are valid, so it
             # is not flagged at all. Only journals that are genuinely different
             # (not equivalent) are a real cross-source conflict.
+            # INSPIRE uses compressed house-format abbreviations (e.g.
+            # 'IEEE J.Quant.Electron.' for 'IEEE Journal of Selected Topics in Quantum
+            # Electronics') that are not strict ISO-4 word-by-word prefixes and will
+            # fail _journal_equiv even though they denote the same journal. When one
+            # source is INSPIRE and _journal_equiv says they're different, we give it
+            # the benefit of the doubt: suppress the conflict unless the journals are
+            # clearly unrelated (neither is a prefix/abbreviation of the other at all).
+            # Two genuinely different journals between INSPIRE and Crossref still fire.
             ja, jb = ra.get("journal", ""), rb.get("journal", "")
             if ja and jb and "arxiv" not in ja.lower() and "arxiv" not in jb.lower() \
                     and not _journal_equiv(ja, jb):
-                rep.add(Severity.WARN, e, f"sources disagree on the journal: "
-                        f"{sa}={ja!r} vs {sb}={jb!r}", "record", category="source_conflict")
+                inspire_pair = "inspire" in (sa, sb)
+                # For an INSPIRE pair, suppress only when the shorter name looks like
+                # a plausible abbreviation of the longer (first word matches). Two
+                # genuinely different journals (Nature Physics vs Phys Rev B) will not
+                # share a first word and still fire.
+                if inspire_pair:
+                    shorter, longer = (ja, jb) if len(ja) <= len(jb) else (jb, ja)
+                    first_short = _journal_words(shorter)[:1]
+                    first_long = _journal_words(longer)[:1]
+                    suppress = bool(first_short and first_long
+                                    and first_long[0].startswith(first_short[0]))
+                else:
+                    suppress = False
+                if not suppress:
+                    rep.add(Severity.WARN, e, f"sources disagree on the journal: "
+                            f"{sa}={ja!r} vs {sb}={jb!r}", "record",
+                            category="source_conflict")
 
 
 def _suggest_parity(e, rec, source, rep, skip=()):

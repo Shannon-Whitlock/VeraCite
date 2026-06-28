@@ -14,7 +14,7 @@ from .config import endpoint, SETTINGS
 from .normalize import (clean_tex, is_article_like, is_book, is_collaboration,
                         split_authors)
 from .report import Severity
-from .titles import title_similar
+from .titles import title_is_fragment, title_overlap, title_similar, title_words
 
 # The three outcomes. VERIFIED means the identity resolved and the first author and
 # title match -- the right paper. Its CONFIDENCE (0-1) carries the nuance that used
@@ -284,10 +284,20 @@ def _search_doi(e, timeout):
         # requires exact; a long title may match fuzzily but only the exact case gets
         # the relaxed type/corroboration treatment below.
         exact_title = title_key(title) == title_key(cand_title)
+        fragment_title = not exact_title and title_is_fragment(title, cand_title)
+        # A long title (>=8 unique words) near 0.80 Jaccard overlap is a near-
+        # match: extra/missing words vs a core title that is otherwise the same
+        # paper (e.g. the bib adds 'Precision' and 'terahertz' to a title whose
+        # Crossref form omits them). Accepted only with full corroboration.
+        overlap = title_overlap(title, cand_title) if not exact_title else 1.0
+        near_match = (not exact_title and not fragment_title
+                      and overlap >= 0.80
+                      and len(title_words(title) | title_words(cand_title)) >= 8)
         if short_title:
             if not exact_title:
                 continue
-        elif not (exact_title or title_similar(title, cand_title)):
+        elif not (exact_title or title_similar(title, cand_title)
+                  or fragment_title or near_match):
             continue
         # First-author surname must match (particle-aware). Skipped for a
         # collaboration author, which has no surname to compare.
@@ -343,6 +353,11 @@ def _search_doi(e, timeout):
         if very_short:
             if exact_title and journal_ok and year_ok:
                 return item.get("DOI", "")
+            continue
+        # A fragment or near-match (0.80 <= overlap < 0.90 on a long title) is
+        # accepted only when BOTH journal and year corroborate -- a partial title
+        # match alone is too weak, since plausible phrases can appear in many titles.
+        if (fragment_title or near_match) and not (journal_ok and year_ok):
             continue
         if journal_ok or year_ok or exact_ok:
             return item.get("DOI", "")
@@ -440,7 +455,8 @@ def chronological_order(groups, by_key, rep):
     sort options produce), but it is not mandatory -- many numeric styles sort by
     appearance -- so this is only a note, attached to the group's first entry.
     Skipped when any member's year is unknown (can't judge)."""
-    for keys in groups:
+    import os
+    for keys, tex_path, tex_line in groups:
         ents = [by_key.get(k) for k in keys]
         if any(e is None for e in ents):
             continue
@@ -449,9 +465,11 @@ def chronological_order(groups, by_key, rep):
             continue
         if years != sorted(years):
             order = ", ".join(f"{k} ({y})" for k, y in zip(keys, years))
-            rep.add(Severity.INFO, ents[0], "co-cited group is not in chronological "
+            rep.add(Severity.INFO, (ents[0].key, tex_line),
+                    "co-cited group is not in chronological "
                     f"order ({order}); some styles cite the earliest work first",
-                    "verify", category="citation_order")
+                    "verify", category="citation_order",
+                    source_file=os.path.basename(tex_path))
 
 
 # --- Layer 6: integrity + confidence scores --------------------------------

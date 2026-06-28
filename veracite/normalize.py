@@ -103,6 +103,11 @@ def clean_tex(s):
     value compares against a registry value without spurious entity mismatches."""
     s = html.unescape(s)
     s = s.replace("\\&", "&")        # TeX-escaped ampersand -> plain '&'
+    # \less / \greater are TeX macros for < / > used by some export tools (e.g.
+    # Crossref HTML titles machine-imported into .bib with angle brackets escaped).
+    # Map them to literal angle brackets before macro stripping so the resulting
+    # '<i>...</i>' / '<sup>...</sup>' etc. are visible to _TAG_RE in strip_math.
+    s = s.replace("\\less", "<").replace("\\greater", ">")
     s = _IFMMODE_RE.sub(r"\1", s)    # math-mode conditional -> its text branch
     s = _ACCENT_MACRO_RE.sub(lambda m: m.group(1) or m.group(2), s)
     s = _DOTLESS_RE.sub(r"\1", s)    # bare '\i'/'\j' -> 'i'/'j'
