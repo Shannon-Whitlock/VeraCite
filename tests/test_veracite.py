@@ -3022,6 +3022,39 @@ def test_arxiv_retitled_version_is_a_note_not_a_title_mismatch(monkeypatch):
     assert not any(f.category == "id_resolves_wrong_record" for f in rep.findings)
 
 
+def test_latex_isotope_title_vs_crossref_mathml_is_not_a_mismatch():
+    # Crossref returns isotope/chemical formulas as MathML that serializes differently
+    # from the bib's LaTeX: LaTeX '^{21}\\mathrm{Ne}' encodes the mass number as a
+    # superscript BEFORE the symbol (title_key -> '21ne'), while MathML mmultiscripts
+    # puts the symbol first then the number (title_key -> 'ne21'). After stripping math,
+    # the alpha-only keys are identical ('ne' == 'ne') -- the bib is correct, not a
+    # mismatch. The Smiciklas2011/vasilakis2009limits class.
+    btitle = (r"New Test of Local Lorentz Invariance Using a "
+              r"$^{21}\mathrm{Ne}\mathrm{\text{\ensuremath{-}}}"
+              r"\mathrm{Rb}\mathrm{\text{\ensuremath{-}}}\mathbf{K}$ Comagnetometer")
+    raw_atitle = (
+        "New Test of Local Lorentz Invariance Using a"
+        "<mml:math><mml:mmultiscripts><mml:mi>Ne</mml:mi>"
+        "<mml:mprescripts/><mml:none/><mml:mn>21</mml:mn></mml:mmultiscripts>"
+        "<mml:mtext>−</mml:mtext><mml:mi>Rb</mml:mi>"
+        "<mml:mtext>−</mml:mtext><mml:mi>K</mml:mi></mml:math>Comagnetometer"
+    )
+    rec = {"authors": ["smiciklas"], "authors_display": ["Smiciklas"], "given": {},
+           "title": raw_atitle, "year": 2011, "journal": "Physical Review Letters",
+           "volume": "107", "number": "17", "pages": ""}
+    e = _entry(f"@article{{Smiciklas2011, author={{M. Smiciklas and M. V. Romalis}},\n"
+               f" title={{{btitle}}},\n"
+               f" journal={{Phys. Rev. Lett.}}, volume={{107}}, year={{2011}},"
+               f" doi={{10.1103/PhysRevLett.107.171604}}}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep, timeout=1)
+    title_mismatches = [f for f in rep.findings
+                        if f.category == "metadata_mismatch" and "title" in f.message]
+    assert not title_mismatches, (
+        "LaTeX isotope formula vs MathML isotope formula must not trigger a title mismatch "
+        "-- they are the same content in different serializations")
+
+
 def test_arxiv_title_matching_no_version_stays_a_mismatch(monkeypatch):
     # The negative twin: the bib title matches NEITHER the latest NOR any earlier
     # version -- a genuinely different paper (a wrong id). The retitle path must NOT

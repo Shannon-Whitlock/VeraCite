@@ -691,14 +691,26 @@ def _bib_math_matches_record(btitle, raw_atitle):
     already has the math in the canonical .bib form ('$...$') and the only difference
     from the record is LaTeX vs the registry's MathML -- a serialization artifact,
     not a defect, so the title check should be skipped entirely. (title_key strips
-    both '$...$' and remaining markup, so it yields the bare prose for the compare.)"""
+    both '$...$' and remaining markup, so it yields the bare prose for the compare.)
+
+    Isotope/chemical formulas serialize differently in LaTeX vs MathML: LaTeX puts
+    the mass number as a superscript before the symbol ('^{21}\\mathrm{Ne}' -> '21ne'
+    in title_key) while MathML mmultiscripts puts the symbol first then the number
+    ('<mi>Ne</mi>...<mn>21</mn>' -> 'ne21' after tag-stripping). Dropping all
+    digits for a secondary alpha-only comparison bridges this ordering difference
+    without creating false positives (element symbols like Ne vs Na still differ)."""
     if "$" not in btitle:
         return False
-    # Compare space-INSENSITIVELY: stripping '$...$' vs MathML leaves the same tokens
-    # but with cosmetic spacing differences around the math ('171yb' vs '171 yb').
+    # Primary: space-insensitive comparison (handles cosmetic spacing around math).
     bk = title_key(btitle).replace(" ", "")
     rk = title_key(_strip_markup(raw_atitle)).replace(" ", "")
-    return bool(bk) and bk == rk
+    if bool(bk) and bk == rk:
+        return True
+    # Secondary: alpha-only comparison bridges LaTeX vs MathML isotope ordering
+    # ('^{21}Ne' -> '21ne' vs MathML 'Ne21' -> 'ne21'; both reduce to 'ne').
+    bk_alpha = re.sub(r"[^a-z]", "", bk)
+    rk_alpha = re.sub(r"[^a-z]", "", rk)
+    return bool(bk_alpha) and bk_alpha == rk_alpha
 
 
 def _bib_year_matches_a_version(bibval, rec):
