@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     from urllib.parse import quote as _urlquote
     HTTP_BACKEND = "urllib"
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 # Fallbacks used when no settings file or environment override is present.
 DEFAULT_SETTINGS = {
@@ -100,6 +100,7 @@ DEFAULT_SETTINGS = {
         "encoding": "note",               # non-ASCII / mojibake
         "journal_macro": "note",          # journal is an unexpanded LaTeX macro (\pra)
         "journal_style": "note",          # journal differs from canonical only by casing
+        "wrong_journal": "warning",       # bib journal is a different journal than the record
         "container_granularity": "note",  # id resolved to the containing volume, not the item
         "parity_suggestion": "note",      # record has data the bib could adopt
         "isbn_unresolved": "note",        # ISBN valid but not found in OL/Google Books (coverage gap)

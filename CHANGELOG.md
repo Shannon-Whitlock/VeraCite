@@ -4,6 +4,48 @@ All notable changes to VeraCite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and VeraCite adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] — 2026-06-29
+
+Patch release: false-positive fixes and journal-name canonicalization, driven by a
+stress-test corpus of real physics/atomic-physics bibliographies.
+
+### Added
+
+- **Journal canonicalization.** Each journal carries a curated set of accepted forms
+  (its abbreviation and full title) in `journal_abbrev.json`. A bib journal that
+  matches any accepted form passes silently; otherwise VeraCite suggests conforming
+  toward the closest accepted form. Severity follows the deviation:
+  - a pure-case slip (`nat. phys.`) or a run-together abbreviation
+    (`Phys.Rev.Lett.`, the INSPIRE no-space house style) is a quiet, suppressible
+    **`journal_style`** note;
+  - a content/punctuation difference (`Phys. Rept.` → `Phys. Rep.`,
+    `Proc. Natl. Acad. Sci. U.S.A.` → `… USA`) is a **`metadata_mismatch`** warning.
+- **`wrong_journal`** — when the bib's journal is a *known but different* journal than
+  the DOI-resolved record (`J. Phys. A` cited with a `J. Phys. B` DOI; `Nature
+  Photonics` with a `Nature` DOI), a warning flags a possible wrong DOI / mis-cited
+  venue and suggests the record's journal.
+- **More given-name precision.** A spelled-out given name disagreeing with the record
+  now carries a suggested fix when the record is a confident correction target
+  (`Jun` → `Jun-Ru`, `Minore` → `Minori`); a genuinely divergent name stays
+  "check manually".
+
+### Fixed
+
+- **Genuine two-letter ISO-4 stems accepted.** `J. Phys. B: At. Mol. Opt. Phys.` (the
+  exact ISO-4 abbreviation) is no longer a false `journal differs`; the abbreviation
+  table's blunt two-letter floor is now allowlisted from the table's own stems
+  (`At.`, `Ed.`, `Am.`, …), while a bogus `Ph.` for `physics` stays rejected.
+- **INSPIRE `Rept.` / no-space forms** (`Rept.Prog.Phys.`, `Phys.Rept.`) are
+  recognized, so cross-source comparison no longer reports a spurious
+  `source_conflict`; a bib using the no-space form is nudged to the spaced canonical.
+- **Book author lists.** Crossref registers book/monograph authors incompletely; a
+  correct extra bib author (e.g. *Rydberg Physics* by Šibalić **and** Adams resolving
+  to a record naming only Šibalić) is no longer flagged as a spurious author — the
+  finding now points at the record's incompleteness and asks the user to verify.
+- **No brace protection on journal names.** Standard BibTeX/biblatex styles print the
+  journal field verbatim (only the title field is recased), so journal names are
+  stored and suggested without brace protection.
+
 ## [0.2.0] — 2026-06-29
 
 First public release. VeraCite audits BibTeX/biblatex bibliographies for

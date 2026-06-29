@@ -538,22 +538,31 @@ def _load_journal_abbrev():
         for tok in re.split(r"[^a-z0-9]+", abbr.lower()):
             if len(tok) == 2 and tok.isalpha():
                 two_letter.add(tok)
-    # canonical-pair index: every key that identifies a journal (its canon_key and any
-    # alias key that maps to it) -> the proper-cased (abbrev, full) pair to SUGGEST.
-    # The pair comes ONLY from the explicit 'canonical' block, never reconstructed from a
-    # lowercased abbreviation key (which would mis-case acronyms like 'ACS'/'IEEE'). So a
-    # canonical suggestion is offered only for journals curated with a cased pair; others
-    # fall back to the full title or the record's name. Every alias of a curated journal
-    # resolves to its pair, so the record's name (whatever form Crossref returns) finds it.
-    canonical = {}   # any journal-identifying key -> (abbrev, full)
-    for fk, pair in canon_block.items():
-        if isinstance(pair, (list, tuple)) and len(pair) == 2:
-            abbrev, full = pair
-            target = canon.get(fk, fk)        # the journal's canon_key
-            canonical[fk] = (abbrev, full)
-            canonical[target] = (abbrev, full)
-            for alias_key in reverse.get(target, ()):  # every accepted form of it
-                canonical[alias_key] = (abbrev, full)
+    # accepted-forms index: every key that identifies a journal -> the TUPLE of proper-cased
+    # ACCEPTED forms (its canonical abbreviation and full title) curated in the 'canonical'
+    # block. Entries that denote the SAME journal (sharing a canon_key -- e.g. PNAS's short
+    # and long full-title entries, or a journal listed with two abbreviation styles) are
+    # MERGED, so every valid full title and abbreviation of the journal is recognized
+    # together (a bib using any of them is never mis-flagged as a different journal). A bib
+    # matching one exactly is correct; anything else conforms to the closest. Forms come
+    # ONLY from the explicit block (proper-cased, brace-protection included), never
+    # reconstructed from a lowercased key.
+    by_journal = {}   # canon_key -> ordered list of accepted forms (deduped)
+    for fk, entry in canon_block.items():
+        forms = entry.get("forms") if isinstance(entry, dict) else None
+        if not forms:
+            continue
+        target = canon.get(fk, fk)
+        bucket = by_journal.setdefault(target, [])
+        for f in forms:
+            if f not in bucket:
+                bucket.append(f)
+    canonical = {}   # any journal-identifying key -> tuple(merged accepted forms)
+    for target, forms in by_journal.items():
+        forms = tuple(forms)
+        canonical[target] = forms
+        for alias_key in reverse.get(target, ()):  # every accepted form's key
+            canonical[alias_key] = forms
     return (canon, {k: frozenset(v) for k, v in reverse.items()},
             frozenset(two_letter), canonical)
 
@@ -591,17 +600,6 @@ def _journal_key(name):
     Journal') is dropped so the two forms key alike."""
     name = re.sub(r"^\s*the\s+", "", html.unescape(name), flags=re.I)
     return re.sub(r"[^a-z0-9]", "", name.lower())
-
-
-def _exact_journal_norm(name):
-    """A journal string normalized for an EXACT-canonical-form comparison: case- and
-    whitespace-insensitive but PUNCTUATION-PRESERVING (so a period/comma difference
-    survives). Used to decide whether the bib already equals the canonical form -- 'Proc.
-    Natl. Acad. Sci. U.S.A.' must NOT equal the canonical 'Proc. Natl. Acad. Sci. USA'
-    (a real deviation to conform), while 'nat. phys.' equals 'Nat. Phys.' (mere case).
-    De-TeX first so brace-protection is not counted as a difference. This is deliberately
-    stricter than `_journal_key`, which folds away punctuation to IDENTIFY the journal."""
-    return re.sub(r"\s+", " ", clean_tex(html.unescape(name)).strip()).lower()
 
 
 # Words dropped from a full title when checking an ISO-4 abbreviation against it
@@ -670,40 +668,53 @@ _JOURNAL_CANON, _JOURNAL_REVERSE, _JOURNAL_TWO_LETTER, _JOURNAL_CANONICAL = \
     _load_journal_abbrev()
 
 
-def _journal_looks_abbreviated(name):
-    """Whether a journal name is written in ABBREVIATED style rather than spelled out,
-    so a suggestion should offer the canonical abbreviation rather than the full title.
-    Signal: an abbreviation carries period-truncated tokens ('Phys.', 'Rev.', 'Rept.') --
-    a token that ends in a literal '.'. A fully spelled-out title ('Journal of Physics B
-    Atomic Molecular Physics') has none. Stopwords ('of', 'and') and series letters ('A',
-    'B') are not evidence either way and are ignored. No signal -> default to abbreviated
-    (most physics/chem bibs abbreviate)."""
-    cleaned = clean_tex(name)
-    toks = [t for t in re.split(r"\s+", cleaned) if t]
-    abbreviated = spelled = 0
-    for t in toks:
-        # A trailing period (possibly before a closing bracket/comma) is the abbreviation
-        # mark -- strip only the OUTER punctuation, never the period itself.
-        if t.rstrip(",;:)]}").endswith("."):
-            abbreviated += 1
-            continue
-        core = t.strip(".,:;()[]{}")
-        if core[:1].isalpha() and len(core) >= 4 and core.lower() not in _ISO4_STOPWORDS:
-            spelled += 1
-    if abbreviated:
-        return True
-    return spelled == 0
+def _is_nospace_abbreviation(name):
+    """Whether a journal name is a run-together abbreviation with NO space after an
+    abbreviation period -- the INSPIRE house style ('Phys.Rev.Lett.', 'Rept.Prog.Phys.',
+    'Astrophys.J.', 'Phys.Rept.'). A valid abbreviation spaces its tokens ('Phys. Rev.
+    Lett.'), so this is a formatting defect to nudge. Signal: at least one period glued
+    directly to the next letter ('.X') and NO period-then-space boundary anywhere -- so a
+    correctly-spaced abbreviation never trips, while both long ('Phys.Rev.Lett.') and
+    short ('Astrophys.J.') run-together forms do. This only runs on the journal field, so
+    a personal-name initial ('J.Smith') is out of scope."""
+    s = clean_tex(name).strip()
+    glued = len(re.findall(r"\.[A-Za-z]", s))
+    spaced = len(re.findall(r"\.\s", s))
+    return glued >= 1 and spaced == 0
 
 
-def _canonical_journal_pair(name):
-    """The proper-cased (abbrev, full) canonical pair for the journal `name` denotes, or
-    None. Looks up by the name's normalized key, then by the canon_key it resolves to --
-    so any accepted alias (the record's Crossref name, a known variant) finds the pair."""
+def _edit_distance(a, b):
+    """Levenshtein distance between two strings (full DP). Used only to pick the CLOSEST
+    accepted journal form to a non-matching bib value, so it runs on short strings."""
+    if a == b:
+        return 0
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _canonical_journal_forms(name):
+    """The tuple of proper-cased ACCEPTED forms for the journal `name` denotes (canonical
+    abbreviation(s) and full title), or None. Looks up by the name's normalized key, then by
+    the canon_key it resolves to -- so any accepted alias (the record's Crossref name, a
+    known variant) finds the forms."""
     k = _journal_key(name)
-    pair = _JOURNAL_CANONICAL.get(k)
-    if pair:
-        return pair
+    forms = _JOURNAL_CANONICAL.get(k)
+    if forms:
+        return forms
     return _JOURNAL_CANONICAL.get(_JOURNAL_CANON.get(k, k))
+
+
+def _closest_journal_form(value, forms):
+    """The accepted form in `forms` closest to `value` by edit distance on the normalized
+    (brace-stripped, space-collapsed, lowercased) text; ties break toward the shorter form."""
+    norm = lambda s: re.sub(r"\s+", " ", s.replace("{", "").replace("}", "")).strip().lower()
+    nv = norm(value)
+    return min(forms, key=lambda f: (_edit_distance(nv, norm(f)), len(f)))
 
 
 def _journal_equiv(a, b):
@@ -1377,39 +1388,91 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     bj, aj = clean_tex(raw_journal).lower(), clean_tex(rec.get("journal", "")).lower()
     rec_journal_safe = _safe_suggestion(rec.get("journal", ""))
     # The DOI is authoritative (Crossref is the primary metadata resource), so the record
-    # names the correct journal. If that journal has a curated CANONICAL (abbrev, full)
-    # pair, the canonical string is the single source of truth: the bib must match it
-    # EXACTLY (period-sensitive). This runs even when the bib was accepted as the same
-    # journal by `_journal_equiv` -- that check folds punctuation to IDENTIFY the journal,
-    # but a punctuation deviation from the fixed canonical string ('...Sci. U.S.A.' vs the
-    # canonical '...Sci. USA') is still a real difference to conform. We suggest the
-    # canonical form matching the bib's STYLE: the abbreviation if the bib wrote one
-    # ('Nat. Phy.' -> 'Nat. Phys.'), the full title if it wrote a full name. Pure case
-    # ('nat. phys.') is a slip, folded away, still conformed toward the cased canonical.
-    rec_pair = (_canonical_journal_pair(rec.get("journal", ""))
-                if bj and aj and "arxiv" not in bj and "arxiv" not in aj else None)
+    # names the correct journal. If that journal has a curated set of ACCEPTED forms (its
+    # canonical abbreviation(s) and full title), the bib must match one of them exactly. A
+    # bib equal to any accepted form (case-insensitive but PROTECTION-sensitive, so '{ApJ}'
+    # is satisfied but bare 'ApJ' is not) passes silently. Anything else conforms to the
+    # CLOSEST accepted form by edit distance -- so a typo ('Nat. Phy.'), a non-standard
+    # spelling ('Phys. Rept.'), a run-together form ('Astrophys.J.'), a case slip
+    # ('nat. phys.') or missing brace protection ('ApJ') is nudged to the nearest correct
+    # form. Severity follows the deviation: pure case / missing protection / run-together
+    # spacing is a journal_style note (FAIR polish, no findability impact); a content or
+    # punctuation difference is a metadata_mismatch WARN.
+    rec_forms = (_canonical_journal_forms(rec.get("journal", ""))
+                 if bj and aj and "arxiv" not in bj and "arxiv" not in aj else None)
+    # WRONG JOURNAL (checked first): the bib's journal resolves to a KNOWN journal that is
+    # DIFFERENT from the one the DOI resolved to ('J. Phys. A' cited with a 'J. Phys. B'
+    # DOI; 'Nature Photonics' with a 'Nature' DOI). Both are real journals, so this is not a
+    # typo/format slip of the SAME journal -- the DOI may point to the wrong paper, or the
+    # journal name is wrong. Flag it (wrong_journal WARN) and stop, suggesting the record's
+    # journal since the DOI is authoritative; do NOT also try to 'conform formatting' toward
+    # a journal the entry is not. Both sides must resolve to a known-but-different journal
+    # key (an unknown bib string like a typo is handled by the conform logic, not here).
+    bib_jkey = _JOURNAL_CANON.get(_journal_key(raw_journal)) if not nonarticle else None
+    rec_jkey = _JOURNAL_CANON.get(_journal_key(rec.get("journal", "")))
+    different_journal = (bib_jkey and rec_jkey and bib_jkey != rec_jkey
+                         and "arxiv" not in bj and "arxiv" not in aj)
     if nonarticle:
         pass
-    elif rec_pair:
-        abbrev, full = rec_pair
-        target = abbrev if _journal_looks_abbreviated(raw_journal) else full
-        if raw_journal.strip() != target:
-            # Distinguish a CASE-ONLY deviation from a punctuation/content one. Case-only
-            # ('nat. phys.' vs 'Nat. Phys.') does not impair findability/FAIRness -- the
-            # entry already resolved -- so it is a quiet canonical-casing nudge (a
-            # journal_style note, suppressible). A punctuation/content deviation
-            # ('...Sci. U.S.A.' vs the canonical '...Sci. USA', 'Phys. Rept.' vs
-            # 'Phys. Rep.') is a real difference from the fixed canonical string a
-            # reader/parser would see as wrong -> a metadata_mismatch WARN. Both carry the
-            # structured suggestion so a tool can conform toward canonical. (Two separate
-            # rep.add calls with LITERAL category= so the rule catalog can scan them.)
+    elif different_journal:
+        rec_disp = (rec_forms[0] if rec_forms else None) or rec_journal_safe
+        rep.add(Severity.WARN, e, f"[{source}] journal {raw_journal.strip()!r} is a "
+                f"different journal than the record ({_safe_suggestion(rec.get('journal',''))!r}) "
+                f"-- the DOI may point to the wrong paper, or the journal name is wrong; "
+                f"verify the citation", "record", category="wrong_journal", field="journal",
+                suggested={"field": "journal", "from": raw_journal, "to": rec_disp}
+                if rec_disp else None)
+    elif rec_forms:
+        # Whitespace-only normalization that preserves case (the silent-pass test is exact,
+        # so a case slip 'nat. phys.' still gets nudged); `bare` also drops any stray braces
+        # and lowercases, used for the case-only test. Journal names are NOT brace-protected
+        # (standard BibTeX/biblatex styles print the journal field verbatim -- only the
+        # title field is recased -- so 'npj'/'ApJ' survive without braces).
+        # `norm` drops braces (a user's optional protection is ignored) but KEEPS case, so
+        # the silent test is case-sensitive ('Npj' is nudged) yet brace-insensitive
+        # ('{npj}' is accepted). `bare` additionally lowercases, for the case-only test.
+        norm = lambda s: re.sub(r"\s+", " ", s.replace("{", "").replace("}", "").strip())
+        bare = lambda s: norm(s).lower()
+        nraw = norm(raw_journal)
+        is_full = lambda f: "." not in clean_tex(f) and len(clean_tex(f).split()) >= 2
+        rec_full = norm(_safe_suggestion(rec.get("journal", "")))
+        # The ACCEPTED-SILENT forms are: the abbreviation(s) of this journal, plus the
+        # record's OWN returned full title -- but NOT other (older/variant) full titles of
+        # the same journal. The DOI is authoritative on the current name, so a bib using a
+        # DIFFERENT valid full title than the record's is conformed toward the record's
+        # (PNAS: 'Proc. Natl. Acad. Sci. USA' and Crossref's exact full title pass; the
+        # other PNAS full title is nudged to Crossref's). The merged forms are still used
+        # for RECOGNITION above (so a variant full title is never mis-flagged as a different
+        # journal), just not auto-accepted here.
+        silent_forms = [f for f in rec_forms if not is_full(f)]
+        if rec_full:
+            silent_forms.append(rec_full)
+        if any(nraw == norm(f) for f in silent_forms):
+            pass   # the abbreviation, or the record's own full title -> silent
+        else:
+            bib_is_full_title = is_full(raw_journal)
+            if bib_is_full_title and rec_full:
+                target = rec_full          # conform a variant full title to the record's
+            else:
+                target = _closest_journal_form(raw_journal, rec_forms)
             sugg = {"field": "journal", "from": raw_journal, "to": target}
-            if raw_journal.strip().lower() == target.lower():
+            if _is_nospace_abbreviation(raw_journal):
+                # A run-together abbreviation ('Astrophys.J.') -- a spacing defect; nudge to
+                # the closest properly-spaced accepted form (journal_style note).
+                rep.add(Severity.INFO, e, f"[{source}] journal abbreviation is run together "
+                        f"without spaces; a valid abbreviation spaces its tokens",
+                        "record", category="journal_style", field="journal",
+                        suggested=sugg)
+            elif bare(raw_journal) == bare(target):
+                # Differs only by CASE -- a slip, not a different title. Quiet canonical-
+                # casing nudge (journal_style note).
                 rep.add(Severity.INFO, e,
                         f"[{source}] journal casing differs from the canonical form",
                         "record", category="journal_style", field="journal",
                         suggested=sugg)
             else:
+                # A content/punctuation difference from every accepted form -- a real
+                # difference a reader/parser sees as wrong (metadata_mismatch WARN).
                 rep.add(Severity.WARN, e,
                         f"[{source}] journal differs from the canonical form",
                         "record", category="metadata_mismatch", field="journal",

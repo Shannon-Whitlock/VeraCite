@@ -3,6 +3,7 @@
  "abbreviations": {
   "a&a": "Astronomy and Astrophysics",
   "a&a rev.": "The Astronomy and Astrophysics Review",
+  "aa": "Astronomy and Astrophysics",
   "acc. chem. res.": "Accounts of Chemical Research",
   "acs appl. mater. interfaces": "ACS Applied Materials & Interfaces",
   "acs catal.": "ACS Catalysis",
@@ -38,11 +39,19 @@
   "adv. phys.": "Advances in Physics",
   "adv. quantum chem.": "Advances in Quantum Chemistry",
   "adv. synth. catal.": "Advanced Synthesis and Catalysis",
+  "advancesinchemicalphysics": "Advances in Chemical Physics",
+  "advancesinphysics": "Advances in Physics",
+  "advancesinquantumchemistry": "Advances in Quantum Chemistry",
+  "advchemphys": "Advances in Chemical Physics",
+  "advphys": "Advances in Physics",
+  "advquantumchem": "Advances in Quantum Chemistry",
   "aiaa j.": "AIAA Journal",
   "aiche j.": "AIChE Journal",
   "aip conf. proc.": "AIP Conference Proceedings",
   "aj": "Astronomical Journal",
   "am. j. phys.": "American Journal of Physics",
+  "americanjournalofphysics": "American Journal of Physics",
+  "amjphys": "American Journal of Physics",
   "anal. chem.": "Analytical Chemistry",
   "angew. chem.": "Angewandte Chemie",
   "angew. chem., int. ed.": "Angewandte Chemie International Edition",
@@ -57,6 +66,8 @@
   "ann. phys. (leipzig)": "Annalen der Physik (Leipzig)",
   "ann. phys. (n.y.)": "Annals of Physics (New York)",
   "ann. phys. (paris)": "Annales de Physique (Paris)",
+  "annalsofphysics": "Annals of Physics",
+  "annphys": "Annals of Physics",
   "annu. rev. astron. astrophys.": "Annual Review of Astronomy and Astrophysics",
   "annu. rev. at. mol. phys.": "Annual Review of Atomic and Molecular Physics",
   "annu. rev. fluid mech.": "Annual Review of Fluid Mechanics",
@@ -70,9 +81,13 @@
   "appl. opt.": "Applied Optics",
   "appl. phys. lett.": "Applied Physics Letters",
   "appl. spectrosc.": "Applied Spectroscopy",
+  "appliedoptics": "Applied Optics",
   "appliedphysicsb": "Applied Physics B",
   "appliedphysicsbphotophysicsandlaserchemistry": "Applied Physics B",
+  "appliedphysicsletters": "Applied Physics Letters",
+  "applopt": "Applied Optics",
   "applphysb": "Applied Physics B",
+  "applphyslett": "Applied Physics Letters",
   "araa": "Annual Review of Astronomy and Astrophysics",
   "ark. fys.": "Arkiv foer Fysik",
   "asian j. org. chem.": "Asian Journal of Organic Chemistry",
@@ -81,14 +96,25 @@
   "astron. j.": "Astronomical Journal",
   "astron. nachr.": "Astronomische Nachrichten",
   "astron. zh. [sov. astron.]": "Astronomicheskii Zhurnal [Soviet Astronomy]",
+  "astronastrophys": "Astronomy and Astrophysics",
+  "astronomyandastrophysics": "Astronomy and Astrophysics",
+  "astronomyastrophysics": "Astronomy and Astrophysics",
   "astropart. phys.": "Astroparticle Physics",
   "astrophy. space sci.": "Astrophysics and Space Science",
   "astrophys. j.": "Astrophysical Journal",
   "astrophys. j. lett.": "Astrophysical Journal Letters",
   "astrophys. j. suppl. ser.": "Astrophysical Journal Supplement Series",
   "astrophys. lett.": "Astrophysical Letters",
+  "astrophysicaljournal": "The Astrophysical Journal",
+  "astrophysicaljournalletters": "The Astrophysical Journal Letters",
+  "astrophysicaljournalsupplementseries": "The Astrophysical Journal Supplement Series",
+  "astrophysj": "The Astrophysical Journal",
+  "astrophysjlett": "The Astrophysical Journal Letters",
+  "astrophysjsupplser": "The Astrophysical Journal Supplement Series",
   "at. data. nucl. data tables": "Atomic Data and Nuclear Data Tables",
   "at. energ. [sov. j. at. energy]": "Atomnaya Energiya [Soviet Journal of Atomic Energy]",
+  "atdatanucldatatables": "Atomic Data and Nuclear Data Tables",
+  "atomicdataandnucleardatatables": "Atomic Data and Nuclear Data Tables",
   "aust. j. chem.": "Australian Journal of Chemistry",
   "aust. j. phys.": "Australian Journal of Physics",
   "bell syst. tech. j.": "Bell System Technical Journal",
@@ -127,7 +153,11 @@
   "chem. rev.": "Chemical Reviews",
   "chem. sci.": "Chemical Science",
   "chem. soc. rev.": "Chemical Society Reviews",
+  "chemicalphysics": "Chemical Physics",
+  "chemicalphysicsletters": "Chemical Physics Letters",
   "chemistryopen": "ChemistryOpen",
+  "chemphys": "Chemical Physics",
+  "chemphyslett": "Chemical Physics Letters",
   "chempluschem": "ChemPlusChem",
   "chemsuschem": "ChemSusChem",
   "chimia": "Chimia",
@@ -143,6 +173,8 @@
   "commun. pure appl. math.": "Communications on Pure and Applied Mathematics",
   "complex syst.": "Complex Systems",
   "comput. phys. commun.": "Computer Physics Communications",
+  "computerphysicscommunications": "Computer Physics Communications",
+  "computphyscommun": "Computer Physics Communications",
   "coord. chem. rev.": "Coordination Chemistry Reviews",
   "croat. chem. acta": "Croatica Chemica Acta",
   "cryogenics": "Cryogenics",
@@ -166,9 +198,15 @@
   "eur. phys. j. c": "European Physical Journal C",
   "eur. phys. j. d": "European Physical Journal D",
   "eur. phys. j. e": "European Physical Journal E",
+  "europeanphysicaljournala": "The European Physical Journal A",
+  "europeanphysicaljournald": "The European Physical Journal D",
   "europhys. lett.": "Europhysics Letters",
+  "eurphysja": "The European Physical Journal A",
+  "eurphysjd": "The European Physical Journal D",
   "ferroelectrics": "Ferroelectrics",
   "few-body syst.": "Few-Body Systems",
+  "fewbodysyst": "Few-Body Systems",
+  "fewbodysystems": "Few-Body Systems",
   "fields quanta": "Fields and Quanta",
   "fiz. elem. chastits at. yadra [sov. j. part. nucl.]": "Fizika Elementarnykh Chastits i Atomnogo Yadra [Soviet Journal of Particles and Nuclei]",
   "fiz. met. metalloved. [phys. met. metallogr. (ussr)]": "Fizika Metallov i Metallovedenie [Physics of Metals and Metallography (USSR)]",
@@ -201,6 +239,8 @@
   "ieee trans. microwave theory tech.": "IEEE Transactions on Microwave Theory and Techniques",
   "ieee trans. nucl. sci.": "IEEE Transactions on Nuclear Science",
   "ieee trans. sonics ultrason.": "IEEE Transactions on Sonics and Ultrasonics",
+  "ieeetransactionsonmagnetics": "IEEE Transactions on Magnetics",
+  "ieeetransmagn": "IEEE Transactions on Magnetics",
   "ilnuovocimento": "Il Nuovo Cimento",
   "ind. eng. chem.": "Industrial and Engineering Chemistry",
   "ind. eng. chem. res.": "Industrial and Engineering Chemistry Research",
@@ -318,20 +358,34 @@
   "j. supercond.": "Journal of Superconductivity",
   "j. theor. biol.": "Journal of Theoretical Biology",
   "j. vac. sci. technol.": "Journal of Vacuum Science and Technology",
+  "jamchemsoc": "Journal of the American Chemical Society",
   "japplphys": "Journal of Applied Physics",
   "jcap": "Journal of Cosmology and Astroparticle Physics",
+  "jchemphys": "The Journal of Chemical Physics",
+  "jcomputphys": "Journal of Computational Physics",
   "jetp lett.": "JETP Letters",
   "jhep": "Journal of High Energy Physics",
   "jhighenergyphys": "Journal of High Energy Physics",
+  "jmagnreson": "Journal of Magnetic Resonance",
   "jmagnresonimaging": "Journal of Magnetic Resonance Imaging",
+  "joptsocamb": "Journal of the Optical Society of America B",
   "journaldephysique": "Journal de Physique",
   "journalofappliedphysics": "Journal of Applied Physics",
+  "journalofchemicalphysics": "The Journal of Chemical Physics",
+  "journalofcomputationalphysics": "Journal of Computational Physics",
   "journalofhighenergyphysics": "Journal of High Energy Physics",
+  "journalofmagneticresonance": "Journal of Magnetic Resonance",
   "journalofmagneticresonanceimaging": "Journal of Magnetic Resonance Imaging",
   "journalofphysicsbatomicmolecularandopticalphysics": "Journal of Physics B: Atomic, Molecular and Optical Physics",
+  "journalofresearchofthenationalinstituteofstandardsandtechnology": "Journal of Research of the National Institute of Standards and Technology",
+  "journaloftheamericanchemicalsociety": "Journal of the American Chemical Society",
+  "journaloftheopticalsocietyofamericab": "Journal of the Optical Society of America B",
+  "journalofthephysicalsocietyofjapan": "Journal of the Physical Society of Japan",
   "jphysb": "Journal of Physics B: Atomic, Molecular and Optical Physics",
+  "jphyssocjpn": "Journal of the Physical Society of Japan",
   "jpn. j. appl. phys.": "Japanese Journal of Applied Physics",
   "jpn. j. phys.": "Japanese Journal of Physics",
+  "jresnatlinststandtechnol": "Journal of Research of the National Institute of Standards and Technology",
   "k. dan. vidensk. selsk. mat. fys. medd.": "Kongelige Danske Videnskabernes Selskab, Matematisk-Fysiske Meddelelser",
   "kinet. catal.": "Kinetics and Catalysis",
   "kolloid z. z. polym.": "Kolloid Zeitschrift and Zeitschrift fur Polymere",
@@ -357,8 +411,13 @@
   "mnras": "Monthly Notices of the Royal Astronomical Society",
   "mol. cryst. liq. cryst.": "Molecular Crystals and Liquid Crystals",
   "mol. phys.": "Molecular Physics",
+  "molecularphysics": "Molecular Physics",
+  "molphys": "Molecular Physics",
   "mon. not. r. astron. soc.": "Monthly Notices of the Royal Astronomical Society",
   "mon. not. roy. astron. soc.": "Monthly Notices of the Royal Astronomical Society",
+  "monnotrastronsoc": "Monthly Notices of the Royal Astronomical Society",
+  "monnotroyastronsoc": "Monthly Notices of the Royal Astronomical Society",
+  "monthlynoticesoftheroyalastronomicalsociety": "Monthly Notices of the Royal Astronomical Society",
   "nano lett.": "Nano Letters",
   "nanotechnology": "Nanotechnology",
   "nat. astron.": "Nature Astronomy",
@@ -377,17 +436,31 @@
   "nat. rev. chem.": "Nature Reviews Chemistry",
   "nat. rev. drug discov.": "Nature Reviews Drug Discovery",
   "nat. rev. phys.": "Nature Reviews Physics",
+  "natastron": "Nature Astronomy",
+  "natcommun": "Nature Communications",
   "natl. bur. stand. circ. (u.s.)": "National Bureau of Standards (U.S.), Circular",
   "natl. bur. stand. misc. publ. (u.s.)": "National Bureau of Standards (U.S.), Miscellaneous Publication",
   "natl. bur. stand. spec. publ. (u.s.)": "National Bureau of Standards (U.S.), Special Publication",
+  "natnanotechnol": "Nature Nanotechnology",
+  "natphoton": "Nature Photonics",
   "natphys": "Nature Physics",
+  "natrevphys": "Nature Reviews Physics",
   "nature": "Nature",
   "nature (london)": "Nature (London)",
+  "natureastronomy": "Nature Astronomy",
+  "naturecommunications": "Nature Communications",
+  "naturenanotechnology": "Nature Nanotechnology",
+  "naturephotonics": "Nature Photonics",
   "naturephysics": "Nature Physics",
+  "naturereviewsphysics": "Nature Reviews Physics",
   "naturwissenschaften": "Naturwissenschaften",
   "new j. chem.": "New Journal of Chemistry",
   "new j. phys.": "New Journal of Physics",
+  "newjournalofphysics": "New Journal of Physics",
+  "newjphys": "New Journal of Physics",
   "npj quantum inf.": "npj Quantum Information",
+  "npjquantuminf": "{npj} Quantum Information",
+  "npjquantuminformation": "{npj} Quantum Information",
   "nucl. data, sec. a": "Nuclear Data, Section A",
   "nucl. data, sec. b": "Nuclear Data, Section B",
   "nucl. fusion": "Nuclear Fusion",
@@ -397,6 +470,10 @@
   "nucl. phys. a": "Nuclear Physics A",
   "nucl. phys. b": "Nuclear Physics B",
   "nucl. sci. eng.": "Nuclear Science and Engineering",
+  "nuclearphysicsa": "Nuclear Physics A",
+  "nuclearphysicsb": "Nuclear Physics B",
+  "nuclphysa": "Nuclear Physics A",
+  "nuclphysb": "Nuclear Physics B",
   "nukleonika": "Nukleonika",
   "nuovo cimento": "Nuovo Cimento",
   "nuovo cimento a": "Nuovo Cimento A",
@@ -408,7 +485,13 @@
   "opt. lett.": "Optics Letters",
   "opt. news": "Optics News",
   "opt. spectrosc.": "Optics and Spectroscopy (USSR)",
+  "optcommun": "Optics Communications",
+  "optexpress": "Optics Express",
+  "opticscommunications": "Optics Communications",
+  "opticsexpress": "Optics Express",
+  "opticsletters": "Optics Letters",
   "optik (stuttgart)": "Optik (Stuttgart)",
+  "optlett": "Optics Letters",
   "org. biomol. chem.": "Organic and Biomolecular Chemistry",
   "org. chem. front.": "Organic Chemistry Frontiers",
   "org. lett.": "Organic Letters",
@@ -462,12 +545,39 @@
   "phys. today": "Physics Today",
   "phys. z.": "Physikalische Zeitschrift",
   "phys. z. sowjetunion": "Physikalische Zeitschrift der Sowjetunion",
+  "physchemchemphys": "Physical Chemistry Chemical Physics",
   "physica (utrecht)": "Physica (Utrecht)",
   "physica a": "Physica A",
   "physica b": "Physica B",
+  "physicalchemistrychemicalphysics": "Physical Chemistry Chemical Physics",
+  "physicalreview": "Physical Review",
+  "physicalreviewa": "Physical Review A",
+  "physicalreviewapplied": "Physical Review Applied",
+  "physicalreviewb": "Physical Review B",
+  "physicalreviewc": "Physical Review C",
+  "physicalreviewd": "Physical Review D",
+  "physicalreviewletters": "Physical Review Letters",
+  "physicalreviewresearch": "Physical Review Research",
+  "physicalreviewx": "Physical Review X",
+  "physicascripta": "Physica Scripta",
   "physics (n.y.)": "Physics (New York)",
+  "physicsletters": "Physics Letters",
+  "physicslettersb": "Physics Letters B",
   "physicsreports": "Physics Reports",
+  "physlett": "Physics Letters",
+  "physlettb": "Physics Letters B",
   "physrep": "Physics Reports",
+  "physrept": "Physics Reports",
+  "physrev": "Physical Review",
+  "physreva": "Physical Review A",
+  "physrevappl": "Physical Review Applied",
+  "physrevb": "Physical Review B",
+  "physrevc": "Physical Review C",
+  "physrevd": "Physical Review D",
+  "physrevlett": "Physical Review Letters",
+  "physrevres": "Physical Review Research",
+  "physrevx": "Physical Review X",
+  "physscr": "Physica Scripta",
   "planet. space sci.": "Planetary and Space Science",
   "plasma phys.": "Plasma Physics",
   "plasma phys. control. fusion": "Plasma Physics and Controlled Fusion",
@@ -495,10 +605,15 @@
   "prog. theor. phys.": "Progress of Theoretical Physics",
   "prognuclmagnresonspectrosc": "Progress in Nuclear Magnetic Resonance Spectroscopy",
   "progressinnuclearmagneticresonancespectroscopy": "Progress in Nuclear Magnetic Resonance Spectroscopy",
+  "progressoftheoreticalphysics": "Progress of Theoretical Physics",
+  "progtheorphys": "Progress of Theoretical Physics",
   "prx quantum": "PRX Quantum",
+  "prxquantum": "PRX Quantum",
   "publ. astron. soc. jpn.": "Publications of the Astronomical Society of Japan",
   "publ. astron. soc. pac.": "Publications of the Astronomical Society of the Pacific",
   "pure appl. chem.": "Pure and Applied Chemistry",
+  "pureandappliedchemistry": "Pure and Applied Chemistry",
+  "pureapplchem": "Pure and Applied Chemistry",
   "quantum": "Quantum",
   "quantum electron.": "Quantum Electronics",
   "quantum opt.": "Quantum Optics",
@@ -510,17 +625,28 @@
   "recl. trav. chim. pays-bas": "Recueil des Travaux Chimiques des Pays-Bas",
   "renewable sustainable energy rev.": "Renewable and Sustainable Energy Reviews",
   "rep. prog. phys.": "Reports on Progress in Physics",
+  "reportsonprogressinphysics": "Reports on Progress in Physics",
+  "repprogphys": "Reports on Progress in Physics",
+  "reptprogphys": "Reports on Progress in Physics",
   "rev. mex. astron. astrofis.": "Revista Mexicana de Astronomia y Astrofisica",
   "rev. mex. fis.": "Revista Mexicana de Fisica",
   "rev. mod. phys.": "Reviews of Modern Physics",
   "rev. opt. theor. instrum.": "Revue d'Optique, Theorique et Instrumentale",
   "rev. sci. instrum.": "Review of Scientific Instruments",
+  "reviewofscientificinstruments": "Review of Scientific Instruments",
+  "reviewsofmodernphysics": "Reviews of Modern Physics",
+  "revmodphys": "Reviews of Modern Physics",
+  "revsciinstrum": "Review of Scientific Instruments",
   "rsc adv.": "RSC Advances",
   "russ. j. phys. chem.": "Russian Journal of Physical Chemistry",
   "sci. adv.": "Science Advances",
   "sci. am.": "Scientific American",
   "sci. rep.": "Scientific Reports",
+  "sciadv": "Science Advances",
   "science": "Science",
+  "scienceadvances": "Science Advances",
+  "scientificreports": "Scientific Reports",
+  "scirep": "Scientific Reports",
   "sol. phys.": "Solar Physics",
   "solid state commun.": "Solid State Communications",
   "solid-state electron.": "Solid-State Electronics",
@@ -598,77 +724,498 @@
   "z. phys. chem. (leipzig)": "Zeitschrift fur Physikalische Chemie (Leipzig)"
  },
  "canonical": {
-  "appliedphysicsb": [
-   "Appl. Phys. B",
-   "Applied Physics B"
-  ],
-  "frontiersinphysics": [
-   "Front. Phys.",
-   "Frontiers in Physics"
-  ],
-  "hyperfineinteractions": [
-   "Hyperfine Interact.",
-   "Hyperfine Interactions"
-  ],
-  "ilnuovocimento": [
-   "Nuovo Cimento",
-   "Il Nuovo Cimento"
-  ],
-  "journaldephysique": [
-   "J. Phys. France",
-   "Journal de Physique"
-  ],
-  "journalofappliedphysics": [
-   "J. Appl. Phys.",
-   "Journal of Applied Physics"
-  ],
-  "journalofhighenergyphysics": [
-   "J. High Energy Phys.",
-   "Journal of High Energy Physics"
-  ],
-  "journalofmagneticresonanceimaging": [
-   "J. Magn. Reson. Imaging",
-   "Journal of Magnetic Resonance Imaging"
-  ],
-  "journalofphysicsbatomicmolecularandopticalphysics": [
-   "J. Phys. B",
-   "Journal of Physics B: Atomic, Molecular and Optical Physics"
-  ],
-  "magneticresonanceinmedicine": [
-   "Magn. Reson. Med.",
-   "Magnetic Resonance in Medicine"
-  ],
-  "naturephysics": [
-   "Nat. Phys.",
-   "Nature Physics"
-  ],
-  "physicsreports": [
-   "Phys. Rep.",
-   "Physics Reports"
-  ],
-  "proceedingsofthenationalacademyofsciences": [
-   "Proc. Natl. Acad. Sci. USA",
-   "Proceedings of the National Academy of Sciences of the United States of America"
-  ],
-  "proceedingsofthenationalacademyofsciencesoftheunitedstatesofamerica": [
-   "Proc. Natl. Acad. Sci. USA",
-   "Proceedings of the National Academy of Sciences of the United States of America"
-  ],
-  "proceedingsoftheroyalsocietya": [
-   "Proc. R. Soc. A",
-   "Proceedings of the Royal Society A"
-  ],
-  "progressinnuclearmagneticresonancespectroscopy": [
-   "Prog. Nucl. Magn. Reson. Spectrosc.",
-   "Progress in Nuclear Magnetic Resonance Spectroscopy"
-  ],
-  "quantumscienceandtechnology": [
-   "Quantum Sci. Technol.",
-   "Quantum Science and Technology"
-  ],
-  "wileyinterdisciplinaryreviewscomputationalmolecularscience": [
-   "Wiley Interdiscip. Rev. Comput. Mol. Sci.",
-   "Wiley Interdisciplinary Reviews: Computational Molecular Science"
-  ]
+  "advancesinchemicalphysics": {
+   "forms": [
+    "Adv. Chem. Phys.",
+    "Advances in Chemical Physics"
+   ]
+  },
+  "advancesinphysics": {
+   "forms": [
+    "Adv. Phys.",
+    "Advances in Physics"
+   ]
+  },
+  "advancesinquantumchemistry": {
+   "forms": [
+    "Adv. Quantum Chem.",
+    "Advances in Quantum Chemistry"
+   ]
+  },
+  "americanjournalofphysics": {
+   "forms": [
+    "Am. J. Phys.",
+    "American Journal of Physics"
+   ]
+  },
+  "annalsofphysics": {
+   "forms": [
+    "Ann. Phys.",
+    "Annals of Physics"
+   ]
+  },
+  "appliedoptics": {
+   "forms": [
+    "Appl. Opt.",
+    "Applied Optics"
+   ]
+  },
+  "appliedphysicsb": {
+   "forms": [
+    "Appl. Phys. B",
+    "Applied Physics B"
+   ]
+  },
+  "appliedphysicsletters": {
+   "forms": [
+    "Appl. Phys. Lett.",
+    "Applied Physics Letters"
+   ]
+  },
+  "astronomyandastrophysics": {
+   "forms": [
+    "A&A",
+    "Astron. Astrophys.",
+    "Astronomy and Astrophysics"
+   ]
+  },
+  "astrophysicaljournal": {
+   "forms": [
+    "ApJ",
+    "Astrophys. J.",
+    "The Astrophysical Journal"
+   ]
+  },
+  "astrophysicaljournalletters": {
+   "forms": [
+    "ApJL",
+    "Astrophys. J. Lett.",
+    "The Astrophysical Journal Letters"
+   ]
+  },
+  "astrophysicaljournalsupplementseries": {
+   "forms": [
+    "ApJS",
+    "Astrophys. J. Suppl. Ser.",
+    "The Astrophysical Journal Supplement Series"
+   ]
+  },
+  "atomicdataandnucleardatatables": {
+   "forms": [
+    "At. Data. Nucl. Data Tables",
+    "Atomic Data and Nuclear Data Tables"
+   ]
+  },
+  "chemicalphysics": {
+   "forms": [
+    "Chem. Phys.",
+    "Chemical Physics"
+   ]
+  },
+  "chemicalphysicsletters": {
+   "forms": [
+    "Chem. Phys. Lett.",
+    "Chemical Physics Letters"
+   ]
+  },
+  "computerphysicscommunications": {
+   "forms": [
+    "Comput. Phys. Commun.",
+    "Computer Physics Communications"
+   ]
+  },
+  "europeanphysicaljournala": {
+   "forms": [
+    "Eur. Phys. J. A",
+    "The European Physical Journal A"
+   ]
+  },
+  "europeanphysicaljournald": {
+   "forms": [
+    "Eur. Phys. J. D",
+    "The European Physical Journal D"
+   ]
+  },
+  "fewbodysystems": {
+   "forms": [
+    "Few-Body Syst.",
+    "Few-Body Systems"
+   ]
+  },
+  "frontiersinphysics": {
+   "forms": [
+    "Front. Phys.",
+    "Frontiers in Physics"
+   ]
+  },
+  "hyperfineinteractions": {
+   "forms": [
+    "Hyperfine Interact.",
+    "Hyperfine Interactions"
+   ]
+  },
+  "ieeetransactionsonmagnetics": {
+   "forms": [
+    "IEEE Trans. Magn.",
+    "IEEE Transactions on Magnetics"
+   ]
+  },
+  "ilnuovocimento": {
+   "forms": [
+    "Nuovo Cimento",
+    "Il Nuovo Cimento"
+   ]
+  },
+  "journaldephysique": {
+   "forms": [
+    "J. Phys. France",
+    "Journal de Physique"
+   ]
+  },
+  "journalofappliedphysics": {
+   "forms": [
+    "J. Appl. Phys.",
+    "Journal of Applied Physics"
+   ]
+  },
+  "journalofchemicalphysics": {
+   "forms": [
+    "J. Chem. Phys.",
+    "The Journal of Chemical Physics"
+   ]
+  },
+  "journalofcomputationalphysics": {
+   "forms": [
+    "J. Comput. Phys.",
+    "Journal of Computational Physics"
+   ]
+  },
+  "journalofhighenergyphysics": {
+   "forms": [
+    "J. High Energy Phys.",
+    "Journal of High Energy Physics"
+   ]
+  },
+  "journalofmagneticresonance": {
+   "forms": [
+    "J. Magn. Reson.",
+    "Journal of Magnetic Resonance"
+   ]
+  },
+  "journalofmagneticresonanceimaging": {
+   "forms": [
+    "J. Magn. Reson. Imaging",
+    "Journal of Magnetic Resonance Imaging"
+   ]
+  },
+  "journalofphysicsbatomicmolecularandopticalphysics": {
+   "forms": [
+    "J. Phys. B",
+    "Journal of Physics B: Atomic, Molecular and Optical Physics"
+   ]
+  },
+  "journalofresearchofthenationalinstituteofstandardsandtechnology": {
+   "forms": [
+    "J. Res. Natl. Inst. Stand. Technol.",
+    "Journal of Research of the National Institute of Standards and Technology"
+   ]
+  },
+  "journaloftheamericanchemicalsociety": {
+   "forms": [
+    "J. Am. Chem. Soc.",
+    "Journal of the American Chemical Society"
+   ]
+  },
+  "journaloftheopticalsocietyofamericab": {
+   "forms": [
+    "J. Opt. Soc. Am. B",
+    "Journal of the Optical Society of America B"
+   ]
+  },
+  "journalofthephysicalsocietyofjapan": {
+   "forms": [
+    "J. Phys. Soc. Jpn.",
+    "Journal of the Physical Society of Japan"
+   ]
+  },
+  "magneticresonanceinmedicine": {
+   "forms": [
+    "Magn. Reson. Med.",
+    "Magnetic Resonance in Medicine"
+   ]
+  },
+  "molecularphysics": {
+   "forms": [
+    "Mol. Phys.",
+    "Molecular Physics"
+   ]
+  },
+  "monthlynoticesoftheroyalastronomicalsociety": {
+   "forms": [
+    "MNRAS",
+    "Mon. Not. R. Astron. Soc.",
+    "Monthly Notices of the Royal Astronomical Society"
+   ]
+  },
+  "nature": {
+   "forms": [
+    "Nature"
+   ]
+  },
+  "natureastronomy": {
+   "forms": [
+    "Nat. Astron.",
+    "Nature Astronomy"
+   ]
+  },
+  "naturecommunications": {
+   "forms": [
+    "Nat. Commun.",
+    "Nature Communications"
+   ]
+  },
+  "naturenanotechnology": {
+   "forms": [
+    "Nat. Nanotechnol.",
+    "Nature Nanotechnology"
+   ]
+  },
+  "naturephotonics": {
+   "forms": [
+    "Nat. Photon.",
+    "Nature Photonics"
+   ]
+  },
+  "naturephysics": {
+   "forms": [
+    "Nat. Phys.",
+    "Nature Physics"
+   ]
+  },
+  "naturereviewsphysics": {
+   "forms": [
+    "Nat. Rev. Phys.",
+    "Nature Reviews Physics"
+   ]
+  },
+  "newjournalofphysics": {
+   "forms": [
+    "New J. Phys.",
+    "New Journal of Physics"
+   ]
+  },
+  "npjquantuminformation": {
+   "forms": [
+    "npj Quantum Inf.",
+    "npj Quantum Information"
+   ]
+  },
+  "nuclearphysicsa": {
+   "forms": [
+    "Nucl. Phys. A",
+    "Nuclear Physics A"
+   ]
+  },
+  "nuclearphysicsb": {
+   "forms": [
+    "Nucl. Phys. B",
+    "Nuclear Physics B"
+   ]
+  },
+  "opticscommunications": {
+   "forms": [
+    "Opt. Commun.",
+    "Optics Communications"
+   ]
+  },
+  "opticsexpress": {
+   "forms": [
+    "Opt. Express",
+    "Optics Express"
+   ]
+  },
+  "opticsletters": {
+   "forms": [
+    "Opt. Lett.",
+    "Optics Letters"
+   ]
+  },
+  "physicalchemistrychemicalphysics": {
+   "forms": [
+    "Phys. Chem. Chem. Phys.",
+    "Physical Chemistry Chemical Physics"
+   ]
+  },
+  "physicalreview": {
+   "forms": [
+    "Phys. Rev.",
+    "Physical Review"
+   ]
+  },
+  "physicalreviewa": {
+   "forms": [
+    "Phys. Rev. A",
+    "Physical Review A"
+   ]
+  },
+  "physicalreviewapplied": {
+   "forms": [
+    "Phys. Rev. Appl.",
+    "Physical Review Applied"
+   ]
+  },
+  "physicalreviewb": {
+   "forms": [
+    "Phys. Rev. B",
+    "Physical Review B"
+   ]
+  },
+  "physicalreviewc": {
+   "forms": [
+    "Phys. Rev. C",
+    "Physical Review C"
+   ]
+  },
+  "physicalreviewd": {
+   "forms": [
+    "Phys. Rev. D",
+    "Physical Review D"
+   ]
+  },
+  "physicalreviewletters": {
+   "forms": [
+    "Phys. Rev. Lett.",
+    "Physical Review Letters"
+   ]
+  },
+  "physicalreviewresearch": {
+   "forms": [
+    "Phys. Rev. Res.",
+    "Physical Review Research"
+   ]
+  },
+  "physicalreviewx": {
+   "forms": [
+    "Phys. Rev. X",
+    "Physical Review X"
+   ]
+  },
+  "physicascripta": {
+   "forms": [
+    "Phys. Scr.",
+    "Physica Scripta"
+   ]
+  },
+  "physicsletters": {
+   "forms": [
+    "Phys. Lett.",
+    "Physics Letters"
+   ]
+  },
+  "physicslettersb": {
+   "forms": [
+    "Phys. Lett. B",
+    "Physics Letters B"
+   ]
+  },
+  "physicsreports": {
+   "forms": [
+    "Phys. Rep.",
+    "Physics Reports"
+   ]
+  },
+  "proceedingsofthenationalacademyofsciences": {
+   "forms": [
+    "Proc. Natl. Acad. Sci. USA",
+    "Proceedings of the National Academy of Sciences of the United States of America"
+   ]
+  },
+  "proceedingsofthenationalacademyofsciencesoftheunitedstatesofamerica": {
+   "forms": [
+    "Proc. Natl. Acad. Sci. USA",
+    "Proceedings of the National Academy of Sciences of the United States of America"
+   ]
+  },
+  "proceedingsoftheroyalsocietya": {
+   "forms": [
+    "Proc. R. Soc. A",
+    "Proceedings of the Royal Society A"
+   ]
+  },
+  "progressinnuclearmagneticresonancespectroscopy": {
+   "forms": [
+    "Prog. Nucl. Magn. Reson. Spectrosc.",
+    "Progress in Nuclear Magnetic Resonance Spectroscopy"
+   ]
+  },
+  "progressoftheoreticalphysics": {
+   "forms": [
+    "Prog. Theor. Phys.",
+    "Progress of Theoretical Physics"
+   ]
+  },
+  "prxquantum": {
+   "forms": [
+    "PRX Quantum"
+   ]
+  },
+  "pureandappliedchemistry": {
+   "forms": [
+    "Pure Appl. Chem.",
+    "Pure and Applied Chemistry"
+   ]
+  },
+  "quantum": {
+   "forms": [
+    "Quantum"
+   ]
+  },
+  "quantumscienceandtechnology": {
+   "forms": [
+    "Quantum Sci. Technol.",
+    "Quantum Science and Technology"
+   ]
+  },
+  "reportsonprogressinphysics": {
+   "forms": [
+    "Rep. Prog. Phys.",
+    "Reports on Progress in Physics"
+   ]
+  },
+  "reviewofscientificinstruments": {
+   "forms": [
+    "Rev. Sci. Instrum.",
+    "Review of Scientific Instruments"
+   ]
+  },
+  "reviewsofmodernphysics": {
+   "forms": [
+    "Rev. Mod. Phys.",
+    "Reviews of Modern Physics"
+   ]
+  },
+  "science": {
+   "forms": [
+    "Science"
+   ]
+  },
+  "scienceadvances": {
+   "forms": [
+    "Sci. Adv.",
+    "Science Advances"
+   ]
+  },
+  "scientificreports": {
+   "forms": [
+    "Sci. Rep.",
+    "Scientific Reports"
+   ]
+  },
+  "wileyinterdisciplinaryreviewscomputationalmolecularscience": {
+   "forms": [
+    "Wiley Interdiscip. Rev. Comput. Mol. Sci.",
+    "Wiley Interdisciplinary Reviews: Computational Molecular Science"
+   ]
+  }
  }
 }

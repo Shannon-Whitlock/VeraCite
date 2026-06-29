@@ -2732,6 +2732,21 @@ def test_journal_genuine_mismatch_still_differs():
     assert not eq("Phys. Rev. B", "Nature Physics")
 
 
+def test_inspire_rept_abbreviation_matches_reports():
+    # INSPIRE writes 'Reports' as 'Rept.' (and runs words together without spaces):
+    # 'Rept.Prog.Phys.', 'Phys.Rept.'. These denote the SAME journals as the curated
+    # 'Rep.' forms, so a cross-source comparison must NOT report a spurious journal
+    # 'source_conflict'. The canonical SUGGESTION stays the RMP form ('Rep.').
+    eq = record._journal_equiv
+    assert eq("Rept.Prog.Phys.", "Reports on Progress in Physics")
+    assert eq("Rept. Prog. Phys.", "Reports on Progress in Physics")
+    assert eq("Phys.Rept.", "Physics Reports")
+    assert eq("Phys. Rept.", "Physics Reports")
+    # Genuinely different journals stay distinct (no over-broadening of the alias).
+    assert not eq("Astrophys.J.", "Astrophys.J.Lett.")          # ApJ vs ApJL
+    assert not eq("Reviews of Modern Physics", "Annalen Phys.")
+
+
 def test_iso4_two_letter_ltwa_stems_accepted():
     # A FEW LTWA stems are genuinely two letters ('At.' = Atomic, 'Ed.' = Edition,
     # 'Am.' = American). A blanket '2-char abbrev of a long word is invalid' floor
@@ -2846,16 +2861,56 @@ def test_journal_punctuation_deviation_is_warn_case_only_is_note():
     assert sev is Severity.INFO and cat == "journal_style" and to == "Nat. Phys."
 
 
-def test_journal_different_series_conforms_to_doi_resolved_record():
+def test_wrong_journal_flagged_when_bib_is_a_different_known_journal():
+    # When the bib's journal is a KNOWN journal DIFFERENT from the one the DOI resolved to
+    # ('J. Phys. A' cited with a 'J. Phys. B' DOI; 'Nature Photonics' with a 'Nature' DOI),
+    # it is a wrong_journal WARN -- the DOI may point to the wrong paper, or the name is
+    # wrong -- NOT a format/casing nudge. The record's journal is suggested (DOI is trusted).
+    from veracite.report import Severity
+    for bib, rec, want in [
+        ("J. Phys. A", "Journal of Physics B: Atomic, Molecular and Optical Physics",
+         "J. Phys. B"),
+        ("Phys. Rev. A", "Physical Review B", "Phys. Rev. B"),
+        ("Nature Photonics", "Nature", "Nature"),
+    ]:
+        e = _entry("@article{k, author={A. B}, title={T}, year={2020}, doi={10.1/x},\n"
+                   " journal={%s}}\n" % bib)
+        record_dict = {"authors": ["b"], "authors_display": ["B"], "given": {},
+                       "title": "T", "year": 2020, "journal": rec,
+                       "document_type": "journal article"}
+        rep = Report(color=False)
+        record.compare_against_record(e, record_dict, "crossref", rep)
+        wj = [f for f in rep.findings if f.category == "wrong_journal"]
+        assert wj, bib
+        assert wj[0].severity is Severity.WARN
+        assert wj[0].suggested["to"] == want
+
+
+def test_same_journal_variant_is_not_wrong_journal():
+    # A typo / case / format variant of the SAME journal must NOT be wrong_journal -- it is
+    # a conform/note, not a different-journal warning.
+    for bib, rec in [("Nat. Phy.", "Nature Physics"), ("nat. phys.", "Nature Physics"),
+                     ("Astrophys. J.", "The Astrophysical Journal"),
+                     ("Phys. Rept.", "Physics Reports")]:
+        e = _entry("@article{k, author={A. B}, title={T}, year={2020}, doi={10.1/x},\n"
+                   " journal={%s}}\n" % bib)
+        record_dict = {"authors": ["b"], "authors_display": ["B"], "given": {},
+                       "title": "T", "year": 2020, "journal": rec,
+                       "document_type": "journal article"}
+        rep = Report(color=False)
+        record.compare_against_record(e, record_dict, "crossref", rep)
+        assert not any(f.category == "wrong_journal" for f in rep.findings), bib
+
+
+def test_journal_different_series_flagged_as_wrong_journal():
     # The DOI is authoritative: when the bib names a different series ('J. Phys. A') than
-    # the record the DOI resolved to ('J. Phys. B'), conform toward the record's canonical
-    # form so the author reconciles the name with the link they actually cited. (Never a
-    # silent accept -- a different series is a real discrepancy.)
+    # the record the DOI resolved to ('J. Phys. B'), it is a wrong_journal WARN (the DOI may
+    # be wrong, or the name is) conforming toward the record -- never a silent accept.
     got = _journal_finding("J. Phys. A",
                            "Journal of Physics B: Atomic, Molecular and Optical Physics")
     assert got is not None
-    _, _, to = got
-    assert to == "J. Phys. B"
+    sev, cat, to = got
+    assert cat == "wrong_journal" and to == "J. Phys. B"
 
 
 def test_journal_not_in_table_falls_back_to_record_name():
@@ -2867,13 +2922,56 @@ def test_journal_not_in_table_falls_back_to_record_name():
     assert got is not None and got[2] == "Nature"
 
 
-def test_journal_style_detection_abbrev_vs_full():
-    from veracite.compare import _journal_looks_abbreviated as ab
-    assert ab("Phys. Rept.")
-    assert ab("Nat. Phys.")
-    assert ab("J. of Appl. Phys.")
-    assert not ab("Journal of Physics B Atomic Molecular")
-    assert not ab("Physical Review Letters")
+def test_journal_nospace_abbreviation_gets_spacing_note():
+    # A run-together abbreviation in the BIB (the INSPIRE house style 'Phys.Rev.Lett.',
+    # 'Rept.Prog.Phys.', 'Astrophys.J.') is a formatting defect: a valid abbreviation
+    # spaces its tokens. We RECOGNIZE the journal (no false 'differs') but nudge the
+    # spacing with a journal_style NOTE -- the canonical spaced form when known, else the
+    # bib's own form with spaces inserted.
+    from veracite.report import Severity
+    for bib, rec, want in [
+        ("Phys.Rev.Lett.", "Physical Review Letters", "Phys. Rev. Lett."),
+        # When the journal has a canonical pair, the no-space note suggests the canonical
+        # abbreviation (fixing spacing AND 'Rept.'->'Rep.' in one nudge), not just a
+        # mechanically-spaced bib form.
+        ("Rept.Prog.Phys.", "Reports on Progress in Physics", "Rep. Prog. Phys."),
+        # 'Astrophys. J.' is a well-formed accepted abbreviation, so the no-space form
+        # conforms to the CLOSEST accepted form (just add spaces), not the acronym '{ApJ}'.
+        ("Astrophys.J.", "The Astrophysical Journal", "Astrophys. J."),
+        ("Nucl.Phys.B", "Nuclear Physics B", "Nucl. Phys. B"),
+    ]:
+        got = _journal_finding(bib, rec)
+        assert got is not None, bib
+        sev, cat, to = got
+        assert sev is Severity.INFO and cat == "journal_style" and to == want, (bib, got)
+
+
+def test_journal_no_brace_protection_required():
+    # Journal names are NOT brace-protected: standard BibTeX/biblatex styles print the
+    # journal field verbatim (only the title field is recased), so a lowercase brand 'npj'
+    # survives without braces. The bib name (with or without braces) compares equal to the
+    # canonical -> silent; only a genuine case error ('Npj') is nudged.
+    from veracite.report import Severity
+    rec = "npj Quantum Information"
+    assert _journal_finding("npj Quantum Information", rec) is None      # correct -> silent
+    assert _journal_finding("{npj} Quantum Information", rec) is None    # braces ignored
+    sev, cat, to = _journal_finding("Npj Quantum Information", rec)      # real case error
+    assert sev is Severity.INFO and cat == "journal_style" and to == "npj Quantum Information"
+
+
+def test_journal_correctly_spaced_not_flagged_as_nospace():
+    # A correctly-spaced abbreviation must NOT trigger the no-space note (it is clean or
+    # handled by the canonical-conformance logic instead).
+    from veracite.compare import _is_nospace_abbreviation as ns
+    assert ns("Phys.Rev.Lett.") and ns("Astrophys.J.") and ns("Phys.Rept.")
+    assert not ns("Phys. Rev. Lett.")
+    assert not ns("Nature Physics")
+    assert not ns("Journal of Physics B")
+    # The note fires off the BIB only: a clean spaced bib stays silent even if the record
+    # (INSPIRE) is itself no-space.
+    assert _journal_finding("Phys. Rev. Lett.", "Phys.Rev.Lett.") is None
+
+
 
 
 def test_chemistry_journal_abbreviations_resolve():
