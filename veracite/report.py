@@ -72,6 +72,12 @@ class Finding:
     message: str
     layer: str = "static"
     category: str = ""  # finding category, used for per-category severity
+    # A FINER identifier that uniquely names the precise issue WITHIN its category
+    # ('<category>.<specific>', e.g. metadata_mismatch.title_overlap_strong). Defaults
+    # to the category itself for a category that emits exactly one kind of issue, so
+    # (category, type) is unique tool-wide. Identifies/disambiguates only; severity
+    # may be re-ranked per-type or per-category (see resolve_severity).
+    type: str = ""
     # An advisory edit a reader MAY apply: {"field", "from"?, "to"}. It is a
     # suggestion to weigh, not an instruction -- the entry's content is the
     # author's to decide, so the report frames it as 'suggested', never 'fix'.
@@ -295,12 +301,20 @@ SEVERITY_NAMES = {
 }
 
 
-def resolve_severity(default, category):
-    """A category's configured severity (from SETTINGS['severity']) if set, else
-    the check's own default. Lets a user re-rank a whole class of findings (e.g.
-    make 'preprint_superseded' an error) without editing code. Accepts the labels
-    error/warning/note (the names shown in the report)."""
-    name = SETTINGS.get("severity", {}).get(category) if category else None
+def resolve_severity(default, category, type=""):
+    """The configured severity for a finding (from SETTINGS['severity']) if set, else
+    the check's own default. MOST-SPECIFIC WINS: a per-`type` key (e.g.
+    'metadata_mismatch.title_overlap_slight') overrides a whole-`category` key
+    ('metadata_mismatch'), which overrides the check's default. Lets a user re-rank a
+    single precise issue or a whole class without editing code. Accepts the labels
+    error/warning/note. With no override set (the default config) it returns the
+    check's default unchanged -- so a run with no settings is unaffected."""
+    sev = SETTINGS.get("severity", {})
+    name = None
+    if type and type != category:
+        name = sev.get(type)
+    if name is None and category:
+        name = sev.get(category)
     return SEVERITY_NAMES.get(str(name).lower(), default) if name else default
 
 
@@ -391,26 +405,31 @@ class Report:
         self._uncited.add(key)
 
     def add(self, severity, target, message, layer="static", category="", field="",
-            suggested=None, source_file=""):
+            suggested=None, source_file="", type=""):
         """Record a finding. `target` is an Entry (uses its key/line) or a
-        (key, line) pair. `severity` is the check's default; when `category` is
-        given, a matching entry in SETTINGS['severity'] overrides it. When `field`
-        names a bib field, the finding points at that field's line. `suggested` is
-        an optional advisory edit dict ({"field", "from"?, "to"}) surfaced in JSON.
-        `source_file` names the .tex file when `line` refers to a tex location."""
+        (key, line) pair. `severity` is the check's default; a matching entry in
+        SETTINGS['severity'] for the `type` (most specific) or the `category`
+        overrides it. When `field` names a bib field, the finding points at that
+        field's line. `suggested` is an optional advisory edit dict surfaced in JSON.
+        `source_file` names the .tex file when `line` refers to a tex location.
+        `type` is the finer issue identifier within the category; it defaults to the
+        category when omitted (a category that emits one kind of issue)."""
         if hasattr(target, "key"):           # an Entry
             key = target.key
             line = target.field_line(field) if field else target.lineno
         else:
             key, line = target
-        severity = resolve_severity(severity, category)
+        type = type or category
+        severity = resolve_severity(severity, category, type)
         self.findings.append(
-            Finding(severity, key, line, message, layer, category, suggested,
-                    source_file))
+            Finding(severity, key, line, message, layer=layer, category=category,
+                    type=type, suggested=suggested, source_file=source_file))
 
-    def add_file(self, severity, message, layer="static", category=""):
-        self.findings.append(Finding(resolve_severity(severity, category),
-                                     "<file>", 0, message, layer, category))
+    def add_file(self, severity, message, layer="static", category="", type=""):
+        type = type or category
+        self.findings.append(Finding(resolve_severity(severity, category, type),
+                                     "<file>", 0, message, layer=layer,
+                                     category=category, type=type))
 
     def seed_superseded(self, pairs):
         """Restore (key, category) supersessions re-derived from a saved report
@@ -847,7 +866,8 @@ class Report:
         else:
             action = "info"
         d = {"severity": f.severity.name, "layer": f.layer,
-             "category": f.category, "group": finding_group(f.category),
+             "category": f.category, "type": f.type or f.category,
+             "group": finding_group(f.category),
              "line": f.line, "action": action,
              "message": f.message,
              "suggested": f.suggested if f.suggested else None}

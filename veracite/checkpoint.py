@@ -387,6 +387,7 @@ def _finding_from_dict(fd, key):
     return Finding(severity=sev, key=key,
                    line=int(fd.get("line") or 0), message=fd.get("message", ""),
                    layer=fd.get("layer", "static"), category=fd.get("category", ""),
+                   type=fd.get("type", ""),
                    suggested=fd.get("suggested"),
                    source_file=fd.get("source_file", ""))
 

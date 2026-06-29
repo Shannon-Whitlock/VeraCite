@@ -74,6 +74,28 @@ def test_supersedes_targets_are_real_categories():
     assert not unknown, f"SUPERSEDES names categories nothing emits: {sorted(unknown)}"
 
 
+def test_emitted_types_follow_the_naming_convention():
+    """A `type` uniquely names an issue WITHIN a category, so it must be that
+    category or '<category>.<suffix>' -- the prefix before the first '.' has to be a
+    real emitted category. This keeps (category, type) coherent and greppable."""
+    cats = catalog.emitted_categories()
+    for t in catalog.emitted_types():
+        prefix = t.split(".", 1)[0]
+        assert prefix in cats, (
+            f"type {t!r}'s category prefix {prefix!r} is not an emitted category")
+        assert t == prefix or t.startswith(prefix + "."), (
+            f"type {t!r} must be its category or '<category>.<suffix>'")
+
+
+def test_catalog_types_group_under_their_category():
+    """The catalog row for a fat category lists its disambiguated types; a category
+    that emits one kind of issue has an empty `types` list."""
+    by_cat = {r["category"]: r for r in catalog.catalog()}
+    for cat, row in by_cat.items():
+        for t in row["types"]:
+            assert t.startswith(cat + "."), f"{t!r} mis-grouped under {cat!r}"
+
+
 def test_catalog_covers_exactly_the_emitted_categories():
     rows = catalog.catalog()
     assert {r["category"] for r in rows} == catalog.emitted_categories()

@@ -24,6 +24,7 @@ from .report import (CATEGORY_DOC, CATEGORY_GROUP, finding_group,
 
 _PKG_DIR = os.path.dirname(os.path.abspath(__file__))
 _CATEGORY_RE = re.compile(r'category="([a-z_]+)"')
+_TYPE_RE = re.compile(r'type="([a-z0-9_.]+)"')
 _DEF_RE = re.compile(r'^(\s*)(?:async\s+)?def (\w+)\s*\(')
 
 # Categories deliberately NOT pinned in DEFAULT_SETTINGS['severity']: their checks
@@ -90,6 +91,27 @@ def emitted_categories():
     return set(category_sources())
 
 
+def emitted_types():
+    """Every explicit `type="..."` literal any rule emits, scanned from the source.
+
+    A `type` is the FINER identifier within a category ('<category>.<specific>'); a
+    category that emits one kind of issue carries no explicit type (it defaults to
+    the category name at emit time). So this is the set of DISAMBIGUATED issues only
+    -- the fat categories' sub-issues -- not every emittable issue. Used by the
+    catalog to show the type sub-column and by a drift test to enforce the naming
+    convention (a type must be its category, or '<category>.<suffix>')."""
+    types = set()
+    for name in sorted(os.listdir(_PKG_DIR)):
+        if not name.endswith(".py") or name == "catalog.py":
+            continue
+        with open(os.path.join(_PKG_DIR, name), encoding="utf-8") as fh:
+            for line in fh:
+                if line.lstrip().startswith("#"):
+                    continue
+                types.update(_TYPE_RE.findall(line))
+    return types
+
+
 def default_severity_label(category):
     """The default severity a category resolves to with no user override:
     'error'/'warning'/'note' for a pinned category, or 'mixed' for one that is
@@ -112,6 +134,11 @@ def catalog():
     it cannot reproduce a check (the algorithm lives in the function body), but it
     points at exactly the code to read to see what a check does."""
     srcmap = category_sources()
+    # Group the disambiguated types under their category (prefix before the first '.').
+    types_by_cat = {}
+    for t in emitted_types():
+        cat = t.split(".", 1)[0]
+        types_by_cat.setdefault(cat, set()).add(t)
     rows = []
     for cat in sorted(emitted_categories()):
         sup = SUPERSEDES.get(cat)
@@ -121,6 +148,9 @@ def catalog():
             "group": finding_group(cat),
             "superseded_by": sup[1] if sup else None,
             "description": CATEGORY_DOC.get(cat, ""),
+            # The finer issue identifiers within this category, when it emits more
+            # than one kind ([] for a category that emits a single issue).
+            "types": sorted(t for t in types_by_cat.get(cat, ()) if t != cat),
             "sources": [{"function": fn, "file": f, "line": ln}
                         for (f, fn, ln) in srcmap.get(cat, [])],
         })

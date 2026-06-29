@@ -1218,6 +1218,34 @@ def test_and_others_withdrawn_when_record_has_no_more_authors():
     assert not any(f.category == "author_truncated_marker" for f in rep.live_findings())
 
 
+def test_resolve_severity_per_type_most_specific_wins(monkeypatch):
+    # Per-type severity override: a 'category.type' key beats a whole-category key,
+    # which beats the check default. And with NO override set, the default is
+    # returned unchanged (the byte-identity guard for every default run).
+    from veracite import report as R
+    from veracite.report import Severity, resolve_severity
+
+    # No settings -> default unchanged (inert).
+    monkeypatch.setattr(R, "SETTINGS", {})
+    assert resolve_severity(Severity.WARN, "metadata_mismatch",
+                            "metadata_mismatch.title_overlap_slight") is Severity.WARN
+
+    # Category-level override applies to all its types.
+    monkeypatch.setattr(R, "SETTINGS", {"severity": {"metadata_mismatch": "note"}})
+    assert resolve_severity(Severity.WARN, "metadata_mismatch",
+                            "metadata_mismatch.year") is Severity.INFO
+
+    # Type-level override beats the category-level one for THAT type only.
+    monkeypatch.setattr(R, "SETTINGS", {"severity": {
+        "metadata_mismatch": "note",
+        "metadata_mismatch.title_overlap_slight": "error"}})
+    assert resolve_severity(Severity.WARN, "metadata_mismatch",
+                            "metadata_mismatch.title_overlap_slight") is Severity.ERROR
+    # A sibling type still gets the category-level override, not the type one.
+    assert resolve_severity(Severity.WARN, "metadata_mismatch",
+                            "metadata_mismatch.year") is Severity.INFO
+
+
 def test_suppressed_finding_is_persisted_stamped_but_excluded_from_aggregates():
     # Piece D: a suppressed finding is no longer DROPPED -- it is persisted in the
     # record's issues, STAMPED with the winner that retracted it, but excluded from
