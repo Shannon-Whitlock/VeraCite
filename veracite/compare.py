@@ -208,6 +208,72 @@ def _given_abbreviates(short, full):
                for p in ss)
 
 
+def _given_refines(bg, rg):
+    """Whether the record's spelled-out given name `rg` is a CONFIDENT correction
+    target for the bib's `bg` -- the narrow case where conforming the bib toward the
+    record (an authoritative, DOI-resolved record) is safe enough to attach a
+    `suggested` patch, rather than only saying '[check manually]'. Both must be
+    spelled-out (an initial is handled separately as an expansion note, never here).
+    Two patterns qualify, both meaning the record is the SAME name written more
+    completely or with one transcription character corrected:
+
+      * hyphen/space PREFIX -- every segment the bib has matches the record's
+        leading segments, and the record simply has MORE ('Jun' -> 'Jun-Ru',
+        'Kang' -> 'Kang-Kuen'). The bib is a truncation of the record's full name.
+      * a single-edit TYPO of the same length-ish name ('Minore' -> 'Minori') --
+        Levenshtein <= 1 on the deaccented/lowercased key, so one substituted,
+        inserted or deleted letter. This catches a one-character slip without
+        matching a genuinely different name (distance >= 2).
+
+    Anything else (a name diverging by two or more edits and not a prefix) is a real
+    ambiguity -- the link or the record could be wrong -- so NO suggestion is
+    attached and the finding stays '[check manually]', per the charter's
+    'attach suggested only when certain of the target'."""
+    bks = [p for p in re.split(r"[-\s]+", deaccent(bg).lower()) if p]
+    rks = [p for p in re.split(r"[-\s]+", deaccent(rg).lower()) if p]
+    # PREFIX: the bib's segments are exactly the record's leading segments and the
+    # record is strictly longer (so the record genuinely ADDS name material).
+    if bks and len(bks) < len(rks) and rks[:len(bks)] == bks:
+        return True
+    # 1-EDIT TYPO: same number of name segments, total edit distance across the
+    # joined key is exactly 1 (0 would not have reached this check -- it would have
+    # folded equal earlier).
+    if len(bks) == len(rks):
+        a, b = "".join(bks), "".join(rks)
+        if _levenshtein_le1(a, b):
+            return True
+    return False
+
+
+def _levenshtein_le1(a, b):
+    """True iff strings `a` and `b` are within edit distance 1 (one substitution,
+    insertion or deletion) -- a bounded check, no full DP matrix needed. Equal
+    strings (distance 0) also return True, but callers reach this only for already
+    non-equal keys."""
+    if a == b:
+        return True
+    la, lb = len(a), len(b)
+    if abs(la - lb) > 1:
+        return False
+    if la == lb:                       # one substitution allowed
+        return sum(x != y for x, y in zip(a, b)) == 1
+    # lengths differ by 1: the longer must equal the shorter with one char inserted.
+    if la > lb:
+        a, b = b, a                    # ensure a is the shorter
+    i = j = 0
+    skipped = False
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            i += 1
+            j += 1
+        elif skipped:
+            return False               # a second mismatch -> distance >= 2
+        else:
+            skipped = True
+            j += 1                     # skip one char of the longer string
+    return True
+
+
 def _compare_authors(e, rec, source, rep):
     """Author comparison against an id-resolved record. The DOI/arXiv id already
     proves this is the right paper, so an author discrepancy is a metadata issue
@@ -374,13 +440,27 @@ def _compare_authors(e, rec, source, rep):
                 # check uses): deaccent + ligature + hyphen/punctuation folding, so an
                 # ASCII vs Unicode hyphen ('Ida-Marie' vs 'Ida‐Marie' U+2010) or an
                 # accent/ligature difference is not mistaken for a different given name.
-                # Severity is INFO: most citation styles render only surnames or initials,
-                # so a given-name discrepancy (even 'Minore' vs 'Minori') does not affect
-                # how a citation renders or whether the paper is findable. It is a
-                # completeness/accuracy nudge, not a rendering-affecting data problem.
+                # category 'metadata_mismatch' makes this a WARN (investigate): the id
+                # resolved this paper, so it is the right work, but a spelled-out given
+                # name disagreeing with the authoritative record is a transcription
+                # discrepancy worth checking, not a rendering question.
+                #
+                # Attach a `suggested` fix ONLY when the record's name is a CONFIDENT
+                # correction target (`_given_refines`): a prefix the bib truncated
+                # ('Jun' -> 'Jun-Ru') or a single-character typo ('Minore' -> 'Minori').
+                # There the record is the same name written correctly/fully, so
+                # conforming toward it is safe -- the finding becomes '[fix]'. For a
+                # genuinely divergent name (>= 2 edits, not a prefix) the link or the
+                # record could be wrong, so no suggestion is attached and it stays
+                # '[check manually]', per 'attach suggested only when certain of the
+                # target'.
+                sugg = None
+                if _given_refines(bg, rg):
+                    sugg = {"field": "author", "from": bg, "to": rg}
                 rep.add(Severity.INFO, e, f"[{source}] given name differs for "
                         f"{show(surname)!r}: bib={bg!r} vs {source}={rg!r}",
-                        "record", category="metadata_mismatch")
+                        "record", category="metadata_mismatch",
+                        field="author" if sugg else "", suggested=sugg)
             elif not _is_initial(bg) and bg != rg \
                     and deaccent(bg).lower() == deaccent(rg).lower() \
                     and not _miscapitalized_ok(bg):

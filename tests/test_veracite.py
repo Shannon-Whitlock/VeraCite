@@ -1017,6 +1017,78 @@ def test_given_name_miscapitalization_flagged():
     assert not any("miscapitalized" in f.message for f in rep2.findings)
 
 
+def test_given_refines_helper_prefix_and_typo_only():
+    # The CONFIDENT-correction predicate: a hyphen/space prefix the bib truncated, or a
+    # single-character typo of the same name. Anything else is too uncertain to suggest.
+    from veracite.compare import _given_refines, _levenshtein_le1
+    assert _given_refines("Jun", "Jun-Ru")          # prefix (hyphen segment added)
+    assert _given_refines("Kang", "Kang-Kuen")      # prefix (hyphen segment added)
+    assert _given_refines("Minore", "Minori")       # 1-letter substitution typo
+    assert _given_refines("Sara", "Sarah")          # 1-letter insertion
+    assert not _given_refines("Lukas", "Laurin")    # different name (>= 2 edits)
+    assert not _given_refines("Jun", "Min")         # unrelated, same length
+    assert not _given_refines("Ru", "Jun-Ru")       # bib is the SUFFIX, not a prefix
+    # _levenshtein_le1 bound: 0 or 1 edit True; 2+ edits False.
+    assert _levenshtein_le1("minore", "minori")
+    assert _levenshtein_le1("sara", "sarah")
+    assert not _levenshtein_le1("lukas", "laurin")
+    assert not _levenshtein_le1("abc", "axyc")
+
+
+def test_given_name_prefix_or_typo_gets_suggested_fix():
+    # ONLINE, the real micromotion.bib cases: a spelled-out given name that the record
+    # writes more fully ('Jun' -> 'Jun-Ru', 'Kang' -> 'Kang-Kuen') or with one character
+    # corrected ('Minore' -> 'Minori') is a CONFIDENT correction toward the authoritative
+    # record -> a WARN with a suggested author patch (renders '[fix]').
+    from veracite.report import Severity
+    # (bib given name, record full given name) for the first author; surname 'Li'.
+    cases = [("Jun", "Jun-Ru"), ("Kang", "Kang-Kuen"), ("Minore", "Minori")]
+    for frm, to in cases:
+        e = _entry("@article{k, author={%s Li and Jun Ye}, title={T},\n"
+                   " year={2021}, doi={10.1/x}}\n" % frm)
+        rec = {"authors": ["li", "ye"], "authors_display": ["Li", "Ye"],
+               "given": {"li": to, "ye": "Jun"}, "title": "T", "year": 2021}
+        rep = Report(color=False)
+        record.compare_against_record(e, rec, "crossref", rep)
+        gn = [f for f in rep.findings if "given name differs" in f.message]
+        assert gn, (frm, to)
+        assert gn[0].severity is Severity.WARN
+        assert gn[0].suggested == {"field": "author", "from": frm, "to": to}, (frm, to)
+
+
+def test_given_name_divergent_stays_check_manually_no_suggestion():
+    # ONLINE control: a given name that diverges from the record by MORE than one edit
+    # and is not a prefix ('Lukas' vs record 'Laurin') is still flagged (WARN) but WITHOUT
+    # a suggested fix -- the link or the record could be wrong, so it stays '[check
+    # manually]'. The cardinal rule: never push a name we are not sure of.
+    e = _entry("@article{k, author={Lukas Berg and J. Ye}, title={T},\n"
+               " year={2021}, doi={10.1/x}}\n")
+    rec = {"authors": ["berg", "ye"], "authors_display": ["Berg", "Ye"],
+           "given": {"berg": "Laurin", "ye": "J"}, "title": "T", "year": 2021}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    gn = [f for f in rep.findings if "given name differs" in f.message]
+    assert gn, "a genuine given-name divergence is still reported"
+    assert gn[0].suggested is None, "but no fix is suggested for a divergent name"
+
+
+def test_initial_given_name_never_overwritten_to_full_name():
+    # ONLINE control (the look-alike that must NOT regress): when the bib uses an INITIAL
+    # ('J.') and the record has the full name ('Jun-Ru'), that is an ABBREVIATION ->
+    # the advisory 'could expand' style note, NEVER a 'given name differs' WARN and never
+    # an author overwrite. Expanding an initial is the author's choice, not a correction.
+    e = _entry("@article{k, author={J. Li and A. Smith}, title={T},\n"
+               " year={2021}, doi={10.1/x}}\n")
+    rec = {"authors": ["li", "smith"], "authors_display": ["Li", "Smith"],
+           "given": {"li": "Jun-Ru", "smith": "Alice"}, "title": "T", "year": 2021}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any("given name differs" in f.message for f in rep.findings)
+    assert not any(f.category == "metadata_mismatch" and f.field == "author"
+                   and f.suggested for f in rep.findings), \
+        "an initial is never overwritten toward the record's full name"
+
+
 def test_title_punctuation_deviation_nudged():
     # The title matches the record as the same work (folds equal) but its punctuation
     # deviates ('open source' vs record 'open-source') -> a NOTE nudging toward the
