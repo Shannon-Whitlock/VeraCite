@@ -296,6 +296,41 @@ def test_ndjson_is_forward_compatible(tmp_path):
     assert "<provenance>" in recs                      # unknown record kind preserved
 
 
+def test_resume_tolerates_future_suppression_category(tmp_path):
+    """A FUTURE version may stamp an issue `suppressed_by` for a suppression
+    category THIS version does not know. Re-deriving that suppression on resume must
+    be a safe no-op (the finding stays visible), NEVER a crash -- per the charter's
+    'tolerate a report a future version wrote'. Guards the regression where
+    seed_superseded asserted the category was in this version's SUPERSEDES."""
+    from veracite.report import Report
+    out = tmp_path / "future_sup.json"
+    rec = {
+        "key": "k", "veracite_version": "9.9.9",
+        "phases": {"offline": True, "online": True, "llm": False},
+        "status": "VERIFIED", "confidence": 1.0,
+        "identifiers": {"doi": "10.1/x", "arxiv": None, "isbn": None},
+        "sources": ["crossref"], "canonical_record": {"title": "T", "year": 2020},
+        # An issue retracted by a category that does not exist in this version.
+        "issues": [{"severity": "WARN", "category": "some_future_check",
+                    "type": "some_future_check.variant", "line": 1,
+                    "message": "future finding", "suggested": None,
+                    "suppressed_by": "some_future_winner"}],
+    }
+    _write_ndjson(out, [rec])
+    cp = Checkpoint.load(str(out))               # must not raise
+    assert cp is not None
+    # The replayed pair carries the unknown category; seeding it must NOT crash.
+    # (Seed ALL of the key's findings + supersessions, as the full-reuse resume path
+    # does at cli.py.)
+    rep = Report(color=False)
+    rep.seed_findings(cp._findings_by_key.get("k", []))
+    rep.seed_superseded({(kk, c) for (kk, c) in cp._replay_superseded
+                         if kk == "k"})            # was AssertionError before the fix
+    # The unknown-category finding is left VISIBLE (we don't understand the
+    # suppression, so we don't apply it) -- a safe degradation, not a silent drop.
+    assert any(f.category == "some_future_check" for f in rep.live_findings())
+
+
 # --- offline persists phase info -------------------------------------------
 
 def test_offline_run_persists_offline_phase(tmp_path):

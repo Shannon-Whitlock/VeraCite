@@ -434,12 +434,19 @@ class Report:
     def seed_superseded(self, pairs):
         """Restore (key, category) supersessions re-derived from a saved report
         (checkpoint resume), so a reused phase's findings stay suppressed without the
-        phase re-running to re-declare them. The pairs MUST still be declared in
-        SUPERSEDES (the same invariant supersede() enforces)."""
+        phase re-running to re-declare them.
+
+        Unlike supersede() -- which asserts, because IT is called with literal
+        categories from this version's own rules -- this receives data deserialized
+        from a saved report that a FUTURE version may have written, possibly stamping
+        a suppression category this version does not know. Per the charter
+        ('tolerate a report a future version wrote; treat unknown fields as opaque'),
+        an unknown category is SKIPPED, not asserted: we simply do not re-derive a
+        suppression we do not understand, leaving that finding visible -- a safe
+        degradation, never a crash on resume."""
         for key, category in pairs:
-            assert category in SUPERSEDES, \
-                f"seed_superseded({category!r}) not declared in report.SUPERSEDES"
-            self._superseded.add((key, category))
+            if category in SUPERSEDES:
+                self._superseded.add((key, category))
 
     def seed_findings(self, findings):
         """Pre-load findings rebuilt from a saved report (checkpoint resume), so a
