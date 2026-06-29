@@ -111,7 +111,15 @@ veracite --bib refs.bib --tex main.tex --llm
 (the `claude` CLI, your existing login) — off by default.
 
 If `--bib` is omitted, VeraCite auto-discovers a `.bib` in the current directory.
-Run `veracite --help` for the full option list, including `--offline`, `--skipnotes`, `--sort`, `--json`, and `--list-rules`.
+Run `veracite --help` for the full option list, including `--offline`, `--skipnotes`,
+`--sort`, `--json`, `--show-suppressed`, and `--list-rules`.
+
+When one finding makes another redundant, VeraCite **suppresses** the weaker one (e.g.
+an online "adopt the record's casing" supersedes the offline "looks miscased" guess) so
+you see one clear message, not two. A suppressed finding is still recorded in the JSON
+report — stamped with the finding that retracted it — and `--show-suppressed` reveals it
+in the terminal (dimmed, with the reason). `veracite --list-rules suppression` prints the
+full table of which finding suppresses which, and why.
 
 ## Message types
 
