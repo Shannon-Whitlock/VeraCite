@@ -846,6 +846,173 @@ def _bib_matches_earlier_version(e, rec, btitle, atitle, timeout):
     return None
 
 
+_UNSET = object()
+
+
+class _TitleFacts:
+    """Every fact the title decision reads, computed ONCE from (entry, record) so the
+    decision below is a pure function of named booleans/values -- no re-derivation,
+    no mutable flags threaded across branches. The one network-dependent fact
+    (`retitle`, an arXiv earlier-version probe) is LAZY: it is computed only if a
+    branch that needs it asks, via the injected `probe` callable, so a path that
+    never reaches the mismatch branches issues no fetch."""
+
+    def __init__(self, e, rec, source, timeout, probe):
+        self.e, self.rec, self.source, self.timeout = e, rec, source, timeout
+        self._probe = probe
+        self._retitle = _UNSET
+        self.btitle = e.get("title", "")
+        self.raw_atitle = rec.get("title", "")
+        # Record markup: strip TAGS for comparison, but remember markup was present so
+        # no mangled value is offered as a verbatim suggestion.
+        self.rec_has_markup = _has_markup(self.raw_atitle) and not _has_markup(self.btitle)
+        self.atitle = _strip_markup(self.raw_atitle) if self.rec_has_markup else self.raw_atitle
+        self.bib_has_math = _bib_has_math(self.btitle)
+        if self.rec_has_markup or self.bib_has_math:
+            self.safe_to = None
+        else:
+            from .rules import add_title_brace_protection
+            self.safe_to = add_title_brace_protection(self.atitle)
+        self.mangle_note = (
+            " (record title contains markup; verify the exact form manually)"
+            if self.rec_has_markup else
+            (" (bib title has math the record may have dropped; verify manually)"
+             if self.bib_has_math else ""))
+        self.bt, self.at = title_key(self.btitle), title_key(self.atitle)
+        # LaTeX-vs-MathML serialization of the SAME math title is not a defect: blank
+        # the keys so every title finding is skipped.
+        if self.rec_has_markup and _bib_math_matches_record(self.btitle, self.raw_atitle):
+            self.bt = self.at = ""
+        self.bib_miscased = title_is_miscased(self.btitle)
+        self.rec_miscased = title_is_miscased(self.atitle)
+        self.punct_differs = (_title_punct_key(self.btitle)
+                              != _title_punct_key(self.atitle))
+        self.spacing_only = (self.bt != self.at
+                             and self.bt.replace(" ", "") == self.at.replace(" ", ""))
+        self.shortened = title_is_shortened(self.btitle, self.atitle)
+        self.bib_is_shorter = len(self.bt.split()) < len(self.at.split())
+        self.container = is_container_granularity(e)
+        self._overlap = _UNSET
+
+    def title_sug(self):
+        return {"field": "title", "from": self.btitle, "to": self.safe_to} \
+            if self.safe_to else None
+
+    @property
+    def keys_equal(self):
+        return bool(self.bt) and bool(self.at) and self.bt == self.at
+
+    @property
+    def keys_differ(self):
+        return bool(self.bt) and bool(self.at) and self.bt != self.at
+
+    @property
+    def overlap(self):
+        if self._overlap is _UNSET:
+            self._overlap = title_overlap(self.btitle, self.atitle)
+        return self._overlap
+
+    @property
+    def retitle(self):
+        """Lazy arXiv earlier-version probe (a network fact); computed at most once."""
+        if self._retitle is _UNSET:
+            self._retitle = self._probe()
+        return self._retitle
+
+
+def _decide_title(facts, rep, e, source):
+    """The title decision: ONE exclusive outcome among the mutually-exclusive title
+    findings, plus the derived `title_strong_mismatch` fact the wrong-record check
+    reads. Each outcome carries a `type` that uniquely names it within its category.
+
+    Mutual exclusion is the STRUCTURE (one return per branch), so the old
+    `title_style_emitted` flag -- which existed only to stop the overlap branch
+    re-firing after a spacing-style note -- is gone: a spacing match simply returns
+    before the overlap branches are reached. Returns True iff the title differs
+    strongly (feeds id_resolves_wrong_record); emits its finding via `rep`."""
+    f = facts
+    mangle = f.mangle_note
+    # (1) Same work, bib SHOUTED: adopt the record's canonical casing (supersedes the
+    # offline 'looks miscased' guess).
+    if f.keys_equal and f.btitle != f.atitle and f.bib_miscased and not f.rec_miscased:
+        rep.withdraw(e.key, "title_case")
+        rep.add(Severity.INFO, e, f"[{source}] title casing differs from the record; "
+                f"adopt the record's casing{mangle}:\n        bib:    {f.btitle[:90]}\n"
+                f"        {source}: {f.atitle[:90]}", "record", category="title_case",
+                type="title_case.adopt_record_casing",
+                field="title", suggested=f.title_sug())
+        return False
+    # (2) Same work, punctuation/wording deviates (not just casing).
+    if f.keys_equal and not f.bib_miscased and f.punct_differs:
+        style_sug = None if f.rec_miscased else f.title_sug()
+        caps_note = " (record is ALL-CAPS house style; keep your title's casing)" \
+            if f.rec_miscased else ""
+        rep.add(Severity.INFO, e, f"[{source}] title matches the record but its "
+                f"punctuation/wording differs from the canonical form{mangle}{caps_note}",
+                "record", category="title_style", type="title_style.punctuation",
+                field="title", suggested=style_sug)
+        return False
+    # (3) Same work, only intra-token spacing differs ('NGC6334I' vs 'NGC 6334I').
+    if f.spacing_only:
+        rep.add(Severity.INFO, e, f"[{source}] title matches the record but its spacing "
+                f"differs from the canonical form{mangle}", "record",
+                category="title_style", type="title_style.spacing",
+                field="title", suggested=f.title_sug())
+        return False
+    # (4..) The titles genuinely differ in content.
+    if f.keys_differ:
+        if f.shortened:
+            # A dropped subtitle, actionable only when the BIB is the shorter side.
+            if f.bib_is_shorter:
+                rep.add(Severity.INFO, e, f"[{source}] title is a shortened form of the "
+                        f"record's (likely a dropped subtitle)", "record",
+                        category="metadata_mismatch", type="metadata_mismatch.title_shortened")
+            return False
+        overlap = f.overlap
+        # (5) Granularity: id resolved to the containing volume, not the chapter.
+        if overlap <= 0.1 and f.container:
+            rep.add(Severity.INFO, e, f"[{source}] title differs from the record "
+                    f"(overlap {overlap:.0%}); the id resolves to the containing "
+                    f"book/volume, not the chapter -- check the entry type", "record",
+                    category="container_granularity", type="container_granularity")
+            return False
+        if overlap < 0.6:
+            # (6) Honest earlier-arXiv-version retitle, else (7) a strong mismatch.
+            retitle = f.retitle
+            if retitle:
+                mv, lv, lt = retitle
+                rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
+                        f"in a later version: the cited title matches v{mv}, but "
+                        f"the latest (v{lv}) is \"{lt[:80]}\" -- update the "
+                        f"cited title if you mean the current version", "record",
+                        category="preprint_retitled", type="preprint_retitled",
+                        field="title")
+                return False
+            rep.add(Severity.WARN, e, f"[{source}] title differs from record (overlap {overlap:.0%}){mangle}:\n"
+                    f"        bib:    {f.btitle[:90]}\n"
+                    f"        {source}: {f.atitle[:90]}", "record",
+                    category="metadata_mismatch", type="metadata_mismatch.title_overlap_strong",
+                    field="title", suggested=f.title_sug())
+            return True   # the strong-mismatch fact for id_resolves_wrong_record
+        # (8) High overlap: still possibly an earlier-version retitle, else differs slightly.
+        retitle = f.retitle
+        if retitle:
+            mv, lv, lt = retitle
+            rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
+                    f"in a later version: the cited title matches v{mv}, but "
+                    f"the latest (v{lv}) is \"{lt[:80]}\" -- update the "
+                    f"cited title if you mean the current version", "record",
+                    category="preprint_retitled", type="preprint_retitled", field="title")
+            return False
+        rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle}:\n"
+                f"        bib:    {f.btitle[:90]}\n"
+                f"        {source}: {f.atitle[:90]}",
+                "record", category="metadata_mismatch", type="metadata_mismatch.title_overlap_slight",
+                field="title", suggested=f.title_sug())
+        return False
+    return False
+
+
 def compare_against_record(e, rec, source, rep, timeout=None):
     """RECORD layer: flag where the entry disagrees with its id-resolved record.
     The DOI/arXiv id already establishes identity, so individual field
@@ -923,171 +1090,15 @@ def compare_against_record(e, rec, source, rep, timeout=None):
 
     first_differs = _compare_authors(e, rec, source, rep)
 
-    # Title: with identity fixed by the id, a strong mismatch is a discrepancy to
-    # verify (WARN). A dropped subtitle ('Combinatorial Optimization' vs '...:
-    # Theory and Algorithms') is informational, not a difference.
-    title_differs_strongly = False
-    btitle, raw_atitle = e.get("title", ""), rec.get("title", "")
-    # The record title sometimes arrives with embedded markup (Crossref serves math
-    # titles as raw MathML). Strip the TAGS for COMPARISON so the clean (non-math)
-    # parts are still checked -- but remember markup was present so no mangled value
-    # is offered as a verbatim suggestion (the `to` is withheld, the finding stays).
-    rec_has_markup = _has_markup(raw_atitle) and not _has_markup(btitle)
-    atitle = _strip_markup(raw_atitle) if rec_has_markup else raw_atitle
-    # A suggested 'to' is the record title only when it is safe to paste verbatim:
-    # withheld when the record carried markup (stripped form lost formatting) OR when
-    # the BIB title carries LaTeX math the record likely dropped (e.g. the bib's
-    # '\ensuremath{\lambda}10830' vs Crossref's de-mathed '10830') -- conforming the
-    # bib toward the record there would DELETE the symbol, a corrupting edit. In both
-    # cases the finding stays (the difference is real) but without an auto-apply 'to'.
-    bib_has_math = _bib_has_math(btitle)
-    if rec_has_markup or bib_has_math:
-        safe_to = None
-    else:
-        from .rules import add_title_brace_protection
-        safe_to = add_title_brace_protection(atitle)
-    mangle_note = " (record title contains markup; verify the exact form manually)" \
-        if rec_has_markup else (" (bib title has math the record may have dropped; "
-        "verify manually)" if bib_has_math else "")
-
-    def _title_sug():
-        return {"field": "title", "from": btitle, "to": safe_to} if safe_to else None
-
-    bt, at = title_key(btitle), title_key(atitle)
-    # When the record carries MathML math AND the bib already has the math in proper
-    # LaTeX '$...$' form, and the titles agree once math is stripped from BOTH sides,
-    # the bib title is already correct -- the only "difference" is LaTeX vs the
-    # registry's MathML serialization, not a defect. Skip ALL title findings: the
-    # bib's '$...$' is the canonical .bib form, so there is nothing to fix or nudge.
-    if rec_has_markup and _bib_math_matches_record(btitle, raw_atitle):
-        bt = at = ""
-    # Same title, wrong casing: when the normalized titles agree but the bib is
-    # SHOUTED in uppercase, the record carries the canonical casing -- recommend
-    # adopting it, and withdraw the offline 'looks miscased' guess (this is the
-    # authoritative form). Only when the record is itself sensibly cased.
-    if bt and at and bt == at and btitle != atitle \
-            and title_is_miscased(btitle) and not title_is_miscased(atitle):
-        rep.withdraw(e.key, "title_case")
-        rep.add(Severity.INFO, e, f"[{source}] title casing differs from the record; "
-                f"adopt the record's casing{mangle_note}:\n        bib:    {btitle[:90]}\n"
-                f"        {source}: {atitle[:90]}", "record", category="title_case",
-                field="title", suggested=_title_sug())
-    elif bt and at and bt == at and not title_is_miscased(btitle) \
-            and _title_punct_key(btitle) != _title_punct_key(atitle):
-        # The title matches the record as the SAME work (folds equal) and is not just
-        # a casing difference, but its punctuation/wording deviates from the record's
-        # canonical form -- a hyphen ('open source' vs 'open-source'), '&' vs 'and', a
-        # spacing or colon difference. The record is the source of record, so nudge
-        # toward its exact form -- a NOTE (it renders fine; this is a metadata-quality
-        # improvement), not a warning. If the record carried markup the deviation in
-        # the CLEAN parts is still reported, just without an auto-applicable 'to'.
-        #
-        # BUT do not push the bib toward an ALL-CAPS record: many journals (older
-        # ApJ/IOP) store titles shouted in uppercase as their house style, which is
-        # NOT the canonical .bib form -- conforming a nicely Title-Cased bib to it
-        # would be a regression. When the record is itself miscased, withhold the
-        # suggested edit (the note stays, since the punctuation does differ).
-        rec_is_shouted = title_is_miscased(atitle)
-        style_sug = None if rec_is_shouted else _title_sug()
-        caps_note = " (record is ALL-CAPS house style; keep your title's casing)" \
-            if rec_is_shouted else ""
-        rep.add(Severity.INFO, e, f"[{source}] title matches the record but its "
-                f"punctuation/wording differs from the canonical form{mangle_note}{caps_note}",
-                "record", category="title_style", field="title", suggested=style_sug)
-    title_style_emitted = False
-    if bt and at and bt != at and bt.replace(" ", "") == at.replace(" ", ""):
-        # The titles differ ONLY in where a space falls inside a token -- a catalog
-        # designation written closed-up vs spaced ('NGC6334I' vs 'NGC 6334I'), or a
-        # similar spacing slip. The word-overlap metric scores this as a strong
-        # mismatch (one token split in two drops it well below 60%), but it is the same
-        # title -- a spacing nudge, not a content difference. Emit it as a style NOTE
-        # toward the record's spacing, never an overlap WARN. (safe_to already withheld
-        # when the record carried markup.) Track that it fired so the elif branch (which
-        # may also find a content mismatch on the same title) can suppress it if a
-        # metadata_mismatch is about to state the same fact more usefully.
-        rep.add(Severity.INFO, e, f"[{source}] title matches the record but its spacing "
-                f"differs from the canonical form{mangle_note}", "record",
-                category="title_style", field="title", suggested=_title_sug())
-        title_style_emitted = True
-    if bt and at and bt != at and not title_style_emitted:
-        if title_is_shortened(btitle, atitle):
-            # One title is a clean prefix of the other (a dropped subtitle), not a
-            # different paper. Direction matters: only when the BIB is the shorter
-            # side did the bib drop the subtitle -- an actionable note to add it. When
-            # the bib is the LONGER side, the bib already has the full title and the
-            # *record* is the truncated one (Crossref often clips A&A subtitles), so
-            # there is nothing to fix -- stay silent rather than wrongly tell the user
-            # their complete title "dropped a subtitle".
-            if len(bt.split()) < len(at.split()):
-                rep.add(Severity.INFO, e, f"[{source}] title is a shortened form of the "
-                        f"record's (likely a dropped subtitle)", "record",
-                        category="metadata_mismatch")
-        else:
-            overlap = title_overlap(btitle, atitle)
-            # A near-zero overlap against a record reached via a book/proceedings
-            # DOI or ISBN is almost always a granularity mismatch -- the id
-            # resolves to the *volume*, whose title is the book title, not the
-            # chapter being cited. Down-rank to a note rather than a WARN (and do
-            # not let it feed the wrong-record error), since the entry-type rule
-            # already points at the real fix (use @incollection/@inproceedings).
-            # The comparison above already used the markup-STRIPPED record title, so
-            # the clean parts are checked; the suggested 'to' (safe_to) is withheld
-            # and a 'verify manually' note added when the record carried markup, so a
-            # mangled value is never offered as a verbatim edit (the Rec #4 safety).
-            if overlap <= 0.1 and is_container_granularity(e):
-                # Deliberately a note, not 'metadata_mismatch' (a warning): the
-                # title "differs" only because the id resolved to the containing
-                # volume, so this points at the entry type rather than a data error.
-                rep.add(Severity.INFO, e, f"[{source}] title differs from the record "
-                        f"(overlap {overlap:.0%}); the id resolves to the containing "
-                        f"book/volume, not the chapter -- check the entry type", "record",
-                        category="container_granularity")
-            elif overlap < 0.6:
-                # Before calling this a mismatch, check the honest case: the bib may
-                # faithfully cite an EARLIER arXiv version whose title arXiv later
-                # changed. If the cited title matches a non-latest version, the bib is
-                # NOT wrong -- suppress the mismatch, withhold the title overwrite (it
-                # would push the new title over a correct one -- 'never push a bad
-                # value'), and emit an informational 'renamed in a later version' note.
-                # That note is itself superseded by preprint_superseded when a
-                # published version exists (one fix -- cite the published DOI -- covers
-                # both); record.py records that supersession.
-                retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
-                if retitle:
-                    matched_v, latest_v, latest_title = retitle
-                    rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
-                            f"in a later version: the cited title matches v{matched_v}, but "
-                            f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
-                            f"cited title if you mean the current version", "record",
-                            category="preprint_retitled", field="title")
-                else:
-                    title_differs_strongly = True
-                    rep.add(Severity.WARN, e, f"[{source}] title differs from record (overlap {overlap:.0%}){mangle_note}:\n"
-                            f"        bib:    {btitle[:90]}\n"
-                            f"        {source}: {atitle[:90]}", "record",
-                            category="metadata_mismatch", field="title", suggested=_title_sug())
-            else:
-                # Even at high overlap, an arXiv preprint may have been retitled
-                # between versions (e.g. v1 "computer" vs v2 "simulator" at 83%).
-                # Check before emitting "differs slightly" — the bib may be correct.
-                # This applies whichever source resolved the record (Crossref is
-                # primary and often wins resolution for a published preprint): what
-                # matters is whether the RECORD carries an arXiv id, which
-                # _bib_matches_earlier_version checks itself, not which source we
-                # are currently comparing against.
-                retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
-                if retitle:
-                    matched_v, latest_v, latest_title = retitle
-                    rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
-                            f"in a later version: the cited title matches v{matched_v}, but "
-                            f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
-                            f"cited title if you mean the current version", "record",
-                            category="preprint_retitled", field="title")
-                if not retitle:
-                    rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}:\n"
-                            f"        bib:    {btitle[:90]}\n"
-                            f"        {source}: {atitle[:90]}",
-                            "record", category="metadata_mismatch", field="title", suggested=_title_sug())
+    # Title: ONE exclusive outcome among the title findings, decided by a pure
+    # function over facts computed once (no mutable flags threaded across branches).
+    # The lazy `probe` is the arXiv earlier-version network fact, evaluated only if a
+    # mismatch branch asks for it -- so a clean/equal title issues no fetch.
+    title_facts = _TitleFacts(
+        e, rec, source, timeout,
+        probe=lambda: _bib_matches_earlier_version(
+            e, rec, e.get("title", ""), rec.get("title", ""), timeout))
+    title_differs_strongly = _decide_title(title_facts, rep, e, source)
 
     # The single genuine wrong-paper error: identity-level fields ALL point
     # elsewhere, so the id itself is probably wrong (copy-paste). Both the first
@@ -1102,19 +1113,11 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     # range). The id fixes identity, so even a cluster is a metadata discrepancy
     # to check, not a wrong paper -- a warning either way.
     #
-    # When there IS a locator mismatch, also fold in any locator field the bib
-    # leaves empty but the record supplies (e.g. number=(empty) vs 2229), so the
-    # reader sees all the related facts on one line. This asserts nothing about WHY
-    # (no 'you packed volume.number' inference) -- both halves are literally true:
-    # the volume differs AND the number is absent. We only co-locate when there is
-    # already a real locator mismatch; an entry that merely omits 'number' with no
-    # other conflict keeps its benign parity note rather than gaining a warning.
     # Soft bibliographic fields (year/volume/issue/pages): one finding PER field, so
     # each carries a concrete 'bib -> record' suggested edit (the record is the
     # canonical reference; the suggestion leans toward conforming the bib to it) and
     # its own severity. All four appear in a rendered citation, so a differing value
     # is render-affecting -> WARN.
-    folded_missing = set()
     for fld, label, bibval, recval in _soft_field_diffs(e, rec):
         # A software/dataset record has no volume/issue/pages -- only `year` is a real,
         # comparable field. Skip the article-only locators so a record that legitimately
@@ -1222,7 +1225,7 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                 suggested={"field": "journal", "from": raw_journal,
                            "to": rec_journal_safe} if rec_journal_safe else None)
 
-    _suggest_parity(e, rec, source, rep, skip=folded_missing)
+    _suggest_parity(e, rec, source, rep)
 
 
 def compare_sources(e, records, rep, skip_year=False):
