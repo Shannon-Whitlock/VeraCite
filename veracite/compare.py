@@ -1316,15 +1316,11 @@ def compare_sources(e, records, rep, skip_year=False):
                             category="source_conflict")
 
 
-def _suggest_parity(e, rec, source, rep, skip=()):
+def _suggest_parity(e, rec, source, rep):
     """Completeness notes: data the record carries that the bib omits, so a user
     can opt into registry parity. These are never errors -- the bib is correct,
     just less complete. Crossref only (arXiv lacks structured bibliographic
-    fields); bibliographic fields are skipped for preprints, where they N/A.
-
-    `skip` is the set of fields already reported on the metadata_mismatch locator
-    line (a missing locator co-located with a sibling mismatch); we do not also
-    emit a parity note for them, to avoid stating the same fact twice."""
+    fields); bibliographic fields are skipped for preprints, where they N/A."""
     if source != "crossref":
         return
     if not e.get("doi").strip() and rec.get("doi"):
@@ -1339,7 +1335,7 @@ def _suggest_parity(e, rec, source, rep, skip=()):
                           ("number", rec.get("number")),
                           ("pages", rec.get("pages")),
                           ("year", str(rec.get("year") or ""))):
-            if rval and not e.get(fld).strip() and fld not in skip:
+            if rval and not e.get(fld).strip():
                 # Special case: 'number' is absent but 'issue' carries the same value.
                 # biblatex's 'issue' field holds an issue *label/title* (e.g. "Special
                 # Issue on X"), not the numeric issue number -- that belongs in 'number'.
