@@ -517,9 +517,12 @@ def _load_journal_abbrev():
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "data", "journal_abbrev.json")
     pairs = {}
+    canon_block = {}
     try:
         with open(path, encoding="utf-8") as fh:
-            pairs = json.load(fh).get("abbreviations", {})
+            data = json.load(fh)
+            pairs = data.get("abbreviations", {})
+            canon_block = data.get("canonical", {})
     except (OSError, json.JSONDecodeError):
         pairs = {}
     canon = {}
@@ -535,8 +538,24 @@ def _load_journal_abbrev():
         for tok in re.split(r"[^a-z0-9]+", abbr.lower()):
             if len(tok) == 2 and tok.isalpha():
                 two_letter.add(tok)
+    # canonical-pair index: every key that identifies a journal (its canon_key and any
+    # alias key that maps to it) -> the proper-cased (abbrev, full) pair to SUGGEST.
+    # The pair comes ONLY from the explicit 'canonical' block, never reconstructed from a
+    # lowercased abbreviation key (which would mis-case acronyms like 'ACS'/'IEEE'). So a
+    # canonical suggestion is offered only for journals curated with a cased pair; others
+    # fall back to the full title or the record's name. Every alias of a curated journal
+    # resolves to its pair, so the record's name (whatever form Crossref returns) finds it.
+    canonical = {}   # any journal-identifying key -> (abbrev, full)
+    for fk, pair in canon_block.items():
+        if isinstance(pair, (list, tuple)) and len(pair) == 2:
+            abbrev, full = pair
+            target = canon.get(fk, fk)        # the journal's canon_key
+            canonical[fk] = (abbrev, full)
+            canonical[target] = (abbrev, full)
+            for alias_key in reverse.get(target, ()):  # every accepted form of it
+                canonical[alias_key] = (abbrev, full)
     return (canon, {k: frozenset(v) for k, v in reverse.items()},
-            frozenset(two_letter))
+            frozenset(two_letter), canonical)
 
 
 def _edit_dist_le1(a, b):
@@ -572,6 +591,17 @@ def _journal_key(name):
     Journal') is dropped so the two forms key alike."""
     name = re.sub(r"^\s*the\s+", "", html.unescape(name), flags=re.I)
     return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _exact_journal_norm(name):
+    """A journal string normalized for an EXACT-canonical-form comparison: case- and
+    whitespace-insensitive but PUNCTUATION-PRESERVING (so a period/comma difference
+    survives). Used to decide whether the bib already equals the canonical form -- 'Proc.
+    Natl. Acad. Sci. U.S.A.' must NOT equal the canonical 'Proc. Natl. Acad. Sci. USA'
+    (a real deviation to conform), while 'nat. phys.' equals 'Nat. Phys.' (mere case).
+    De-TeX first so brace-protection is not counted as a difference. This is deliberately
+    stricter than `_journal_key`, which folds away punctuation to IDENTIFY the journal."""
+    return re.sub(r"\s+", " ", clean_tex(html.unescape(name)).strip()).lower()
 
 
 # Words dropped from a full title when checking an ISO-4 abbreviation against it
@@ -636,7 +666,44 @@ def _is_iso4_abbrev(abbrev, full):
     return True
 
 
-_JOURNAL_CANON, _JOURNAL_REVERSE, _JOURNAL_TWO_LETTER = _load_journal_abbrev()
+_JOURNAL_CANON, _JOURNAL_REVERSE, _JOURNAL_TWO_LETTER, _JOURNAL_CANONICAL = \
+    _load_journal_abbrev()
+
+
+def _journal_looks_abbreviated(name):
+    """Whether a journal name is written in ABBREVIATED style rather than spelled out,
+    so a suggestion should offer the canonical abbreviation rather than the full title.
+    Signal: an abbreviation carries period-truncated tokens ('Phys.', 'Rev.', 'Rept.') --
+    a token that ends in a literal '.'. A fully spelled-out title ('Journal of Physics B
+    Atomic Molecular Physics') has none. Stopwords ('of', 'and') and series letters ('A',
+    'B') are not evidence either way and are ignored. No signal -> default to abbreviated
+    (most physics/chem bibs abbreviate)."""
+    cleaned = clean_tex(name)
+    toks = [t for t in re.split(r"\s+", cleaned) if t]
+    abbreviated = spelled = 0
+    for t in toks:
+        # A trailing period (possibly before a closing bracket/comma) is the abbreviation
+        # mark -- strip only the OUTER punctuation, never the period itself.
+        if t.rstrip(",;:)]}").endswith("."):
+            abbreviated += 1
+            continue
+        core = t.strip(".,:;()[]{}")
+        if core[:1].isalpha() and len(core) >= 4 and core.lower() not in _ISO4_STOPWORDS:
+            spelled += 1
+    if abbreviated:
+        return True
+    return spelled == 0
+
+
+def _canonical_journal_pair(name):
+    """The proper-cased (abbrev, full) canonical pair for the journal `name` denotes, or
+    None. Looks up by the name's normalized key, then by the canon_key it resolves to --
+    so any accepted alias (the record's Crossref name, a known variant) finds the pair."""
+    k = _journal_key(name)
+    pair = _JOURNAL_CANONICAL.get(k)
+    if pair:
+        return pair
+    return _JOURNAL_CANONICAL.get(_JOURNAL_CANON.get(k, k))
 
 
 def _journal_equiv(a, b):
@@ -1309,13 +1376,49 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     raw_journal = e.get("journal", "")
     bj, aj = clean_tex(raw_journal).lower(), clean_tex(rec.get("journal", "")).lower()
     rec_journal_safe = _safe_suggestion(rec.get("journal", ""))
+    # The DOI is authoritative (Crossref is the primary metadata resource), so the record
+    # names the correct journal. If that journal has a curated CANONICAL (abbrev, full)
+    # pair, the canonical string is the single source of truth: the bib must match it
+    # EXACTLY (period-sensitive). This runs even when the bib was accepted as the same
+    # journal by `_journal_equiv` -- that check folds punctuation to IDENTIFY the journal,
+    # but a punctuation deviation from the fixed canonical string ('...Sci. U.S.A.' vs the
+    # canonical '...Sci. USA') is still a real difference to conform. We suggest the
+    # canonical form matching the bib's STYLE: the abbreviation if the bib wrote one
+    # ('Nat. Phy.' -> 'Nat. Phys.'), the full title if it wrote a full name. Pure case
+    # ('nat. phys.') is a slip, folded away, still conformed toward the cased canonical.
+    rec_pair = (_canonical_journal_pair(rec.get("journal", ""))
+                if bj and aj and "arxiv" not in bj and "arxiv" not in aj else None)
     if nonarticle:
         pass
+    elif rec_pair:
+        abbrev, full = rec_pair
+        target = abbrev if _journal_looks_abbreviated(raw_journal) else full
+        if raw_journal.strip() != target:
+            # Distinguish a CASE-ONLY deviation from a punctuation/content one. Case-only
+            # ('nat. phys.' vs 'Nat. Phys.') does not impair findability/FAIRness -- the
+            # entry already resolved -- so it is a quiet canonical-casing nudge (a
+            # journal_style note, suppressible). A punctuation/content deviation
+            # ('...Sci. U.S.A.' vs the canonical '...Sci. USA', 'Phys. Rept.' vs
+            # 'Phys. Rep.') is a real difference from the fixed canonical string a
+            # reader/parser would see as wrong -> a metadata_mismatch WARN. Both carry the
+            # structured suggestion so a tool can conform toward canonical. (Two separate
+            # rep.add calls with LITERAL category= so the rule catalog can scan them.)
+            sugg = {"field": "journal", "from": raw_journal, "to": target}
+            if raw_journal.strip().lower() == target.lower():
+                rep.add(Severity.INFO, e,
+                        f"[{source}] journal casing differs from the canonical form",
+                        "record", category="journal_style", field="journal",
+                        suggested=sugg)
+            else:
+                rep.add(Severity.WARN, e,
+                        f"[{source}] journal differs from the canonical form",
+                        "record", category="metadata_mismatch", field="journal",
+                        suggested=sugg)
     elif bj and aj and "arxiv" not in bj and "arxiv" not in aj and not _journal_equiv(bj, aj):
-        # Journal renders in the citation -> WARN, with the record's name suggested
-        # (only when it is safe to paste verbatim -- an entity-laden name is withheld).
-        # If the bib name is a single-character typo of a known curated abbreviation for
-        # this journal, say so explicitly ("possible typo") to make the finding actionable.
+        # No curated canonical pair: fall back to the record's own name (unchanged
+        # behavior), which also covers a genuinely different journal (a wrong-DOI
+        # 'Nature Photonics' vs 'Nature' -- conform toward the trusted record). If the bib
+        # is a single-character typo of a known curated abbreviation, say so explicitly.
         rec_canon_key = _JOURNAL_CANON.get(_journal_key(aj))
         _typo = rec_canon_key and _journal_near_match(
             _journal_key(bj), rec_canon_key, _JOURNAL_REVERSE)

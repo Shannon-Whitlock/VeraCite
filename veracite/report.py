@@ -105,7 +105,7 @@ CATEGORY_GROUP = {
     # semantic: content / metadata / identity, often needs the source of record
     "metadata_mismatch": "semantic", "source_conflict": "semantic",
     "parity_suggestion": "semantic", "missing_field": "semantic",
-    "journal_macro": "semantic",
+    "journal_macro": "semantic", "journal_style": "semantic",
     "missing_locator": "semantic", "entrytype_suggestion": "semantic",
     "isbn_unresolved": "semantic",
     "datamodel_recommended": "semantic",
@@ -174,6 +174,7 @@ CATEGORY_DOC = {
     "misplaced_field": "a value in the wrong field (e.g. a year in 'journal')",
     "missing_field": "biber-mandatory field absent (e.g. title, journal)",
     "journal_macro": "journal is an unexpanded LaTeX macro (e.g. \\pra); offer the record's name",
+    "journal_style": "journal name differs from the canonical form only by casing",
     "missing_locator": "article omits volume/pages -- not mandatory, advisory only",
     "identifier_placement": "an identifier sits in the url, not a structured doi/eprint field",
     "entrytype_suggestion": "the @type looks wrong for the entry's data",

@@ -99,6 +99,7 @@ DEFAULT_SETTINGS = {
         "citation_order": "note",         # a \cite{} group is not in chronological order
         "encoding": "note",               # non-ASCII / mojibake
         "journal_macro": "note",          # journal is an unexpanded LaTeX macro (\pra)
+        "journal_style": "note",          # journal differs from canonical only by casing
         "container_granularity": "note",  # id resolved to the containing volume, not the item
         "parity_suggestion": "note",      # record has data the bib could adopt
         "isbn_unresolved": "note",        # ISBN valid but not found in OL/Google Books (coverage gap)

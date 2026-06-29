@@ -2772,6 +2772,110 @@ def test_journal_dropped_subtitle_after_colon_is_equivalent():
     assert not eq("Physica C", "Physica D: Nonlinear Phenomena")  # different series
 
 
+# --- canonical journal conformance (suggest the table's canonical abbrev/full) --------
+
+def _journal_finding(bib_journal, rec_journal):
+    """Run the record comparison for a given bib journal vs record journal; return the
+    journal finding (severity, category, suggested-to) or None if silent."""
+    e = _entry("@article{k, author={A. Real}, title={T}, year={2020}, doi={10.1/x},\n"
+               " journal={%s}}\n" % bib_journal)
+    rec = {"authors": ["real"], "authors_display": ["Real"], "given": {},
+           "title": "T", "year": 2020, "journal": rec_journal,
+           "document_type": "journal article"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    jf = [f for f in rep.findings if "journal" in f.message and f.suggested]
+    if not jf:
+        return None
+    f = jf[0]
+    return (f.severity, f.category, f.suggested["to"])
+
+
+def test_journal_abbreviated_bib_gets_canonical_abbreviation():
+    # A bib written in ABBREVIATED style that deviates from the canonical abbreviation is
+    # conformed toward the canonical ABBREVIATION (not Crossref's verbose container name).
+    from veracite.report import Severity
+    for bib, rec, want in [
+        ("Nat. Phy.", "Nature Physics", "Nat. Phys."),
+        ("Phys. Rept.", "Physics Reports", "Phys. Rep."),
+        ("J. of Appl. Phys.", "Journal of Applied Physics", "J. Appl. Phys."),
+        ("J. High Energ. Phys.", "Journal of High Energy Physics", "J. High Energy Phys."),
+        ("Magn. Reson. Imag.", "Journal of Magnetic Resonance Imaging",
+         "J. Magn. Reson. Imaging"),
+    ]:
+        got = _journal_finding(bib, rec)
+        assert got is not None, bib
+        sev, cat, to = got
+        assert sev is Severity.WARN and to == want, (bib, got)
+
+
+def test_journal_full_title_bib_gets_canonical_full_title():
+    # A bib written in FULL-TITLE style is conformed toward the canonical FULL TITLE.
+    got = _journal_finding("Journal of Physics B Atomic Molecular Physics",
+                           "Journal of Physics B: Atomic, Molecular and Optical Physics")
+    assert got is not None
+    _, _, to = got
+    assert to == "Journal of Physics B: Atomic, Molecular and Optical Physics"
+
+
+def test_journal_exact_canonical_form_is_silent():
+    # A bib already in the exact canonical form (abbrev or full) produces NO finding.
+    for bib, rec in [
+        ("Nat. Phys.", "Nature Physics"),
+        ("Proc. Natl. Acad. Sci. USA", "Proceedings of the National Academy of Sciences"),
+        ("Appl. Phys. B", "Applied Physics B Photophysics and Laser Chemistry"),
+        ("Proc. R. Soc. A",
+         "Proceedings of the Royal Society of London. Series A. "
+         "Mathematical and Physical Sciences"),
+    ]:
+        assert _journal_finding(bib, rec) is None, bib
+
+
+def test_journal_punctuation_deviation_is_warn_case_only_is_note():
+    # A PUNCTUATION/content deviation from the canonical string ('U.S.A.' vs canonical
+    # 'USA') is a WARN: the canonical abbreviation is a fixed published string. A pure
+    # CASE deviation ('Usa', 'nat. phys.') does not impair findability -> a quiet
+    # journal_style NOTE. Both carry the suggestion toward the canonical form.
+    from veracite.report import Severity
+    pnas = "Proceedings of the National Academy of Sciences"
+    sev, cat, to = _journal_finding("Proc. Natl. Acad. Sci. U.S.A.", pnas)
+    assert sev is Severity.WARN and cat == "metadata_mismatch" and to.endswith("USA")
+    sev, cat, to = _journal_finding("Proc. Natl. Acad. Sci. Usa", pnas)
+    assert sev is Severity.INFO and cat == "journal_style" and to.endswith("USA")
+    sev, cat, to = _journal_finding("nat. phys.", "Nature Physics")
+    assert sev is Severity.INFO and cat == "journal_style" and to == "Nat. Phys."
+
+
+def test_journal_different_series_conforms_to_doi_resolved_record():
+    # The DOI is authoritative: when the bib names a different series ('J. Phys. A') than
+    # the record the DOI resolved to ('J. Phys. B'), conform toward the record's canonical
+    # form so the author reconciles the name with the link they actually cited. (Never a
+    # silent accept -- a different series is a real discrepancy.)
+    got = _journal_finding("J. Phys. A",
+                           "Journal of Physics B: Atomic, Molecular and Optical Physics")
+    assert got is not None
+    _, _, to = got
+    assert to == "J. Phys. B"
+
+
+def test_journal_not_in_table_falls_back_to_record_name():
+    # A journal with no curated canonical pair keeps the prior behavior: equivalent to the
+    # record -> silent; a real difference -> warn suggesting the record's own name. No
+    # regression for journals outside the authoritative table.
+    assert _journal_finding("Phys. Rev. Lett.", "Physical Review Letters") is None
+    got = _journal_finding("Nature Photonics", "Nature")   # different journal, no pair
+    assert got is not None and got[2] == "Nature"
+
+
+def test_journal_style_detection_abbrev_vs_full():
+    from veracite.compare import _journal_looks_abbreviated as ab
+    assert ab("Phys. Rept.")
+    assert ab("Nat. Phys.")
+    assert ab("J. of Appl. Phys.")
+    assert not ab("Journal of Physics B Atomic Molecular")
+    assert not ab("Physical Review Letters")
+
+
 def test_chemistry_journal_abbreviations_resolve():
     # The curated table includes the chemistry masterlist, so standard ACS/RSC/Wiley
     # abbreviations match their full titles (and a bloated Crossref container-title
