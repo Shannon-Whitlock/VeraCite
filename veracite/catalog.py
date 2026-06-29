@@ -36,6 +36,9 @@ INTENTIONALLY_UNPINNED = frozenset({
     "author_format",      # mixed severities: note for ALL-CAPS, warn for glued 'and'
     "record_unresolved",  # mixed severities: WARN for fetch failures and post-2005
                           # no-id; INFO/note for pre-2005 no-id (no DOI expected)
+    "duplicate",          # mixed severities: ERROR when both copies of a collision
+                          # are cited (the reader sees the same work twice), WARN
+                          # when only one is (the other is a latent, unseen collision)
 })
 
 

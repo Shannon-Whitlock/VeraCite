@@ -47,12 +47,14 @@ DEFAULT_SETTINGS = {
     # listed here keep the severity the individual check assigns. Defaults put
     # findings that change which work you cite (retracted, superseded preprint,
     # wrong paper) above cosmetic/style ones (biblatex fields, encoding).
-    # 'author_format' is deliberately ABSENT: its checks emit mixed severities (a
-    # note for ALL-CAPS surnames, a warning for an 'and' glued to a name), and
-    # pinning a category here flattens all its findings to one level. Leaving it
-    # unlisted lets each check keep its own severity. The catalog (--list-rules)
-    # still documents it via CATEGORY_DOC. (Kept in sync with
-    # catalog.INTENTIONALLY_UNPINNED, enforced by a test.)
+    # 'author_format' and 'duplicate' are deliberately ABSENT: their checks emit
+    # mixed severities ('author_format': a note for ALL-CAPS surnames, a warning
+    # for an 'and' glued to a name; 'duplicate': ERROR when both copies of a
+    # collision are cited, WARN when only one is), and pinning a category here
+    # flattens all its findings to one level. Leaving them unlisted lets each
+    # check keep its own severity. The catalog (--list-rules) still documents
+    # them via CATEGORY_DOC. (Kept in sync with catalog.INTENTIONALLY_UNPINNED,
+    # enforced by a test.)
     "severity": {
         "syntax": "error",                # structural / does-not-parse BibTeX error
         "missing_entry_header": "error",  # an entry's '@type{key,' header line is missing
@@ -79,7 +81,6 @@ DEFAULT_SETTINGS = {
         "preprint_version": "note",       # bib year matches an earlier arXiv version
         "preprint_retitled": "note",      # arXiv renamed the preprint in a later version
         "related_work": "warning",        # erratum/correction/comment/reply linked
-        "duplicate": "error",             # duplicate citation key or DOI (two entries collide)
         "duplicate_field": "note",        # a field repeated within ONE entry, values agree (benign)
         "duplicate_field_conflict": "warning",  # repeated field with DIFFERING values (data silently dropped)
         "dropped_field": "warning",       # a field outside the entry, silently dropped

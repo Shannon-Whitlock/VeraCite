@@ -348,7 +348,14 @@ def _fetch_arxiv(arxiv_id, timeout):
     if not txt:
         return None, status
     entry_m = re.search(r"<entry>(.*?)</entry>", txt, re.S)
-    rec = _parse_arxiv_entry(entry_m.group(1) if entry_m else txt)
+    if not entry_m:
+        # No <entry> in the feed means arXiv has no such id/version (e.g. a vN
+        # past the latest) -- NOT a record to parse. Falling back to the whole
+        # feed XML would let _parse_arxiv_entry's <title> regex match the feed's
+        # OWN <title> (e.g. "ArXiv Query: search_query=...&id_list=...v7..."),
+        # producing a bogus title for a version that doesn't exist.
+        return None, status
+    rec = _parse_arxiv_entry(entry_m.group(1))
     if rec is not None:
         # Stamp the bare id (no 'vN') so the comparison layer can lazily probe
         # per-version titles when the latest title disagrees with the bib.

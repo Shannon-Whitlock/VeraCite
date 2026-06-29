@@ -1070,20 +1070,19 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                 # Even at high overlap, an arXiv preprint may have been retitled
                 # between versions (e.g. v1 "computer" vs v2 "simulator" at 83%).
                 # Check before emitting "differs slightly" — the bib may be correct.
-                if source == "arxiv":
-                    retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
-                    if retitle:
-                        matched_v, latest_v, latest_title = retitle
-                        rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
-                                f"in a later version: the cited title matches v{matched_v}, but "
-                                f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
-                                f"cited title if you mean the current version", "record",
-                                category="preprint_retitled", field="title")
-                        retitle = True  # sentinel: skip the "differs slightly" below
-                    else:
-                        retitle = False
-                else:
-                    retitle = False
+                # This applies whichever source resolved the record (Crossref is
+                # primary and often wins resolution for a published preprint): what
+                # matters is whether the RECORD carries an arXiv id, which
+                # _bib_matches_earlier_version checks itself, not which source we
+                # are currently comparing against.
+                retitle = _bib_matches_earlier_version(e, rec, btitle, atitle, timeout)
+                if retitle:
+                    matched_v, latest_v, latest_title = retitle
+                    rep.add(Severity.INFO, e, f"[{source}] the arXiv preprint was renamed "
+                            f"in a later version: the cited title matches v{matched_v}, but "
+                            f"the latest (v{latest_v}) is \"{latest_title[:80]}\" -- update the "
+                            f"cited title if you mean the current version", "record",
+                            category="preprint_retitled", field="title")
                 if not retitle:
                     rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle_note}:\n"
                             f"        bib:    {btitle[:90]}\n"

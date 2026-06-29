@@ -1661,6 +1661,41 @@ def test_arxiv_rate_limit_marks_record_unresolved_transient(monkeypatch):
     sources._ARXIV_CACHE.clear()
 
 
+def test_arxiv_version_titles_stops_at_real_latest_version(monkeypatch):
+    # arXiv returns an empty feed (no <entry>, but a feed-level <title> like
+    # "ArXiv Query: search_query=...&id_list=...v3...") for a version past the
+    # latest. _fetch_arxiv must treat "no <entry>" as "no such version", NOT fall
+    # back to parsing the whole feed -- that fallback let the feed's OWN <title>
+    # masquerade as the version's title, producing query-echo garbage instead of
+    # correctly stopping at v2.
+    from veracite import sources
+    sources._ARXIV_VERSION_TITLES.clear()
+    feed_v1 = ("<feed><entry><title>Old Title</title>"
+               "<author><name>A Person</name></author>"
+               "<published>2022-01-01T00:00:00Z</published>"
+               "<updated>2022-01-01T00:00:00Z</updated></entry></feed>")
+    feed_v2 = ("<feed><entry><title>New Title</title>"
+               "<author><name>A Person</name></author>"
+               "<published>2022-01-01T00:00:00Z</published>"
+               "<updated>2022-06-01T00:00:00Z</updated></entry></feed>")
+    feed_empty = ('<feed><title>ArXiv Query: search_query=&amp;id_list=2206.13321v3'
+                  '&amp;start=0&amp;max_results=10</title></feed>')
+
+    def fake_http_get_text(url, timeout):
+        if "v1" in url:
+            return feed_v1, 200
+        if "v2" in url:
+            return feed_v2, 200
+        return feed_empty, 200          # any vN >= 3: arXiv's "no such version" feed
+
+    monkeypatch.setattr(sources, "http_get_text", fake_http_get_text)
+    titles = sources.arxiv_version_titles("2206.13321", timeout=1)
+    assert titles == {1: "Old Title", 2: "New Title"}, (
+        "must stop at the real latest version, not absorb the empty feed's own "
+        "<title> as a bogus v3+ title")
+    sources._ARXIV_VERSION_TITLES.clear()
+
+
 def test_arxiv_real_miss_is_not_marked_transient(monkeypatch):
     # The negative twin: a genuine 404 (the id does not exist) is NOT transient -- the
     # record_unresolved must stay the plain message and online_error must be False, so
@@ -4319,6 +4354,41 @@ def test_surname_with_and_not_flagged_as_glued():
                        for f in rep.findings), f"false positive on: {bib}"
 
 
+def test_given_name_ending_in_and_not_flagged_as_glued():
+    # A GIVEN name ending in 'and' (Roland, Ferdinand, Armand) followed by its own
+    # trailing initial/given-name token looks identical, by sub-pattern 2 alone, to
+    # a genuinely fused 'and' separator: 'Farrell, Roland C.' and 'Pregnolato,
+    # Gabijaand Lodahl' both match '<word>and <Capital>'. The disambiguator must
+    # tell them apart by checking whether a ',' (a new author's given name)
+    # follows before the next ' and '/end of field.
+    for bib in (
+        "@article{k, author={Beane, Silas R. and Farrell, Roland C.}, title={T}, journal={J}, year={2022}}",
+        "@article{k, author={Smith, Ferdinand and Jones, A.}, title={T}, journal={J}, year={2020}}",
+        "@article{k, author={Lee, Armand}, title={T}, journal={J}, year={2020}}",
+        # Roland C. as the FIRST author (so a ' and ' follows, but still no comma
+        # intervenes between the matched capital and that ' and ').
+        "@article{k, author={Farrell, Roland C. and Beane, Silas}, title={T}, journal={J}, year={2022}}",
+    ):
+        e = _entry(bib + "\n")
+        rep = Report(color=False)
+        run_static([e], rep)
+        assert not any(f.category == "author_format" and "fused" in f.message
+                       for f in rep.findings), f"false positive on: {bib}"
+
+
+def test_given_name_ending_in_and_still_flagged_when_genuinely_fused():
+    # The disambiguation added for the above must not blind the rule to a REAL
+    # fused 'and' where the introduced surname happens to itself be followed by a
+    # comma (a new author's given name) -- the structural signal the fix relies on.
+    e = _entry(r"@article{k, author={Smith, Ferdinandand Jones, A.}, title={T}, "
+               r"journal={J}, year={2020}}" + "\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    glued = [f for f in rep.findings if f.category == "author_format" and "Ferdinandand" in f.message]
+    assert glued, "given name truly fused to 'and' (followed by a new ', GivenName') should still fire"
+    assert glued[0].severity is Severity.WARN
+
+
 def test_article_with_isbn_suggests_incollection():
     # Item 14: an @article carrying an ISBN/book-series DOI is a chapter -- suggest
     # @incollection/@inproceedings, not @online/@misc.
@@ -5345,6 +5415,12 @@ def test_duplicate_doi_one_cited_is_flagged_without_double_cite_note():
     # When only one of a DOI-sharing pair is cited, the finding is still raised
     # (the uncited entry is a latent collision) but the message does NOT add the
     # "same paper cited twice" note, which is reserved for the both-cited case.
+    # Severity must be WARN, not ERROR: the reader never sees both copies in the
+    # reference list, so this is bib-maintenance noise, not a reader-visible
+    # double-citation. A category-level severity pin (DEFAULT_SETTINGS['severity'])
+    # would silently flatten this back to ERROR regardless of citedness -- 'duplicate'
+    # must stay out of that table (see catalog.INTENTIONALLY_UNPINNED), exactly like
+    # 'author_format'.
     bib = ("@article{A2020, title={T}, author={X}, journal={J}, year={2020},"
            " doi={10.1/x}}\n"
            "@article{B2020, title={T}, author={X}, journal={J}, year={2020},"
@@ -5355,6 +5431,20 @@ def test_duplicate_doi_one_cited_is_flagged_without_double_cite_note():
     dups = [f for f in rep.findings if f.category == "duplicate" and "DOI shared" in f.message]
     assert dups, "one-cited DOI pair must still produce a duplicate finding"
     assert "same paper cited twice" not in dups[0].message
+    assert dups[0].severity is Severity.WARN, (
+        "one-cited duplicate must be WARN, not ERROR -- a category severity pin "
+        "would wrongly flatten this to the both-cited ERROR level")
+
+
+def test_duplicate_category_is_not_severity_pinned():
+    # 'duplicate' must stay out of DEFAULT_SETTINGS['severity'] (and be declared in
+    # catalog.INTENTIONALLY_UNPINNED): the rule itself decides ERROR vs WARN based on
+    # whether both colliding keys are cited, and a category-level pin would override
+    # that per-case decision back to a single severity for every duplicate finding.
+    from veracite.config import DEFAULT_SETTINGS
+    from veracite.catalog import INTENTIONALLY_UNPINNED
+    assert "duplicate" not in DEFAULT_SETTINGS["severity"]
+    assert "duplicate" in INTENTIONALLY_UNPINNED
 
 
 def test_duplicate_title_year_author_fingerprint_catches_preprint_vs_published():
@@ -5421,3 +5511,31 @@ def test_arxiv_high_overlap_genuine_title_diff_stays_as_mismatch(monkeypatch):
     assert not any(f.category == "preprint_retitled" for f in rep.findings)
     assert any(f.category == "metadata_mismatch" and "title differs" in f.message
                for f in rep.findings)
+
+
+def test_crossref_resolved_retitled_preprint_at_high_overlap_still_checked(monkeypatch):
+    # The version check must run regardless of which source resolved the record.
+    # Crossref is primary and commonly wins resolution for a published-or-preprint
+    # entry that also carries an eprint id; gating the check on source == "arxiv"
+    # meant a Crossref-resolved entry with a renamed-in-a-later-version arXiv title
+    # was never checked and could be reported as a plain "title differs slightly"
+    # mismatch instead of the correct preprint_retitled note. Same fixture as the
+    # arxiv-sourced test above, but with source="crossref".
+    from veracite import sources
+    rec = {"authors": ["shapira"], "authors_display": ["Shapira"], "given": {},
+           "title": "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+           "year": 2023, "journal": "Crossref Journal", "arxiv_id": "2307.04922"}
+    monkeypatch.setattr(sources, "arxiv_version_titles", lambda aid, timeout: {
+        1: "Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions",
+        2: "Towards Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions"})
+    e = _entry("@article{shapira2023, author={Yotam Shapira and Lior Gazit},\n"
+               " title={Analog Quantum Simulations of Lattice Gauge Theories with Trapped Ions},\n"
+               " year={2023}, eprint={2307.04922}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep, timeout=1)
+    mismatch = [f for f in rep.findings
+                if f.category == "metadata_mismatch" and "title differs" in f.message]
+    assert not mismatch, "faithfully-cited v1 title at high overlap must not be a mismatch, even via crossref"
+    retitled = [f for f in rep.findings if f.category == "preprint_retitled"]
+    assert retitled and retitled[0].severity is Severity.INFO
+    assert "v1" in retitled[0].message

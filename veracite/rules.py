@@ -874,13 +874,42 @@ def truncated_authors(e, rep):
 # Two sub-patterns, both requiring a capitalized next word so 'Anderson' /
 # 'Brandt' / other legitimate surnames ending in 'and' are not matched:
 #   1. An initial (single capital + optional period) directly before 'and'.
+#      Unambiguous: a real initial is never followed by 'and' with no space, so
+#      this sub-pattern needs no further check.
 #   2. A multi-letter word in the given-name position (after a comma) ending in
 #      'and'. Surnames ending in 'and' (Bertrand, Armand) only appear *before* a
-#      comma, so this sub-pattern never fires on them.
+#      comma, so they cannot reach this sub-pattern. But a GIVEN name ending in
+#      'and' (Roland, Ferdinand, Armand-as-given-name) is indistinguishable by
+#      this pattern alone from a genuinely fused separator: 'Farrell, Roland C.'
+#      and 'Pregnolato, Gabijaand Lodahl' both look like '<word>and <Capital>'.
+#      Sub-pattern 2 alone is therefore only a CANDIDATE; _is_fused_and()
+#      disambiguates using the structural fact that splits them: after a
+#      genuine fused 'and', the surname it introduces is followed by ITS OWN
+#      ', GivenName' before the next ' and '/end of list (the next author has
+#      not been read yet), whereas after a given name that merely ends in
+#      'and', the matched capital is a trailing initial/given-name token of the
+#      SAME author and no comma intervenes before the next ' and ' or the end.
 _GLUED_AND_RE = re.compile(
     r"(?:^|[\s,])([A-Z]\.?and)\s+[A-Z]"           # initial fused: 'F.and'
-    r"|,\s*([A-Za-z]{2,}and)\s+[A-Z]"              # given name fused: 'Gabijaand'
 )
+_GLUED_AND_CANDIDATE_RE = re.compile(
+    r",\s*([A-Za-z]{2,}and)\s+([A-Z][A-Za-z'\-]*)"  # given name fused: 'Gabijaand Pregnolato'
+)
+
+
+def _is_fused_and(field_value, match):
+    """True if `match` (a _GLUED_AND_CANDIDATE_RE hit) is a genuinely fused 'and'
+    rather than a given name that happens to end in 'and' followed by its own
+    trailing initial. Looks at the text after the matched capitalized word, up
+    to the next ' and ' separator or the end of the field: a real fused
+    separator introduces a NEW author, so a ',' (starting that author's given
+    name) appears before either boundary; a trailing initial/given-name token of
+    the SAME author is not followed by one."""
+    tail_start = match.end()
+    rest = field_value[tail_start:]
+    next_and = re.search(r"\sand\s", rest)
+    window = rest[:next_and.start()] if next_and else rest
+    return "," in window
 
 
 @rule
@@ -890,9 +919,14 @@ def glued_and_separator(e, rep):
     otherwise it splinters into unrelated 'given name differs' and 'missing author'
     findings against the record."""
     for field in ("author", "editor"):
-        m = _GLUED_AND_RE.search(e.get(field, ""))
-        if m:
-            fused = m.group(1) or m.group(2)
+        val = e.get(field, "")
+        m = _GLUED_AND_RE.search(val)
+        fused = m.group(1) if m else None
+        if not fused:
+            cm = _GLUED_AND_CANDIDATE_RE.search(val)
+            if cm and _is_fused_and(val, cm):
+                fused = cm.group(1)
+        if fused:
             rep.add(Severity.WARN, e, f"{field} list has 'and' fused to a name with no "
                     f"space ({fused!r}); BibTeX reads it as one author and drops "
                     f"the separator -- add a space before 'and'",
