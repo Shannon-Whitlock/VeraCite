@@ -2679,6 +2679,33 @@ def test_journal_genuine_mismatch_still_differs():
     assert not eq("Phys. Rev. B", "Nature Physics")
 
 
+def test_iso4_two_letter_ltwa_stems_accepted():
+    # A FEW LTWA stems are genuinely two letters ('At.' = Atomic, 'Ed.' = Edition,
+    # 'Am.' = American). A blanket '2-char abbrev of a long word is invalid' floor
+    # wrongly rejected them -- e.g. 'J. Phys. B: At. Mol. Opt. Phys.' (the exact ISO-4
+    # abbreviation of this journal) read as 'journal differs'. The floor is now
+    # allowlisted from the curated table's own 2-letter stems.
+    from veracite.compare import _JOURNAL_TWO_LETTER
+    eq = record._journal_equiv
+    assert eq("J. Phys. B: At. Mol. Opt. Phys.",
+              "Journal of Physics B: Atomic, Molecular and Optical Physics")
+    assert eq("Adv. At. Mol. Phys.", "Advances in Atomic and Molecular Physics")
+    # 'At.' is the allowlisted stem the table itself carries.
+    assert "at" in _JOURNAL_TWO_LETTER
+
+
+def test_iso4_bogus_two_letter_stem_still_rejected():
+    # The floor must STILL reject a 2-char abbreviation that is NOT a known LTWA stem:
+    # 'Ph.' for 'Physics' (physics abbreviates to 'Phys.', never 'Ph.'). 'Nat. Ph.' is
+    # the look-alike that must not regress -- it is a malformed/typo'd 'Nat. Phys.',
+    # not a valid alternative form.
+    from veracite.compare import _JOURNAL_TWO_LETTER
+    eq = record._journal_equiv
+    assert not eq("Nat. Ph.", "Nature Physics")        # 'ph' not an allowlisted stem
+    assert not eq("J. Ph. B", "Journal of Physics B")  # same: physics is never 'ph'
+    assert "ph" not in _JOURNAL_TWO_LETTER
+
+
 def test_journal_dropped_subtitle_after_colon_is_equivalent():
     # A registry full name often adds a ':'-delimited subtitle the bib drops
     # ('Physica D' vs 'Physica D: Nonlinear Phenomena'); the pre-colon head is the

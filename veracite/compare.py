@@ -489,7 +489,11 @@ def _load_journal_abbrev():
     """Load the curated abbreviation->full-title table. Both directions are
     indexed on a depunctuated key so a lookup works whichever form the bib uses.
     Also builds a reverse index (canon_key -> frozenset of abbr_keys) used by
-    _journal_near_match to detect near-typos of known abbreviations."""
+    _journal_near_match to detect near-typos of known abbreviations, and the set of
+    legitimate TWO-LETTER abbreviation stems (e.g. 'at' for 'Atomic', 'ed' for
+    'Edition') harvested from the curated abbreviations -- the allowlist
+    _is_iso4_abbrev uses so a real LTWA two-letter stem is accepted while a bogus
+    one ('ph' for 'physics') is not."""
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                         "data", "journal_abbrev.json")
     pairs = {}
@@ -500,6 +504,7 @@ def _load_journal_abbrev():
         pairs = {}
     canon = {}
     reverse = {}   # canon_key -> set of all abbr/full keys that point to it
+    two_letter = set()   # legitimate 2-letter abbreviation stems seen in the table
     for abbr, full in pairs.items():
         key = _journal_key(full)
         ak = _journal_key(abbr)
@@ -507,7 +512,11 @@ def _load_journal_abbrev():
         canon[key] = key
         reverse.setdefault(key, set()).add(ak)
         reverse.setdefault(key, set()).add(key)
-    return canon, {k: frozenset(v) for k, v in reverse.items()}
+        for tok in re.split(r"[^a-z0-9]+", abbr.lower()):
+            if len(tok) == 2 and tok.isalpha():
+                two_letter.add(tok)
+    return (canon, {k: frozenset(v) for k, v in reverse.items()},
+            frozenset(two_letter))
 
 
 def _edit_dist_le1(a, b):
@@ -593,15 +602,21 @@ def _is_iso4_abbrev(abbrev, full):
     for a, f in zip(aw, fw):
         if not f.startswith(a):
             return False
-        # ISO-4 never abbreviates a long word to fewer than 3 characters: 'ph' for
-        # 'physics' is not a legitimate truncation. Single-letter tokens are series
-        # designators ('Phys. Rev. B') and are exempt from this floor.
-        if len(a) == 2 and len(f) >= 5:
+        # Two-letter floor, allowlisted. ISO-4 (LTWA) abbreviates MOST long words to
+        # >= 3 chars ('Phys.' for 'Physics'), so a 2-char abbreviation of a long word
+        # is usually a bogus prefix ('ph' for 'physics', the 'Nat. Ph.' typo of the
+        # curated 'Nat. Phys.'). But a FEW LTWA stems are genuinely two letters --
+        # 'At.' (Atomic), 'Ed.' (Edition), 'Am.' (American), 'Br.' (British). Reject a
+        # 2-char abbrev of a long (>=5) word UNLESS it is one of those known stems
+        # (harvested from the curated table into _JOURNAL_TWO_LETTER), so 'At. Mol.
+        # Opt. Phys.' is accepted while 'Ph.' is not. Single-letter tokens are series
+        # designators ('Phys. Rev. B') and are never subject to this floor.
+        if len(a) == 2 and len(f) >= 5 and a not in _JOURNAL_TWO_LETTER:
             return False
     return True
 
 
-_JOURNAL_CANON, _JOURNAL_REVERSE = _load_journal_abbrev()
+_JOURNAL_CANON, _JOURNAL_REVERSE, _JOURNAL_TWO_LETTER = _load_journal_abbrev()
 
 
 def _journal_equiv(a, b):
