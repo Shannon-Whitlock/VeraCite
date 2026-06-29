@@ -368,10 +368,30 @@ def _compare_authors(e, rec, source, rep):
                 + (f" (record uses a collaboration name; individual authors are not "
                    f"listed separately in the record)" if rec_first_is_collab else ""),
                 "record", category="metadata_mismatch")
+    # Crossref registers BOOK/monograph metadata with notoriously incomplete author
+    # lists -- often only the first author, or authors attached to individual chapters
+    # rather than the book (e.g. 'Rydberg Physics' by Sibalic AND Adams resolves to a
+    # monograph record naming only Sibalic). There is no more authoritative registry to
+    # cross-check book authorship against, so a bib author the record lacks is, for a
+    # book, far more likely a gap in the RECORD than a spurious bib author. We still
+    # surface it -- the record DID disagree, which is worth a look -- but the message
+    # must point at the record's known incompleteness and ask the user to INSPECT,
+    # rather than asserting the bib carries a bogus author (which would overturn a
+    # correct, more-complete bib). Triggered when either side is book-like.
+    rec_is_book = (rec.get("document_type") or "").lower() in ("book", "book chapter")
+    bib_is_book = getattr(e, "etype", "") in (
+        "book", "mvbook", "collection", "incollection", "inbook", "inreference")
     if bib_only and not rec_first_is_collab:
-        rep.add(Severity.WARN, e, f"[{source}] author(s) in bib not in record: "
-                + ", ".join(sorted(show(a) for a in bib_only)), "record",
-                category="metadata_mismatch")
+        names = ", ".join(sorted(show(a) for a in bib_only))
+        if rec_is_book or bib_is_book:
+            rep.add(Severity.WARN, e, f"[{source}] author(s) in the bib are absent "
+                    f"from the record: {names} -- book/monograph records often list "
+                    f"authors incompletely; verify the bib's author list is correct "
+                    f"(do not assume the bib is wrong)", "record",
+                    category="metadata_mismatch")
+        else:
+            rep.add(Severity.WARN, e, f"[{source}] author(s) in bib not in record: "
+                    f"{names}", "record", category="metadata_mismatch")
     if rec_only and not truncated:
         rep.add(Severity.WARN, e, f"[{source}] author(s) in record missing from bib: "
                 + ", ".join(sorted(show(a) for a in rec_only)), "record",

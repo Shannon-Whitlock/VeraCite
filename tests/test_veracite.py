@@ -487,6 +487,59 @@ def test_author_mismatch_message_shows_readable_names_not_folded_keys():
     assert not any("furkanbiten" in m or "'biten'" in m for m in msgs)
 
 
+def test_book_extra_bib_author_softened_to_inspect_record():
+    # Crossref registers BOOK/monograph metadata with incomplete author lists ('Rydberg
+    # Physics' by Sibalic AND Adams resolves to a monograph naming only Sibalic). There
+    # is no better registry to cross-check book authors against, so the finding STAYS a
+    # WARN (something disagreed, worth a look), but the message must point at the
+    # record's incompleteness and ask the user to inspect -- NOT assert the bib carries
+    # a bogus author. The blunt 'author(s) in bib not in record' phrasing must not be
+    # used for a book.
+    from veracite.report import Severity
+    e = _entry("@book{k, author={{\\v{S}}ibali{\\'c}, Nikola and Adams, Charles S},\n"
+               " title={Rydberg Physics}, year={2018}, doi={10.1/x}}\n")
+    rec = {"authors": ["sibalic"], "authors_display": ["Sibalic"], "given": {},
+           "title": "Rydberg Physics", "year": 2018, "document_type": "book"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    book = [f for f in rep.findings if "absent\n        from the record" in f.message
+            or "absent from the record" in f.message]
+    assert book, "a book's extra bib author is still surfaced (record may be incomplete)"
+    assert book[0].severity is Severity.WARN
+    assert "Adams" in book[0].message
+    assert book[0].suggested is None, "no suggested fix -- the bib is likely correct"
+    assert "incompletely" in book[0].message and "verify" in book[0].message
+    # The blunt 'in bib not in record' assertion is NOT used for a book.
+    assert not any("author(s) in bib not in record:" in f.message
+                   for f in rep.findings)
+
+    # Same softening when the BIB says @book even if the record carries no type.
+    rec2 = {"authors": ["sibalic"], "authors_display": ["Sibalic"], "given": {},
+            "title": "Rydberg Physics", "year": 2018}
+    rep2 = Report(color=False)
+    record.compare_against_record(e, rec2, "crossref", rep2)
+    assert any("absent from the record" in f.message for f in rep2.findings)
+    assert not any("author(s) in bib not in record:" in f.message
+                   for f in rep2.findings)
+
+
+def test_article_extra_bib_author_still_flagged_bluntly():
+    # The look-alike that must NOT regress: for an ARTICLE, Crossref author lists are
+    # reliable, so a bib author genuinely absent from the record is still a real
+    # discrepancy worth the direct 'in bib not in record' WARN. Only books get the
+    # softened 'inspect the record' phrasing.
+    e = _entry("@article{k, author={Real Author and Ghost Coauthor}, title={A Study},\n"
+               " year={2019}, doi={10.1/x}}\n")
+    rec = {"authors": ["author"], "authors_display": ["Author"], "given": {},
+           "title": "A Study", "year": 2019, "document_type": "journal article"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert any("author(s) in bib not in record:" in f.message and "Coauthor" in f.message
+               for f in rep.findings), \
+        "an article's genuinely extra bib author is still flagged directly"
+    assert not any("incompletely" in f.message for f in rep.findings)
+
+
 def test_is_initial_recognizes_initials_not_names():
     assert record._is_initial("L.")
     assert record._is_initial("J.R.")
