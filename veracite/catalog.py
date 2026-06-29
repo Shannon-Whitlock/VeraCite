@@ -188,11 +188,53 @@ def _fmt_table(rows):
     return "\n".join(out)
 
 
-def print_catalog(as_json=False, stream=None):
+def suppression_table():
+    """The cross-finding SUPPRESSION decision as inspectable rows: which issue
+    RETRACTS which other issue, and why. This is the single declarative answer to
+    'which findings are emitted vs suppressed depending on other findings' (the
+    SUPERSEDES table in report.py, read at emit time over the live findings). One
+    row per edge: loser category, the winner that retracts it, the losing layer, why."""
+    rows = []
+    for loser, (losing_layer, winner, why) in sorted(SUPERSEDES.items()):
+        rows.append({"suppressed": loser, "suppressed_by": winner,
+                     "losing_layer": losing_layer, "why": why})
+    return rows
+
+
+def _fmt_suppression(rows):
+    cols = [("suppressed", "suppressed finding"), ("suppressed_by", "suppressed by"),
+            ("losing_layer", "loser layer"), ("why", "why")]
+    widths = {k: max(len(hdr), *(len(str(r[k])) for r in rows)) for k, hdr in cols}
+    # The 'why' column is prose; don't pad it (it's last).
+    widths["why"] = len("why")
+    line = lambda vals: "  ".join(
+        (v if k == "why" else v.ljust(widths[k])) for (k, _), v in zip(cols, vals))
+    out = [line([hdr for _, hdr in cols]),
+           line(["-" * widths[k] for k, _ in cols])]
+    out += [line([str(r[k]) for k, _ in cols]) for r in rows]
+    return "\n".join(out)
+
+
+def print_catalog(as_json=False, stream=None, suppression=False):
     """Print the catalog to `stream` (default stdout). The audit sheet a publisher
-    reviews against their house standard; `as_json` for machine consumption."""
+    reviews against their house standard; `as_json` for machine consumption.
+    `suppression=True` prints the cross-finding suppression table instead -- which
+    finding retracts which, and why."""
     import sys
     stream = stream or sys.stdout
+    if suppression:
+        rows = suppression_table()
+        if as_json:
+            json.dump({"suppression": rows}, stream, indent=2)
+            stream.write("\n")
+            return
+        stream.write(_fmt_suppression(rows) + "\n")
+        stream.write(
+            f"\n{len(rows)} suppression rule(s). A 'suppressed' finding is DETECTED but "
+            "retracted by the\n'suppressed by' finding (resolved at emit time over the "
+            "live findings, so it is\norder-independent). The suppressed finding is still "
+            "persisted in the JSON record,\nstamped, and shown by --show-suppressed.\n")
+        return
     rows = catalog()
     if as_json:
         json.dump({"rules": rows}, stream, indent=2)

@@ -131,11 +131,13 @@ def parse_args(argv):
                     help="report order: 'entry' (default) groups findings per .bib "
                          "entry in file order; 'severity' is one global list, errors "
                          "first, for triage")
-    ap.add_argument("--list-rules", nargs="?", const="table", choices=["table", "json"],
+    ap.add_argument("--list-rules", nargs="?", const="table",
+                    choices=["table", "json", "suppression", "suppression-json"],
                     metavar="FORMAT",
                     help="print the catalog of finding categories (the audit sheet: "
                          "each category's default severity, group, and description) "
-                         "and exit. FORMAT is 'table' (default) or 'json'")
+                         "and exit. FORMAT is 'table' (default), 'json', 'suppression' "
+                         "(which finding retracts which, and why), or 'suppression-json'")
     return ap, ap.parse_args(argv)
 
 
@@ -150,7 +152,9 @@ def main(argv=None):
     # house standard, then encodes disagreements in a settings 'severity' block.
     if args.list_rules:
         from .catalog import print_catalog
-        print_catalog(as_json=(args.list_rules == "json"))
+        suppression = args.list_rules in ("suppression", "suppression-json")
+        as_json = args.list_rules in ("json", "suppression-json")
+        print_catalog(as_json=as_json, suppression=suppression)
         return 0
 
     # CLI flags override settings; settings supply the defaults. Pacing is applied
