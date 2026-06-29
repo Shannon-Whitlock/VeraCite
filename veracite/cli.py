@@ -122,6 +122,11 @@ def parse_args(argv):
     ap.add_argument("--skipnotes", action="store_true",
                     help="hide note-level findings (stylistic / biblatex-filtered); "
                          "show only warnings and errors")
+    ap.add_argument("--show-suppressed", action="store_true",
+                    help="also show findings that were detected but SUPPRESSED by "
+                         "another finding (dimmed, with the reason); an audit view -- "
+                         "the JSON report always carries them, the terminal hides them "
+                         "by default")
     ap.add_argument("--sort", choices=["entry", "severity"], default="entry",
                     help="report order: 'entry' (default) groups findings per .bib "
                          "entry in file order; 'severity' is one global list, errors "
@@ -207,7 +212,7 @@ def main(argv=None):
     # Color when attached to a terminal and not disabled -- and, on Windows, only
     # if the console accepts ANSI (otherwise the escapes would print literally).
     color = not args.no_color and sys.stdout.isatty() and enable_ansi_colors()
-    rep = Report(color=color)
+    rep = Report(color=color, show_suppressed=args.show_suppressed)
 
     # The file-level syntax findings (parser problems, brace balance, missing '='
     # separators) are produced up front; they print in the file-level group, not
@@ -372,6 +377,8 @@ def main(argv=None):
             # rules re-run and the append -- the saved record is already correct.
             if not to_run:
                 rep.seed_findings(cp._findings_by_key.get(e.key, []))
+                rep.seed_superseded({(k, c) for (k, c) in cp._replay_superseded
+                                     if k == e.key})
                 if e.key in cp.results:
                     results[e.key] = cp.results[e.key]
                     st, conf = cp.statuses.get(e.key, ("", 0.0))
@@ -413,6 +420,7 @@ def main(argv=None):
                 # resolution/status so the score and JSON are complete without
                 # re-resolving.
                 rep.seed_findings(cp.seed_findings_for(e.key, reuse))
+                rep.seed_superseded(cp.seed_superseded_for(e.key, reuse))
                 if e.key in cp.results:
                     results[e.key] = cp.results[e.key]
                     st, conf = cp.statuses.get(e.key, ("", 0.0))

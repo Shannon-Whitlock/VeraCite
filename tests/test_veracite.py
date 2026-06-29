@@ -2,6 +2,7 @@
 predicates that have a history of false positives. No network is touched.
 """
 
+import io
 import os
 
 import pytest
@@ -1215,6 +1216,35 @@ def test_and_others_withdrawn_when_record_has_no_more_authors():
     record.compare_against_record(e, rec, "crossref", rep)
     # supersession is resolved at read time: live_findings() drops it.
     assert not any(f.category == "author_truncated_marker" for f in rep.live_findings())
+
+
+def test_suppressed_finding_is_persisted_stamped_but_excluded_from_aggregates():
+    # Piece D: a suppressed finding is no longer DROPPED -- it is persisted in the
+    # record's issues, STAMPED with the winner that retracted it, but excluded from
+    # live_findings()/counts and hidden from the default terminal view.
+    e = _entry("@article{k,\n author={LHCb Collaboration and others},\n"
+               " title={A Result},\n year={2020},\n journal={J},\n volume={1},\n"
+               " pages={1},\n doi={10.1/x}\n}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    rec = {"authors": ["lhcbcollaboration"], "given": {}, "title": "A Result",
+           "year": "2020"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    # Excluded from the live set (so counts/scores ignore it).
+    assert not any(f.category == "author_truncated_marker" for f in rep.live_findings())
+    # But PERSISTED in issues_for, stamped with suppressed_by.
+    issues = rep.issues_for("k")
+    sup = [i for i in issues if i["category"] == "author_truncated_marker"]
+    assert sup and sup[0].get("suppressed_by"), "suppressed finding must persist a stamp"
+    # Default render hides it; --show-suppressed reveals it.
+    rec_dict = {"key": "k", "status": None, "issues": issues, "entry_type": "article",
+                "line": 1}
+    default_out, shown_out = io.StringIO(), io.StringIO()
+    rep.render_entry_record(rec_dict, out=default_out)
+    rep.render_entry_record(rec_dict, out=shown_out, show_suppressed=True)
+    assert "author_truncated_marker" not in default_out.getvalue()
+    assert "author_truncated_marker" in shown_out.getvalue()
+    assert "suppressed by" in shown_out.getvalue()
 
 
 def test_and_others_kept_when_record_lists_more_authors():

@@ -624,7 +624,11 @@ def integrity(records, rep):
     # Per-entry finding categories: from the record's own issues (the single source),
     # so the per-entry defect lookup matches what is persisted/printed.
     def fcats(rec):
-        return {(i.get("category") or "") for i in (rec.get("issues") or [])}
+        # SUPPRESSED issues are excluded -- they were retracted as false positives, so
+        # they must not dent integrity (the record persists them, stamped, for audit;
+        # aggregates ignore them, keeping scores byte-identical to pre-persist-all).
+        return {(i.get("category") or "") for i in (rec.get("issues") or [])
+                if not i.get("suppressed_by")}
 
     # INTEGRITY (0-100): mean per-entry credit by the worst author-fixable defect,
     # minus a flat penalty per duplicate. Clean bib = 100; a wrong/unverifiable

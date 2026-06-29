@@ -1,0 +1,821 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VeraCite — evaluation review</title>
+<style>
+:root {
+  --bg: #f8f9fa; --surface: #fff; --border: #dee2e6;
+  --text: #212529; --muted: #6c757d; --accent: #0d6efd;
+  --err: #dc3545; --warn: #fd7e14; --info: #6c757d;
+  --tp: #198754; --fp: #dc3545; --na: #6c757d;
+  --radius: 6px; --mono: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+header { background: #1a1a2e; color: #eee; padding: 12px 20px;
+         display: flex; align-items: center; gap: 16px; }
+header h1 { font-size: 18px; font-weight: 600; }
+header .sub { font-size: 12px; color: #aaa; }
+.toolbar { background: var(--surface); border-bottom: 1px solid var(--border);
+           padding: 8px 16px; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.toolbar label { font-size: 12px; color: var(--muted); }
+.toolbar select, .toolbar input { font-size: 13px; padding: 4px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg); }
+.toolbar button { font-size: 13px; padding: 4px 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); background: var(--surface); cursor: pointer; }
+.toolbar button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.toolbar .spacer { flex: 1; }
+.stats { font-size: 12px; color: var(--muted); padding: 4px 8px;
+         background: var(--bg); border-bottom: 1px solid var(--border);
+         display: flex; gap: 16px; flex-wrap: wrap; }
+.stats span b { color: var(--text); }
+
+/* split layout */
+.layout { display: grid; grid-template-columns: 1fr 380px; height: calc(100vh - 120px); }
+.list-pane { overflow-y: auto; border-right: 1px solid var(--border); }
+.detail-pane { overflow-y: auto; padding: 16px; background: var(--surface); }
+
+/* finding list */
+table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+thead th { position: sticky; top: 0; background: #f0f0f0; padding: 6px 8px;
+           text-align: left; border-bottom: 2px solid var(--border);
+           font-weight: 600; font-size: 12px; white-space: nowrap;
+           user-select: none; overflow: hidden; }
+thead th .th-inner { display: flex; align-items: center; gap: 4px; cursor: pointer; }
+thead th .sort-arrow { font-size: 10px; color: var(--muted); flex-shrink: 0; }
+thead th.sorted .sort-arrow { color: var(--accent); }
+thead th .col-resize {
+  position: absolute; right: 0; top: 0; bottom: 0; width: 5px;
+  cursor: col-resize; background: transparent; z-index: 1;
+}
+thead th .col-resize:hover, thead th .col-resize.dragging { background: var(--accent); }
+tbody tr { border-bottom: 1px solid var(--border); cursor: pointer; }
+tbody tr:hover { background: #f0f4ff; }
+tbody tr.selected { background: #dbeafe; }
+tbody td { padding: 5px 8px; vertical-align: top; overflow: hidden;
+           text-overflow: ellipsis; white-space: nowrap; }
+.sev { font-size: 11px; font-weight: 700; padding: 1px 5px;
+       border-radius: 3px; white-space: nowrap; }
+.sev.ERROR { background: #fee2e2; color: var(--err); }
+.sev.WARN  { background: #fff3cd; color: var(--warn); }
+.sev.INFO  { background: #e9ecef; color: var(--info); }
+.verdict-badge { font-size: 11px; font-weight: 700; padding: 1px 5px;
+                 border-radius: 3px; white-space: nowrap; }
+.verdict-badge.TP { background: #d1fae5; color: var(--tp); }
+.verdict-badge.FP { background: #fee2e2; color: var(--fp); }
+.verdict-badge.NA { background: #e9ecef; color: var(--na); }
+.verdict-badge.blank { background: #f3e8ff; color: #7c3aed; }
+.by-badge { font-size: 10px; font-weight: 700; padding: 1px 4px;
+            border-radius: 3px; white-space: nowrap; }
+.by-badge.claude { background: #dbeafe; color: #1d4ed8; }
+.by-badge.human  { background: #fef9c3; color: #854d0e; }
+.by-badge.both   { background: #d1fae5; color: #065f46; }
+.cat { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.key-cell { font-family: var(--mono); font-size: 12px; }
+
+/* detail pane */
+.detail-pane h2 { font-size: 15px; margin-bottom: 12px; color: var(--text); }
+.detail-pane h3 { font-size: 12px; text-transform: uppercase; letter-spacing: .05em;
+                  color: var(--muted); margin: 14px 0 6px; }
+.field-grid { display: grid; grid-template-columns: 120px 1fr; gap: 3px 8px;
+              font-size: 13px; align-items: start; }
+.field-grid .label { color: var(--muted); font-size: 12px; padding-top: 1px; }
+.field-grid .val { word-break: break-all; }
+.field-grid .val.mono { font-family: var(--mono); font-size: 12px; }
+.links a { display: inline-block; margin-right: 8px; font-size: 12px; color: var(--accent); }
+.message-box { background: var(--bg); border: 1px solid var(--border);
+               border-radius: var(--radius); padding: 8px; font-size: 13px;
+               margin-bottom: 8px; white-space: pre-wrap; word-break: break-word; }
+.suggested-box { background: #fff3cd; border: 1px solid #ffc107;
+                 border-radius: var(--radius); padding: 8px; font-size: 13px;
+                 font-family: var(--mono); white-space: pre-wrap; margin-bottom: 8px; }
+
+/* adjudication form */
+.form-row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; flex-wrap: wrap; }
+.form-row label { font-size: 12px; color: var(--muted); min-width: 120px; }
+.form-row select, .form-row input[type=text], .form-row input[type=date] {
+  font-size: 13px; padding: 4px 8px; border: 1px solid var(--border);
+  border-radius: var(--radius); background: var(--bg); flex: 1; min-width: 0; }
+textarea.note-field { width: 100%; font-size: 13px; padding: 6px 8px;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg); resize: vertical; min-height: 60px; font-family: inherit; }
+.form-actions { display: flex; gap: 8px; margin-top: 10px; }
+.form-actions button { padding: 6px 14px; border-radius: var(--radius); font-size: 13px;
+  border: 1px solid var(--border); cursor: pointer; }
+.form-actions button.save { background: var(--tp); color: #fff; border-color: var(--tp); }
+.form-actions button.skip { background: var(--surface); }
+.nav-btns { display: flex; gap: 6px; margin-top: 12px; }
+.nav-btns button { flex: 1; padding: 5px; font-size: 12px; border-radius: var(--radius);
+  border: 1px solid var(--border); cursor: pointer; background: var(--surface); }
+
+/* load screen */
+.dropzone { border: 2px dashed var(--border); border-radius: var(--radius);
+            padding: 40px; text-align: center; color: var(--muted); font-size: 14px;
+            margin: 40px auto; max-width: 500px; }
+.dropzone.drag-over { border-color: var(--accent); background: #eff6ff; }
+.dropzone input { display: none; }
+.dropzone label { cursor: pointer; color: var(--accent); text-decoration: underline; }
+.dropzone p { margin: 8px 0; }
+.empty { text-align: center; color: var(--muted); padding: 40px; font-size: 14px; }
+.progress-bar { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; }
+.progress-bar .fill { height: 100%; background: var(--tp); border-radius: 2px; transition: width .3s; }
+.bib-entry { background: #f8f9fa; border: 1px solid var(--border); border-radius: var(--radius);
+             padding: 8px 10px; font-family: var(--mono); font-size: 12px;
+             white-space: pre-wrap; word-break: break-all;
+             max-height: 220px; overflow-y: auto; margin-bottom: 8px;
+             line-height: 1.5; }
+.bib-entry .hl { background: #fef08a; display: block; margin: 0 -10px; padding: 0 10px; }
+
+/* save panel */
+.save-panel { background: #fffbeb; border: 1px solid #fbbf24; border-radius: var(--radius);
+              padding: 10px 14px; margin: 8px 16px; font-size: 13px;
+              display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.save-panel strong { color: #92400e; }
+.save-panel button { font-size: 12px; padding: 4px 10px; border-radius: var(--radius);
+  border: 1px solid var(--border); cursor: pointer; background: var(--surface); }
+.save-panel button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>VeraCite — evaluation review</h1>
+  <span class="sub" id="file-label">no file loaded</span>
+</header>
+
+<div id="app-load">
+  <div class="dropzone" id="dropzone">
+    <p style="font-size:16px;font-weight:600;margin-bottom:16px">Load VeraCite NDJSON report(s)</p>
+    <p><input type="file" id="file-pick" accept=".json" multiple>
+    <label for="file-pick">Choose .report.json file(s)</label> or drag and drop</p>
+    <p style="margin-top:12px;font-size:12px">Everything stays local — nothing is uploaded.</p>
+  </div>
+</div>
+
+<div id="app-main" style="display:none">
+  <div id="save-panel-container"></div>
+  <div class="toolbar">
+    <label>Paper</label>
+    <select id="f-paper"><option value="">All</option></select>
+    <label>Severity</label>
+    <select id="f-severity">
+      <option value="">All</option>
+      <option value="ERROR">ERROR</option>
+      <option value="WARN">WARN</option>
+      <option value="INFO">INFO (notes)</option>
+    </select>
+    <label>Category</label>
+    <select id="f-category"><option value="">All</option></select>
+    <label>Verdict</label>
+    <select id="f-verdict">
+      <option value="">All</option>
+      <option value="__todo__">Todo (no verdict)</option>
+      <option value="TP">TP</option>
+      <option value="FP">FP</option>
+      <option value="NA">NA</option>
+    </select>
+    <label>Session</label>
+    <input id="f-session" type="text" placeholder="e.g. 2026-06-28-1" style="width:130px">
+    <div class="spacer"></div>
+    <button onclick="addMoreFiles()" style="font-size:12px">+ Add files</button>
+    <input type="file" id="file-pick-more" accept=".json" multiple style="display:none">
+    <button onclick="exportAll()" class="primary">⬇ Save NDJSON</button>
+  </div>
+  <div class="stats" id="stats-bar"></div>
+  <div class="layout">
+    <div class="list-pane">
+      <table id="findings-table">
+        <colgroup id="findings-colgroup"></colgroup>
+        <thead id="findings-thead"><tr></tr></thead>
+        <tbody id="findings-body"></tbody>
+      </table>
+      <div id="findings-empty" class="empty" style="display:none">No findings match the filter.</div>
+    </div>
+    <div class="detail-pane" id="detail-pane">
+      <div class="empty">Select a finding to review.</div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// ── State ──────────────────────────────────────────────────────────────────────
+// ALL_ROWS: flat list of finding rows derived from all loaded NDJSON records.
+// Adjudication lives on issue._eval and is written back there on save/export.
+// NDJSON_FILES: Map<filename, records[]> — mutable parsed records.
+let ALL_ROWS   = [];
+let FILTERED   = [];
+let SELECTED_IDX = -1;
+let PENDING    = {};    // rowId -> {field: value} unsaved changes
+let DIRTY_FILES = new Set();  // filenames with unsaved adjudication
+
+const NDJSON_FILES = new Map();
+
+// ── Row identity ───────────────────────────────────────────────────────────────
+function rowId(row) {
+  return [row._file, row.entry_key, row.finding_index].join('|');
+}
+
+// ── NDJSON parsing ─────────────────────────────────────────────────────────────
+function parseNdjson(text) {
+  return text.split('\n')
+    .map(l => l.trim()).filter(Boolean)
+    .map(l => JSON.parse(l));
+}
+
+// Flatten one NDJSON file's records into row objects.
+function flattenFile(filename, records) {
+  const rows = [];
+  for (const rec of records) {
+    const key = rec.key;
+    if (!key || key.startsWith('<')) continue;
+    const ids = rec.identifiers || {};
+    const base = {
+      _file:          filename,
+      _rec:           rec,          // live reference into NDJSON_FILES
+      paper_id:       filename.replace(/\.report\.json$/i, ''),
+      entry_key:      key,
+      entry_type:     rec.entry_type || '',
+      entry_line:     rec.line || 0,
+      entry_status:   rec.status || '',
+      entry_confidence: rec.confidence != null ? String(rec.confidence) : '',
+      entry_doi:      ids.doi || '',
+      entry_arxiv:    ids.arxiv || '',
+      verify_url:     rec.verify || '',
+      bib_source:     rec.bib_source || '',
+    };
+    for (let idx = 0; idx < (rec.issues || []).length; idx++) {
+      const issue = rec.issues[idx];
+      const sug = issue.suggested || {};
+      const eval_ = issue._eval || {};
+      const row = {
+        ...base,
+        _issue:           issue,  // live reference into the record
+        finding_index:    idx,
+        finding_category: issue.category || '',
+        finding_severity: issue.severity || '',
+        finding_group:    issue.group || '',
+        finding_layer:    issue.layer || '',
+        finding_line:     String(issue.line || ''),
+        finding_message:  issue.message || '',
+        suggested_field:  sug.field || '',
+        suggested_from:   String(sug.from || ''),
+        suggested_to:     String(sug.to || ''),
+        // adjudication (read from _eval on the issue)
+        verdict:          eval_.verdict || '',
+        diagnosis_correct: eval_.diagnosis_correct || '',
+        suggestion_verdict: eval_.suggestion_verdict || '',
+        correct_value:    eval_.correct_value || '',
+        adjudicator_note: eval_.adjudicator_note || '',
+        claude_verified:  eval_.claude_verified || '',
+        human_verified:   eval_.human_verified || '',
+        session_id:       eval_.session_id || '',
+        source_checked:   eval_.source_checked || '',
+      };
+      rows.push(row);
+    }
+  }
+  return rows;
+}
+
+// ── Column definitions ─────────────────────────────────────────────────────────
+const COLS = [
+  { label: '#',        key: '__idx__',           w: 38  },
+  { label: 'Paper',    key: 'paper_id',          w: 130 },
+  { label: 'Key',      key: 'entry_key',         w: 110 },
+  { label: 'Sev',      key: 'finding_severity',  w: 52  },
+  { label: 'Category', key: 'finding_category',  w: 140 },
+  { label: 'Message',  key: 'finding_message',   w: 999 },
+  { label: 'Verdict',  key: '__verdict__',       w: 62  },
+  { label: 'By',       key: '__by__',            w: 52  },
+];
+
+let SORT_COL = null;
+let SORT_ASC = true;
+let COL_WIDTHS = COLS.map(c => c.w);
+
+// ── Table header ───────────────────────────────────────────────────────────────
+function buildTableHeader() {
+  const cg = document.getElementById('findings-colgroup');
+  cg.innerHTML = COLS.map((_, i) => {
+    const w = COL_WIDTHS[i];
+    return `<col style="${w === 999 ? '' : `width:${w}px`}">`;
+  }).join('');
+
+  const tr = document.querySelector('#findings-thead tr');
+  tr.innerHTML = COLS.map((col, i) => {
+    const sorted = SORT_COL === col.key;
+    const arrow = sorted ? (SORT_ASC ? '▲' : '▼') : '⇅';
+    const sortable = col.key !== '__idx__';
+    return `<th${sorted ? ' class="sorted"' : ''} style="position:relative">` +
+      (sortable
+        ? `<span class="th-inner" onclick="sortBy(${i})">` +
+          `${e(col.label)}<span class="sort-arrow">${arrow}</span></span>`
+        : `<span class="th-inner">${e(col.label)}</span>`) +
+      `<span class="col-resize" data-col="${i}" onmousedown="startResize(event,${i})"></span></th>`;
+  }).join('');
+}
+
+function sortBy(colIdx) {
+  const key = COLS[colIdx].key;
+  if (key === '__idx__') return;
+  SORT_COL === key ? (SORT_ASC = !SORT_ASC) : (SORT_COL = key, SORT_ASC = true);
+  applySort();
+  buildTableHeader();
+  renderTable();
+}
+
+function applySort() {
+  if (!SORT_COL) return;
+  const key = SORT_COL;
+  FILTERED.sort((a, b) => {
+    let av = key === '__verdict__' ? effectiveVerdict(a) : (a[key] ?? '');
+    let bv = key === '__verdict__' ? effectiveVerdict(b) : (b[key] ?? '');
+    const an = parseFloat(av), bn = parseFloat(bv);
+    const cmp = (!isNaN(an) && !isNaN(bn)) ? an - bn : String(av).localeCompare(String(bv));
+    return SORT_ASC ? cmp : -cmp;
+  });
+}
+
+// ── Column resize ──────────────────────────────────────────────────────────────
+let _resizeCol = -1, _resizeStartX = 0, _resizeStartW = 0;
+
+function startResize(ev, colIdx) {
+  ev.stopPropagation(); ev.preventDefault();
+  _resizeCol = colIdx; _resizeStartX = ev.clientX;
+  const cols = document.querySelectorAll('#findings-colgroup col');
+  _resizeStartW = cols[colIdx] ? cols[colIdx].getBoundingClientRect().width : COL_WIDTHS[colIdx];
+  document.querySelector(`[data-col="${colIdx}"]`).classList.add('dragging');
+  document.addEventListener('mousemove', onResizeMove);
+  document.addEventListener('mouseup',   onResizeUp);
+  document.body.style.userSelect = 'none';
+  document.body.style.cursor = 'col-resize';
+}
+function onResizeMove(ev) {
+  if (_resizeCol < 0) return;
+  const newW = Math.max(30, _resizeStartW + ev.clientX - _resizeStartX);
+  COL_WIDTHS[_resizeCol] = newW;
+  const cols = document.querySelectorAll('#findings-colgroup col');
+  if (cols[_resizeCol]) cols[_resizeCol].style.width = newW + 'px';
+}
+function onResizeUp() {
+  if (_resizeCol >= 0) document.querySelector(`[data-col="${_resizeCol}"]`)?.classList.remove('dragging');
+  _resizeCol = -1;
+  document.removeEventListener('mousemove', onResizeMove);
+  document.removeEventListener('mouseup',   onResizeUp);
+  document.body.style.userSelect = '';
+  document.body.style.cursor = '';
+}
+
+// ── File loading ───────────────────────────────────────────────────────────────
+const dropzone = document.getElementById('dropzone');
+dropzone.addEventListener('dragover', ev => { ev.preventDefault(); dropzone.classList.add('drag-over'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag-over'));
+dropzone.addEventListener('drop', ev => {
+  ev.preventDefault(); dropzone.classList.remove('drag-over');
+  handleFiles(ev.dataTransfer.files);
+});
+
+document.getElementById('file-pick').addEventListener('change', ev => handleFiles(ev.target.files));
+
+document.body.addEventListener('dragover', ev => {
+  if (document.getElementById('app-main').style.display !== 'none') ev.preventDefault();
+});
+document.body.addEventListener('drop', ev => {
+  if (document.getElementById('app-main').style.display !== 'none') {
+    ev.preventDefault(); handleFiles(ev.dataTransfer.files);
+  }
+});
+
+document.getElementById('file-pick-more').addEventListener('change', ev => handleFiles(ev.target.files));
+function addMoreFiles() { document.getElementById('file-pick-more').click(); }
+
+async function handleFiles(fileList) {
+  const files = Array.from(fileList).filter(f => f.name.endsWith('.json'));
+  await Promise.all(files.map(f => readText(f).then(text => {
+    let records;
+    try { records = parseNdjson(text); }
+    catch (err) { alert(`Failed to parse ${f.name}: ${err.message}`); return; }
+    NDJSON_FILES.set(f.name, records);
+  })));
+
+  rebuildRows();
+
+  if (document.getElementById('app-main').style.display === 'none') {
+    document.getElementById('app-load').style.display = 'none';
+    document.getElementById('app-main').style.display = 'block';
+    buildTableHeader();
+  }
+  updateFileLabel();
+  buildFilters();
+  applyFilters();
+}
+
+function readText(file) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = ev => resolve(ev.target.result);
+    r.onerror = reject;
+    r.readAsText(file);
+  });
+}
+
+function rebuildRows() {
+  ALL_ROWS = [];
+  for (const [filename, records] of NDJSON_FILES) {
+    ALL_ROWS.push(...flattenFile(filename, records));
+  }
+}
+
+function updateFileLabel() {
+  const fileCount = NDJSON_FILES.size;
+  const total = ALL_ROWS.length;
+  document.getElementById('file-label').textContent =
+    `${fileCount} file${fileCount !== 1 ? 's' : ''} · ${total} findings`;
+}
+
+// ── Filters ───────────────────────────────────────────────────────────────────
+function unique(arr) { return [...new Set(arr)].sort(); }
+
+function buildFilters() {
+  const fill = (id, vals) => {
+    const sel = document.getElementById(id);
+    const cur = sel.value;
+    while (sel.options.length > 1) sel.remove(1);
+    vals.forEach(v => { const o = new Option(v, v); sel.add(o); });
+    if (vals.includes(cur)) sel.value = cur;
+  };
+  fill('f-paper',    unique(ALL_ROWS.map(r => r.paper_id)));
+  fill('f-category', unique(ALL_ROWS.map(r => r.finding_category)));
+}
+
+['f-paper','f-severity','f-category','f-verdict'].forEach(id =>
+  document.getElementById(id).addEventListener('change', applyFilters));
+document.getElementById('f-session').addEventListener('input', applyFilters);
+
+function applyFilters() {
+  const pap  = document.getElementById('f-paper').value;
+  const sev  = document.getElementById('f-severity').value;
+  const cat  = document.getElementById('f-category').value;
+  const verd = document.getElementById('f-verdict').value;
+  const sess = document.getElementById('f-session').value.trim();
+
+  FILTERED = ALL_ROWS.filter(r => {
+    if (pap  && r.paper_id !== pap) return false;
+    if (sev  && r.finding_severity !== sev) return false;
+    if (cat  && r.finding_category !== cat) return false;
+    if (sess && r.session_id !== sess) return false;
+    const v = effectiveVerdict(r);
+    if (verd === '__todo__' && v) return false;
+    if (verd && verd !== '__todo__' && v !== verd) return false;
+    return true;
+  });
+
+  applySort();
+  renderTable();
+  updateStats();
+  if (SELECTED_IDX >= FILTERED.length) SELECTED_IDX = -1;
+  if (SELECTED_IDX >= 0) renderDetail(FILTERED[SELECTED_IDX]);
+  else document.getElementById('detail-pane').innerHTML = '<div class="empty">Select a finding to review.</div>';
+}
+
+function effectiveVerdict(row) {
+  const id = rowId(row);
+  return (PENDING[id] && PENDING[id].verdict !== undefined) ? PENDING[id].verdict : row.verdict;
+}
+
+// ── Table render ──────────────────────────────────────────────────────────────
+function renderCell(col, row, i) {
+  switch (col.key) {
+    case '__idx__':      return PENDING[rowId(row)] ? `<b>${i+1}</b>` : String(i+1);
+    case 'paper_id':     return e(row.paper_id.replace(/^arXiv-/i, ''));
+    case 'entry_key':    return `<span class="key-cell">${e(row.entry_key)}</span>`;
+    case 'finding_severity': {
+      const s = row.finding_severity;
+      return `<span class="sev ${e(s)}">${e(s === 'INFO' ? 'note' : s)}</span>`;
+    }
+    case 'finding_category': return `<span class="cat">${e(row.finding_category)}</span>`;
+    case 'finding_message':  return e(row.finding_message);
+    case '__verdict__': {
+      const v = effectiveVerdict(row);
+      return v ? `<span class="verdict-badge ${v}">${v}</span>`
+               : `<span class="verdict-badge blank">—</span>`;
+    }
+    case '__by__': {
+      const cv = row.claude_verified, hv = row.human_verified;
+      if (cv && hv) return `<span class="by-badge both" title="Claude ${cv} · Human ${hv}">both</span>`;
+      if (hv)       return `<span class="by-badge human" title="Human ${hv}">human</span>`;
+      if (cv)       return `<span class="by-badge claude" title="Claude ${cv}">claude</span>`;
+      return '';
+    }
+    default: return e(row[col.key] ?? '');
+  }
+}
+
+function renderTable() {
+  const tbody = document.getElementById('findings-body');
+  const empty = document.getElementById('findings-empty');
+  if (!FILTERED.length) {
+    tbody.innerHTML = '';
+    empty.style.display = '';
+    return;
+  }
+  empty.style.display = 'none';
+  tbody.innerHTML = FILTERED.map((row, i) => {
+    const sel = i === SELECTED_IDX ? ' class="selected"' : '';
+    const cells = COLS.map(col => `<td>${renderCell(col, row, i)}</td>`).join('');
+    return `<tr${sel} onclick="selectRow(${i})">${cells}</tr>`;
+  }).join('');
+}
+
+function selectRow(i) {
+  SELECTED_IDX = i;
+  document.querySelectorAll('#findings-body tr').forEach((tr, j) =>
+    tr.classList.toggle('selected', j === i));
+  renderDetail(FILTERED[i]);
+  const rows = document.querySelectorAll('#findings-body tr');
+  if (rows[i]) rows[i].scrollIntoView({ block: 'nearest' });
+}
+
+// ── Stats bar ─────────────────────────────────────────────────────────────────
+function updateStats() {
+  const total = FILTERED.length;
+  const done  = FILTERED.filter(r => effectiveVerdict(r)).length;
+  const tp    = FILTERED.filter(r => effectiveVerdict(r) === 'TP').length;
+  const fp    = FILTERED.filter(r => effectiveVerdict(r) === 'FP').length;
+  const na    = FILTERED.filter(r => effectiveVerdict(r) === 'NA').length;
+  const prec  = (tp + fp) ? Math.round(100 * tp / (tp + fp)) : null;
+  const pct   = total ? Math.round(100 * done / total) : 0;
+  const unsaved = Object.keys(PENDING).length;
+  document.getElementById('stats-bar').innerHTML =
+    `<span>Showing <b>${total}</b> findings</span>` +
+    `<span>Adjudicated <b>${done}</b> / ${total} (${pct}%)</span>` +
+    `<span>TP <b>${tp}</b> · FP <b>${fp}</b> · NA <b>${na}</b></span>` +
+    (prec !== null ? `<span>Precision <b>${prec}%</b></span>` : '') +
+    `<span>Unsaved <b>${unsaved}</b></span>`;
+  renderSavePanel();
+}
+
+// ── Save panel ────────────────────────────────────────────────────────────────
+function renderSavePanel() {
+  const container = document.getElementById('save-panel-container');
+  const n = DIRTY_FILES.size + Object.keys(PENDING).length;
+  if (!n) { container.innerHTML = ''; return; }
+  const msg = Object.keys(PENDING).length
+    ? `<strong>${Object.keys(PENDING).length} unsaved change(s)</strong> — commit with Save &amp; Next, or export all now`
+    : `<strong>${DIRTY_FILES.size} file(s) modified</strong> — download updated NDJSON`;
+  container.innerHTML = `<div class="save-panel">${msg}
+    <button class="primary" onclick="exportAll()">⬇ Save NDJSON</button>
+    </div>`;
+}
+
+// ── Detail pane ───────────────────────────────────────────────────────────────
+function bibEntryHtml(row) {
+  if (!row.bib_source) return '';
+  const lines = row.bib_source.split('\n');
+  // finding_line is absolute; entry_line is the entry's start line in the bib.
+  // The highlighted line is at that offset within bib_source.
+  const findingLine = parseInt(row.finding_line) || 0;
+  const entryLine   = row.entry_line || 0;
+  const hlOffset    = (findingLine && entryLine) ? findingLine - entryLine : -1;
+  const html = lines.map((ln, i) => {
+    const escaped = e(ln);
+    return i === hlOffset ? `<span class="hl">${escaped}</span>` : escaped;
+  }).join('\n');
+  return `<pre class="bib-entry">${html}</pre>`;
+}
+
+function renderDetail(row) {
+  const id = rowId(row);
+  const p = PENDING[id] || {};
+  const v   = p.verdict            ?? row.verdict            ?? '';
+  const dc  = p.diagnosis_correct  ?? row.diagnosis_correct  ?? '';
+  const sv  = p.suggestion_verdict ?? row.suggestion_verdict ?? '';
+  const cv  = p.correct_value      ?? row.correct_value      ?? '';
+  const note = p.adjudicator_note  ?? row.adjudicator_note   ?? '';
+  const sess = p.session_id        ?? row.session_id         ?? '';
+  const src  = p.source_checked    ?? row.source_checked     ?? '';
+
+  const links = [];
+  if (row.verify_url)  links.push(`<a href="${row.verify_url}" target="_blank">DOI/arXiv record ↗</a>`);
+  if (row.entry_doi)   links.push(`<a href="https://doi.org/${row.entry_doi}" target="_blank">Crossref ↗</a>`);
+  if (row.entry_arxiv) links.push(`<a href="https://arxiv.org/abs/${row.entry_arxiv}" target="_blank">arXiv ↗</a>`);
+  if (row.entry_doi)   links.push(`<a href="https://api.crossref.org/works?query.title=${encodeURIComponent(row.finding_message.slice(0,60))}&rows=3" target="_blank">Crossref search ↗</a>`);
+
+  let sugHtml = '';
+  if (row.suggested_to) {
+    const from = row.suggested_from ? `<b>from:</b> ${e(row.suggested_from)}\n` : '';
+    sugHtml = `<h3>Suggested fix</h3><div class="suggested-box">${from}<b>field:</b> ${e(row.suggested_field)}\n<b>to:</b> ${e(row.suggested_to)}</div>`;
+  }
+
+  const opt = (val, cur, label) =>
+    `<option value="${val}" ${cur===val?'selected':''}>${label||val}</option>`;
+
+  document.getElementById('detail-pane').innerHTML = `
+    <h2>${e(row.entry_key)} <span style="font-weight:400;font-size:13px;color:var(--muted)">#${row.finding_index}</span></h2>
+
+    <h3>Finding</h3>
+    <div class="field-grid">
+      <span class="label">Category</span><span class="val mono">${e(row.finding_category)}</span>
+      <span class="label">Severity</span><span class="val"><span class="sev ${e(row.finding_severity)}">${e(row.finding_severity)}</span></span>
+      <span class="label">Group</span><span class="val">${e(row.finding_group)}</span>
+      <span class="label">Layer</span><span class="val">${e(row.finding_layer)}</span>
+      <span class="label">Bib line</span><span class="val">${e(row.finding_line)}</span>
+    </div>
+    <div class="message-box">${e(row.finding_message)}</div>
+    ${sugHtml}
+
+    <h3>Entry</h3>
+    <div class="field-grid">
+      <span class="label">Type</span><span class="val">${e(row.entry_type)}</span>
+      <span class="label">Status</span><span class="val">${e(row.entry_status)}${row.entry_confidence ? ` <span style="color:var(--muted)">(${e(row.entry_confidence)})</span>` : ''}</span>
+      <span class="label">DOI</span><span class="val mono">${e(row.entry_doi)}</span>
+      <span class="label">arXiv</span><span class="val mono">${e(row.entry_arxiv)}</span>
+      <span class="label">Paper</span><span class="val">${e(row.paper_id)}</span>
+    </div>
+    ${bibEntryHtml(row)}
+
+    <h3>Links</h3>
+    <div class="links">${links.join(' ') || '<span style="color:var(--muted)">—</span>'}</div>
+
+    <h3>Adjudication</h3>
+
+    <div class="form-row">
+      <label>Verdict *</label>
+      <select id="inp-verdict" onchange="pend('verdict',this.value); refreshVerdictDeps()">
+        <option value="">— choose —</option>
+        ${opt('TP',v,'TP — real problem')}
+        ${opt('FP',v,'FP — false positive')}
+        ${opt('NA',v,'NA — not checkable')}
+      </select>
+    </div>
+
+    <div id="dep-diagnosis" style="${v==='TP'?'':'display:none'}">
+    <div class="form-row">
+      <label>Diagnosis correct</label>
+      <select id="inp-diagnosis" onchange="pend('diagnosis_correct',this.value)">
+        <option value="">— choose —</option>
+        ${opt('yes',dc)}${opt('partial',dc)}${opt('no',dc)}
+      </select>
+    </div>
+    </div>
+
+    <div id="dep-suggestion" style="${row.suggested_to?'':'display:none'}">
+    <div class="form-row">
+      <label>Suggestion verdict</label>
+      <select id="inp-suggestion" onchange="pend('suggestion_verdict',this.value); refreshSuggDeps()">
+        <option value="">— choose —</option>
+        ${opt('correct',sv)}${opt('incorrect',sv)}${opt('unverifiable',sv)}${opt('none',sv,'none (no suggestion)')}
+      </select>
+    </div>
+    <div id="dep-correct-val" style="${sv==='incorrect'?'':'display:none'}">
+    <div class="form-row">
+      <label>Correct value</label>
+      <input type="text" id="inp-correctval" value="${e(cv)}" oninput="pend('correct_value',this.value)" placeholder="what the right value is">
+    </div>
+    </div>
+    </div>
+
+    <div class="form-row" style="align-items:flex-start">
+      <label>Note</label>
+      <textarea class="note-field" id="inp-note" oninput="pend('adjudicator_note',this.value)">${e(note)}</textarea>
+    </div>
+    <div class="form-row">
+      <label>Source checked</label>
+      <input type="text" id="inp-source" value="${e(src)}" oninput="pend('source_checked',this.value)" placeholder="URL or 'Crossref', 'arXiv', …">
+    </div>
+    <div class="form-row">
+      <label>Session ID</label>
+      <input type="text" id="inp-session" value="${e(sess)}" oninput="pend('session_id',this.value)" placeholder="e.g. 2026-06-28-1">
+    </div>
+
+    <div class="form-actions">
+      <button class="save" onclick="saveRow()">✓ Save &amp; next</button>
+      <button class="skip" onclick="nextRow()">Skip →</button>
+      <button class="skip" onclick="prevRow()">← Prev</button>
+    </div>
+    <div class="nav-btns">
+      <button onclick="jumpToNextTodo()">Next unreviewed →</button>
+    </div>
+  `;
+}
+
+function refreshVerdictDeps() {
+  const v = document.getElementById('inp-verdict').value;
+  document.getElementById('dep-diagnosis').style.display = v === 'TP' ? '' : 'none';
+}
+function refreshSuggDeps() {
+  const sv = document.getElementById('inp-suggestion').value;
+  document.getElementById('dep-correct-val').style.display = sv === 'incorrect' ? '' : 'none';
+}
+
+// ── Pending / save ─────────────────────────────────────────────────────────────
+function pend(field, value) {
+  if (SELECTED_IDX < 0) return;
+  const row = FILTERED[SELECTED_IDX];
+  const id = rowId(row);
+  if (!PENDING[id]) PENDING[id] = {};
+  PENDING[id][field] = value;
+  updateStats();
+}
+
+// Commit pending changes for the current row into the live issue object and row.
+function saveRow() {
+  if (SELECTED_IDX < 0) return;
+  const row = FILTERED[SELECTED_IDX];
+  const id = rowId(row);
+  const v = (PENDING[id] || {}).verdict || row.verdict;
+  if (!v) { alert("Pick a verdict (TP / FP / NA) before saving."); return; }
+
+  const changes = PENDING[id] || {};
+  if (!changes.claude_verified) changes.claude_verified = new Date().toISOString().slice(0,10);
+
+  // Write back to the row (flat fields)
+  Object.assign(row, changes);
+
+  // Write back to the live issue._eval (this mutates NDJSON_FILES data)
+  if (!row._issue._eval) row._issue._eval = {};
+  const EVAL_FIELDS = ['verdict','diagnosis_correct','suggestion_verdict','correct_value',
+                       'adjudicator_note','claude_verified','human_verified','session_id','source_checked'];
+  for (const f of EVAL_FIELDS) {
+    if (row[f] !== undefined && row[f] !== '') row._issue._eval[f] = row[f];
+  }
+
+  DIRTY_FILES.add(row._file);
+  delete PENDING[id];
+
+  updateStats();
+  applySort();
+  renderTable();
+  const rows = document.querySelectorAll('#findings-body tr');
+  if (rows[SELECTED_IDX]) rows[SELECTED_IDX].classList.add('selected');
+  nextRow();
+}
+
+function nextRow() { if (SELECTED_IDX < FILTERED.length - 1) selectRow(SELECTED_IDX + 1); }
+function prevRow() { if (SELECTED_IDX > 0) selectRow(SELECTED_IDX - 1); }
+function jumpToNextTodo() {
+  const start = SELECTED_IDX + 1;
+  for (let i = start; i < FILTERED.length; i++) {
+    if (!effectiveVerdict(FILTERED[i])) { selectRow(i); return; }
+  }
+  for (let i = 0; i < start; i++) {
+    if (!effectiveVerdict(FILTERED[i])) { selectRow(i); return; }
+  }
+  alert("All visible findings have been adjudicated!");
+}
+
+// Keyboard navigation
+document.addEventListener('keydown', ev => {
+  if (ev.target.tagName === 'INPUT' || ev.target.tagName === 'TEXTAREA' || ev.target.tagName === 'SELECT') return;
+  if (ev.key === 'ArrowDown' || ev.key === 'j') nextRow();
+  else if (ev.key === 'ArrowUp' || ev.key === 'k') prevRow();
+  else if (ev.key === 'n') jumpToNextTodo();
+});
+
+// ── Export ─────────────────────────────────────────────────────────────────────
+// Flush all pending changes into the live issue objects, then download each
+// modified NDJSON file. Each line is one record serialised as compact JSON,
+// preserving all original fields plus _eval on each issue that was adjudicated.
+function exportAll() {
+  // Flush any remaining PENDING into their issue objects first
+  for (const [id, changes] of Object.entries(PENDING)) {
+    const row = ALL_ROWS.find(r => rowId(r) === id);
+    if (!row) continue;
+    if (!changes.claude_verified) changes.claude_verified = new Date().toISOString().slice(0,10);
+    Object.assign(row, changes);
+    if (!row._issue._eval) row._issue._eval = {};
+    const EVAL_FIELDS = ['verdict','diagnosis_correct','suggestion_verdict','correct_value',
+                         'adjudicator_note','claude_verified','human_verified','session_id','source_checked'];
+    for (const f of EVAL_FIELDS) {
+      if (row[f] !== undefined && row[f] !== '') row._issue._eval[f] = row[f];
+    }
+    DIRTY_FILES.add(row._file);
+  }
+  PENDING = {};
+
+  // Download each modified (or all, for simplicity) NDJSON file
+  for (const [filename, records] of NDJSON_FILES) {
+    const ndjson = records.map(r => JSON.stringify(r)).join('\n') + '\n';
+    const blob = new Blob([ndjson], { type: 'application/x-ndjson' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }
+
+  DIRTY_FILES.clear();
+  updateStats();
+}
+
+function e(s) {
+  return String(s ?? '').replace(/[&<>"']/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+</script>
+</body>
+</html>

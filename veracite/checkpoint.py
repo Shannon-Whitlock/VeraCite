@@ -293,6 +293,9 @@ class Checkpoint:
         self._llm_error = set()
         self._bib_sources = {}
         self._findings_by_key = {}
+        # (key, loser_category) pairs re-derived from saved issues stamped
+        # `suppressed_by`, so a reused phase keeps its findings suppressed on resume.
+        self._replay_superseded = set()
         self._records_raw = {}
         self.loaded = False
 
@@ -318,6 +321,13 @@ class Checkpoint:
                 if f is not None:
                     self.findings.append(f)
                     self._findings_by_key.setdefault(key, []).append(f)
+                    # A saved issue stamped `suppressed_by` was retracted in the run
+                    # that wrote it. Re-record that supersession so a REUSED phase (not
+                    # re-run this time, so it won't re-declare it) keeps the finding
+                    # suppressed -- the stamp on disk drives the re-derivation, so the
+                    # outcome is identical whether the phase ran fresh or was replayed.
+                    if fd.get("suppressed_by"):
+                        self._replay_superseded.add((key, f.category))
             self.phases_by_key[key] = {p for p, on in (rec.get("phases") or {}).items() if on}
             if rec.get("online_error"):
                 self._online_error.add(key)
@@ -358,6 +368,15 @@ class Checkpoint:
         """Saved findings for `key` belonging to a phase in `keep_phases`."""
         return [f for f in self._findings_by_key.get(key, [])
                 if finding_phase(f) in keep_phases]
+
+    def seed_superseded_for(self, key, keep_phases):
+        """(key, loser_category) supersessions re-derived from saved issues whose
+        LOSER finding belongs to a reused phase -- so seeding a reused phase also
+        restores its suppressions, keeping a resumed run identical to a fresh one."""
+        keep_cats = {f.category for f in self._findings_by_key.get(key, [])
+                     if finding_phase(f) in keep_phases}
+        return {(k, c) for (k, c) in self._replay_superseded
+                if k == key and c in keep_cats}
 
 
 def _finding_from_dict(fd, key):

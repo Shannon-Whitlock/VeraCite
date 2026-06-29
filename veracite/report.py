@@ -353,9 +353,13 @@ class Report:
     # Layers whose findings a human verifies against the source of record.
     _ONLINE_LAYERS = {"record", "retract", "related", "preprint"}
 
-    def __init__(self, color=True):
+    def __init__(self, color=True, show_suppressed=False):
         self.findings = []
         self.color = color
+        # When True, the terminal view also shows suppressed findings (dimmed, with
+        # the winner that retracted them). Off by default so the default output is
+        # byte-identical to the pre-persist-all behavior; the JSON always carries them.
+        self.show_suppressed = show_suppressed
         self.links = {}      # citation key -> URL a human can open to verify
         self.status = {}     # citation key -> (status, confidence, detail) for header
         self._emitted = set()  # indices into findings already printed (emit_entry)
@@ -408,6 +412,16 @@ class Report:
         self.findings.append(Finding(resolve_severity(severity, category),
                                      "<file>", 0, message, layer, category))
 
+    def seed_superseded(self, pairs):
+        """Restore (key, category) supersessions re-derived from a saved report
+        (checkpoint resume), so a reused phase's findings stay suppressed without the
+        phase re-running to re-declare them. The pairs MUST still be declared in
+        SUPERSEDES (the same invariant supersede() enforces)."""
+        for key, category in pairs:
+            assert category in SUPERSEDES, \
+                f"seed_superseded({category!r}) not declared in report.SUPERSEDES"
+            self._superseded.add((key, category))
+
     def seed_findings(self, findings):
         """Pre-load findings rebuilt from a saved report (checkpoint resume), so a
         replayed run reproduces the prior phases' findings without recomputing them.
@@ -442,12 +456,25 @@ class Report:
         losing_layer = SUPERSEDES[f.category][0]
         return f.layer == losing_layer
 
+    def _superseded_by(self, f):
+        """The category (the table's `who supersedes it` label) that retracted `f`,
+        or None when `f` is live. Recorded ON the loser so the persisted record is
+        self-describing about its own suppression: a reader sees the issue WAS
+        detected and WHY it is not surfaced. Derived at read time from the same
+        _superseded set + SUPERSEDES table that drives _is_superseded, so the stamp
+        and the filtering can never disagree."""
+        if not self._is_superseded(f):
+            return None
+        return SUPERSEDES[f.category][1]   # the human 'who supersedes it' label
+
     def live_findings(self):
         """Findings with the superseded ones removed. Computed at read/emit time so
         a supersede() recorded after a finding was added still takes effect,
-        regardless of rule order. Every consumer that counts, scores, or renders
-        findings should read THIS, not `self.findings`, so a retracted false
-        positive does not leak into a count or the integrity score."""
+        regardless of rule order. Every consumer that COUNTS or SCORES findings
+        should read THIS, not `self.findings`, so a retracted false positive does
+        not leak into a count or the integrity score. (The JSON record persists ALL
+        issues, live and suppressed -- see issues_for(include_suppressed=True) -- but
+        the suppressed ones are stamped and excluded from every aggregate.)"""
         if not self._superseded:
             return self.findings
         return [f for f in self.findings if not self._is_superseded(f)]
@@ -476,10 +503,21 @@ class Report:
             rec = entry_record(key, None, None, None, set(), [],
                                entry_type=entry.etype, line=entry.lineno, uncited=True)
             return self.render_entry_record(rec, out=out, progress=progress)
-        idx = [i for i, f in enumerate(self.findings)
-               if i not in self._emitted and f.key == key
-               and not self._is_superseded(f)
-               and not (skip_notes and f.severity is Severity.INFO)]
+        # `visible` decides whether the block has anything to SHOW (drives the
+        # return-False-when-silent rule): not-yet-emitted, not suppressed, not a
+        # note hidden by skip_notes. Suppressed findings never make a block appear.
+        visible = [i for i, f in enumerate(self.findings)
+                   if i not in self._emitted and f.key == key
+                   and not self._is_superseded(f)
+                   and not (skip_notes and f.severity is Severity.INFO)]
+        # `shown` is what is PERSISTED into the record's issues: every not-yet-emitted
+        # finding for the key INCLUDING suppressed ones (stamped) -- so the NDJSON is
+        # self-describing -- but excluding notes hidden by skip_notes (a presentation
+        # choice, not a suppression). render_entry_record filters the suppressed ones
+        # out of the terminal view, keeping the default output byte-identical.
+        shown = [i for i, f in enumerate(self.findings)
+                 if i not in self._emitted and f.key == key
+                 and not (skip_notes and f.severity is Severity.INFO)]
         # Mark every finding for this key emitted (even notes hidden by skip_notes)
         # so it is not re-printed later; counts in the summary still include them.
         for i, f in enumerate(self.findings):
@@ -489,37 +527,49 @@ class Report:
         # An analyzed entry always has a status, so it always prints at least its
         # one-line header -- a clean reference shows a single 'VERIFIED (...)' line
         # rather than vanishing, which also keeps the [i/N] counter contiguous.
-        # Only an entry with neither a status nor any finding (e.g. one never
+        # Only an entry with neither a status nor any VISIBLE finding (e.g. one never
         # resolved online and otherwise clean) has nothing to say.
-        if not idx and st is None:
+        if not visible and st is None:
             return False
         status, conf = (st[0], st[1]) if st else (None, None)
         issues = [self._finding_dict(self.findings[i])
-                  for i in sorted(idx, key=lambda i: self.findings[i].severity)]
+                  for i in sorted(shown, key=lambda i: self.findings[i].severity)]
         rec = entry_record(key, None, status, conf, set(), issues,
                            verify=self.links.get(key),
                            entry_type=entry.etype, line=entry.lineno,
                            status_detail=self.status_detail(key))
         return self.render_entry_record(rec, out=out, progress=progress)
 
-    def render_entry_record(self, rec, out=None, progress=""):
+    def render_entry_record(self, rec, out=None, progress="", show_suppressed=None):
         """Pretty-print one entry's canonical record (the dict `entry_record` builds /
         an --json NDJSON line) as its terminal block: the identifying header, then its
         `issues` as indented finding lines in severity order, then a blank line. This
         is the single rendering path -- the live run and a saved report render through
         here, so the terminal output is reconstructible from the NDJSON alone. Returns
-        True if a block was printed (uncited or status/findings present)."""
+        True if a block was printed (uncited or status/findings present).
+
+        The record's `issues` may carry SUPPRESSED issues (stamped `suppressed_by`);
+        they are hidden by default so the terminal stays byte-identical to the
+        pre-persist-all behavior. `show_suppressed` reveals them, dimmed, with the
+        winner that retracted them -- a debugging/audit view, never the default."""
         out = out if out is not None else sys.stdout
+        if show_suppressed is None:
+            show_suppressed = self.show_suppressed
         if rec.get("uncited"):
             # No trailing blank line: a skipped entry is one line, so a run of them
             # reads as a compact list rather than double-spaced.
             print(self._record_header(rec, progress=progress), file=out)
             return True
-        issues = rec.get("issues") or []
-        if not issues and rec.get("status") is None:
+        all_issues = rec.get("issues") or []
+        # The DEFAULT view is the live (non-suppressed) issues only -- the single
+        # display filter point, keyed on the persisted stamp so a saved report and a
+        # live run filter identically.
+        visible = [d for d in all_issues
+                   if show_suppressed or not d.get("suppressed_by")]
+        if not visible and rec.get("status") is None:
             return False
         print(self._record_header(rec, progress=progress), file=out)
-        for issue in sorted(issues, key=lambda d: Severity[d.get("severity", "INFO")]):
+        for issue in sorted(visible, key=lambda d: Severity[d.get("severity", "INFO")]):
             print(self._issue_line(issue), file=out)
         print(file=out)   # blank line separates entry blocks
         return True
@@ -591,6 +641,11 @@ class Report:
         else:
             action_tag = ""
         msg = _oneline(d.get("message", "") + format_suggested(d.get("suggested")))
+        # A suppressed issue (only reachable here under --show-suppressed) is dimmed
+        # and annotated with the winner that retracted it, so the audit view shows
+        # WHAT was detected and WHY it is not surfaced by default.
+        if d.get("suppressed_by"):
+            msg = self._c(f"{msg}  (suppressed by {d['suppressed_by']})", _DIM)
         keytag = (self._c(key, _BOLD) + " ") if with_key and key else ""
         return f"    {self._c(f'[{tag}]', color)}{pad} {keytag}{code}{loc}:{action_tag} {msg}"
 
@@ -798,13 +853,25 @@ class Report:
              "suggested": f.suggested if f.suggested else None}
         if f.source_file:
             d["source_file"] = f.source_file
+        # A retracted finding is PERSISTED (not dropped) but stamped with the winner
+        # that retracted it, so the record is self-describing about its suppression
+        # decisions. The stamp is derived from the live _superseded set, so it cannot
+        # disagree with what live_findings()/the renderer filter on. Live findings
+        # carry no key (kept out of the dict so a clean issue is byte-identical to
+        # before this field existed).
+        sup = self._superseded_by(f)
+        if sup:
+            d["suppressed_by"] = sup
         return d
 
-    def issues_for(self, key):
-        """The live findings for one key as a list of issue dicts (the per-entry
-        record's `issues`). Used by the NDJSON checkpoint, which stores each entry's
-        findings inside the entry's own record rather than in a separate flat list."""
-        return [self._finding_dict(f) for f in self.live_findings() if f.key == key]
+    def issues_for(self, key, include_suppressed=True):
+        """One key's findings as a list of issue dicts (the per-entry record's
+        `issues`). Persists ALL of them -- live and suppressed -- so the NDJSON record
+        is self-describing; suppressed issues carry a `suppressed_by` stamp and are
+        excluded from every count/score/default-render. Pass include_suppressed=False
+        for the rare consumer that wants only the live set."""
+        src = self.findings if include_suppressed else self.live_findings()
+        return [self._finding_dict(f) for f in src if f.key == key]
 
     def to_json(self, summary=None, results=None, statuses=None, phases_by_key=None,
                 entries=None):
