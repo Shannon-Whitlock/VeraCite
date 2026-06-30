@@ -15,7 +15,12 @@ from .normalize import clean_tex, deaccent, strip_math
 
 # Greek letters (TeX macro, Unicode lower/upper) -> their spelled-out names, so a
 # title comparison sees the same token whether the bib wrote '$\alpha$', 'α' or
-# 'alpha'. Applied before math/markup is stripped.
+# 'alpha'. Applied before math/markup is stripped. BOTH TeX macro cases are matched:
+# the lowercase letter macro ('\delta' = δ) and the capitalized macro ('\Delta' = Δ,
+# a DISTINCT TeX macro for the uppercase letter) -- without the capitalized form, a
+# title's '$\Delta$' was stripped as unmatched math, losing the word and producing a
+# false 'title differs' against a record that carried the Unicode 'Δ' (the atz2022
+# '$\Delta$' vs 'Δ' near-FP). Both fold to the same spelled-out token.
 _GREEK = {
     "alpha": "α Α", "beta": "β Β", "gamma": "γ Γ", "delta": "δ Δ",
     "epsilon": "ε Ε", "zeta": "ζ Ζ", "eta": "η Η", "theta": "θ Θ",
@@ -23,7 +28,8 @@ _GREEK = {
     "xi": "ξ Ξ", "pi": "π Π", "rho": "ρ Ρ", "sigma": "σ Σ", "tau": "τ Τ",
     "phi": "φ Φ", "chi": "χ Χ", "psi": "ψ Ψ", "omega": "ω Ω",
 }
-_GREEK_SUB = [(re.compile(rf"\\{name}\b|[{chars.replace(' ', '')}]"), f" {name} ")
+_GREEK_SUB = [(re.compile(rf"\\{name}\b|\\{name.capitalize()}\b|[{chars.replace(' ', '')}]"),
+               f" {name} ")
               for name, chars in _GREEK.items()]
 
 

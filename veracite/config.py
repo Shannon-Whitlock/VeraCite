@@ -102,6 +102,7 @@ DEFAULT_SETTINGS = {
         "journal_style": "note",          # journal differs from canonical only by casing
         "wrong_journal": "warning",       # bib journal is a different journal than the record
         "container_granularity": "note",  # id resolved to the containing volume, not the item
+        "divergent_manifestation": "note",  # id resolved to a preprint/working-paper version, not the cited published one
         "parity_suggestion": "note",      # record has data the bib could adopt
         "isbn_unresolved": "note",        # ISBN valid but not found in OL/Google Books (coverage gap)
     },

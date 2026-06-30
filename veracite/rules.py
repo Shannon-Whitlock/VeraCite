@@ -1056,7 +1056,13 @@ def encoding(e, rep):
 def page_dashes(e, rep):
     pages = e.get("pages", "")
     if ("–" in pages or "—" in pages) and "--" not in pages:
-        fixed = re.sub(r"\s*[–—]\s*", "--", pages)
+        # Collapse the WHOLE run of dash/hyphen characters between the two page
+        # numbers to a single '--'. A malformed mix like '34–-38' (a Unicode en-dash
+        # immediately followed by an ASCII hyphen) must become '34--38', NOT '34---38'
+        # (an em-dash, never a page separator -- the erdos1959/wootters1982
+        # BAD-SUGGEST that left the stray hyphen behind). Matching the contiguous run
+        # (Unicode dashes + ASCII hyphens together) folds any combination to '--'.
+        fixed = re.sub(r"\s*[–—‐‑‒―−-]+\s*", "--", pages)
         rep.add(Severity.WARN, e, "page range uses a literal en/em dash",
                 category="style", field="pages",
                 suggested={"field": "pages", "from": pages, "to": fixed})

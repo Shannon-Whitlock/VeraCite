@@ -19,9 +19,9 @@ import os
 import re
 
 from .normalize import (author_surnames_display, biblatex_pages, bib_given_names,
-                        clean_tex, deaccent, is_collaboration, is_container_granularity,
-                        is_preprint, is_truncated, norm_pages, split_authors,
-                        title_is_miscased)
+                        clean_tex, deaccent, fold_transliterations, is_collaboration,
+                        is_container_granularity, is_preprint, is_truncated, norm_pages,
+                        split_authors, title_is_miscased)
 from .report import Severity
 from .titles import title_is_shortened, title_key, title_overlap
 
@@ -113,8 +113,15 @@ def _clean_name_key(name):
     ASCII '-': Crossref serves a hyphenated surname with a real Unicode hyphen
     ('Glover‐Kapfer', U+2010) while the bib uses the ASCII '-' ('Glover-Kapfer') -- the
     SAME name, so it must not read as a deviation (and never be 'corrected' toward the
-    non-ASCII form). Same idea as the curly apostrophe (U+2019) already handled."""
-    s = deaccent(name).lower()
+    non-ASCII form). Same idea as the curly apostrophe (U+2019) already handled.
+
+    The German umlaut/eszett transliterations are folded too (fold_transliterations:
+    ae/oe/ue/ss -> a/o/u/s), the SAME fold the identity match uses. The umlaut 'ä' may
+    be written Unicode, as 'ae', or -- as VeraCite's own de-TeXing and some Crossref
+    pipelines render '\\"a' -- as bare 'a'; all are the SAME letter, so a 'Fahrmann'
+    (de-TeXed) vs 'Faehrmann' (record) pair is NOT a deviation and must never be
+    'corrected' from one transliteration to the other."""
+    s = fold_transliterations(deaccent(name).lower())
     return re.sub(r"[\s.,'’‐-―−-]+", "", s)
 
 
@@ -274,13 +281,19 @@ def _levenshtein_le1(a, b):
     return True
 
 
-def _compare_authors(e, rec, source, rep):
+def _compare_authors(e, rec, source, rep, order_authoritative=True):
     """Author comparison against an id-resolved record. The DOI/arXiv id already
     proves this is the right paper, so an author discrepancy is a metadata issue
     to check (WARN), not a wrong-paper error. The returned `first_differs` is the
     strongest single signal and is combined with a strong title mismatch by the
     caller into the one genuine wrong-record error. arXiv's API yields only a
-    folded last token per author, so its data stays advisory either way."""
+    folded last token per author, so its data stays advisory either way.
+
+    `order_authoritative` is False for a software/dataset record: its author list
+    is the Zenodo/GitHub contributor order, which is NOT authorship order, so a
+    re-ordered (but set-identical) author list is not a defect -- the first-author
+    and ordering checks are skipped when the bib's first author appears ANYWHERE in
+    the record (the circuit_knitting_toolbox 'Bello vs Branczyk' FP)."""
     # If the author field already has a glued-'and' defect (caught by the offline
     # glued_and_separator rule), skip the record comparison entirely: the parser
     # merged two authors into one name, so every downstream finding (given-name
@@ -344,6 +357,13 @@ def _compare_authors(e, rec, source, rep):
     first_extra = _reconstructed_surnames(rec_authors[:1], rec.get("given_full"))
     first_differs = not (_surname_match(bib_authors[0], rec_authors[0])
                          or any(_surname_match(bib_authors[0], y) for y in first_extra))
+    # Software/dataset: author ORDER is not authoritative. If the bib's first author
+    # is present anywhere in the record (just not first), the lists are merely
+    # re-ordered -- not a different first author. Treat first_differs as False so it
+    # neither fires the 'first author differs' WARN nor feeds the wrong-record error.
+    if first_differs and not order_authoritative \
+            and any(_surname_match(bib_authors[0], r) for r in rec_authors):
+        first_differs = False
 
     # Drop empty surnames (a malformed author like '{}, A.' folds to '') -- listing
     # them yields a finding with an empty name ('author(s) in bib not in record: '),
@@ -405,8 +425,11 @@ def _compare_authors(e, rec, source, rep):
         return any(_surname_match(b, x) for x in _reconstructed_surnames([r], given_full))
     in_order = len(bib_authors) == len(rec_authors) and \
         all(_same_position(b, r) for b, r in zip(bib_authors, rec_authors))
-    if not truncated and not bib_only and not rec_only and not first_differs \
-            and not in_order:
+    # The 'different order' finding only fires when the order is authoritative -- a
+    # software/dataset record's Zenodo/GitHub contributor order is not, so a
+    # re-ordered (set-identical) list there is silence, not a finding.
+    if order_authoritative and not truncated and not bib_only and not rec_only \
+            and not first_differs and not in_order:
         rep.add(Severity.WARN, e, f"[{source}] same authors but in a different order "
                 f"than the record", "record", category="metadata_mismatch")
     # A surname folded to a single letter looks like a mis-parsed initial. An EMPTY
@@ -781,6 +804,41 @@ def _journal_core(name):
     return re.sub(r"\s+", " ", core).strip()
 
 
+# Pseudo-journals that name a PREPRINT / working-paper manifestation, not a published
+# venue: a DOI can resolve to one of these while the bib cites the later PUBLISHED
+# version (azinovic's 'International Economic Review' article matched its SSRN working
+# paper). Its journal/year/pages describe the preprint, so they must NOT override a
+# real journal the bib already names -- the same treatment arXiv already gets. Matched
+# on the depunctuated journal key so spacing/case variants fold.
+_PREPRINT_CONTAINERS = {
+    "ssrnelectronicjournal", "ssrn", "arxiv", "biorxiv", "medrxiv", "chemrxiv",
+    "techrxiv", "researchsquare", "preprints", "preprintsorg", "authorea",
+}
+
+
+def _is_preprint_container(name):
+    """True when a (record) journal name is a preprint/working-paper pseudo-journal
+    (SSRN, bioRxiv, Research Square, ...). Such a container is a different
+    MANIFESTATION than a published article, so it never overrides a real journal."""
+    return _journal_key(name or "") in _PREPRINT_CONTAINERS
+
+
+# Free-text markers that a BIB journal field is itself a preprint/working-paper
+# reference, not a real published venue: the verbose 'arXiv preprint arXiv:1912.08660'
+# or 'Available at SSRN 3745608' forms a registry never serves but authors write. A
+# bib whose journal is one of these is NOT citing a published journal, so the matched
+# preprint record is the SAME object -- not a divergent manifestation (the koczor2019
+# 'arXiv preprint arXiv:...' over-fire). Matched as a substring of the cleaned key.
+_PREPRINT_JOURNAL_TEXT_RE = re.compile(r"arxiv|ssrn|biorxiv|medrxiv|chemrxiv|preprint", re.I)
+
+
+def _bib_journal_is_preprint_ref(name):
+    """True when a BIB journal field is itself a preprint/working-paper reference
+    (a pseudo-journal name OR a verbose 'arXiv preprint arXiv:...' / 'Available at
+    SSRN ...' string) -- i.e. NOT a real published venue."""
+    return _is_preprint_container(name) or bool(_PREPRINT_JOURNAL_TEXT_RE.search(name or ""))
+
+
 # --- record comparison + parity --------------------------------------------
 
 # Soft bibliographic fields compared between two metadata sources, as
@@ -794,10 +852,26 @@ def _soft(v):
     return str(v or "").strip()
 
 
+def _soft_range(v):
+    """Comparison form for a field that may hold a RANGE (volume/number can be an
+    issue span like '3-4'). Folds the dash variants the same way pages do, so a
+    bib's biblatex '3--4' and a registry's raw '3-4' compare EQUAL -- without this a
+    pure-dash difference produced a bogus 'number 3--4 -> 3-4' suggestion that
+    reverts the canonical en-dash (the dwork-dp-book BAD-SUGGEST)."""
+    return norm_pages(str(v or ""))
+
+
+def _is_range(v):
+    """True when a value (after page-normalization) is a two-part range 'A-B' with
+    both sides non-empty -- so a volume/number issue span gets the biblatex '--'
+    form while a single value or a non-range string is left verbatim."""
+    return bool(re.match(r"^[^-]+-[^-]+$", norm_pages(str(v or ""))))
+
+
 _SOFT_FIELDS = [
     ("year", "year", _soft),
-    ("volume", "volume", _soft),
-    ("number", "number", _soft),
+    ("volume", "volume", _soft_range),
+    ("number", "number", _soft_range),
     ("pages", "pages", lambda v: norm_pages(str(v or ""))),
 ]
 
@@ -906,20 +980,82 @@ def _bib_math_matches_record(btitle, raw_atitle):
     return bool(bk_alpha) and bk_alpha == rk_alpha
 
 
-def _bib_year_matches_a_version(bibval, rec):
-    """True when `rec` is a versioned arXiv record (v1 year and a later vN year that
-    differ) and the bib's year matches some version in that span -- i.e. the only
-    reason the years disagree is which version is cited, not a wrong year. Bounds
-    are inclusive; a bib year OUTSIDE the span is a genuine mismatch and not
-    softened."""
+# A software-release title minted by the Zenodo<->GitHub integration:
+#   '<org>/<repo>: <Human Readable Name> <version>'
+# e.g. 'Qiskit-Extensions/circuit-knitting-toolbox: Circuit Knitting Toolbox 0.2.0'.
+# The bib (and human readers) cite the clean middle name, so the 'org/repo:' prefix
+# and the trailing version are release packaging, not the work's title -- they must
+# be folded away before a title overlap, or a correctly-cited software entry reads as
+# a wrong record. Matched conservatively: a single 'token/token:' prefix at the very
+# start (an org/repo slug, no spaces) and a trailing SemVer-ish version.
+_RELEASE_PREFIX_RE = re.compile(r"^\s*[\w.-]+/[\w.-]+\s*:\s*")
+_RELEASE_VERSION_RE = re.compile(r"\s*v?\d+(?:\.\d+){1,}[\w.-]*\s*$")
+
+
+def _software_release_title(title):
+    """Strip the Zenodo/GitHub release packaging from a software record title so it
+    compares against the cited clean name. Returns the title unchanged when it does
+    not look like a release string (so a normal title is never altered)."""
+    t = _RELEASE_PREFIX_RE.sub("", title or "")
+    t = _RELEASE_VERSION_RE.sub("", t)
+    return t.strip()
+
+
+# An arXiv id with an explicit version suffix ('2304.14360v2', 'quant-ph/9810087v1')
+# in any of the entry's id-bearing fields. The version number is group 2.
+_ARXIV_VERSION_RE = re.compile(
+    r"(?:\d{4}\.\d{4,5}|(?:[a-z-]+(?:\.[A-Za-z]{2})?/\d{7}))v(\d+)", re.I)
+
+
+def _cited_arxiv_version(e):
+    """The explicit arXiv version the entry PINS ('...v2' -> 2), or None when it cites
+    the bare id (no version). Scanned across the id-bearing fields (eprint/url/doi/
+    journal). The version disambiguates which date is correct: a bare id means the v1
+    submission date; a pinned vN means that version's date."""
+    for fld in ("eprint", "url", "doi", "journal", "note"):
+        m = _ARXIV_VERSION_RE.search(e.get(fld, "") or "")
+        if m:
+            try:
+                return int(m.group(1))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _arxiv_year_verdict(bibval, rec, e):
+    """Decide an arXiv-cited entry's YEAR against the policy: a published article uses
+    its publication date, but an entry citing the arXiv must use the arXiv SUBMISSION
+    (v1) date -- UNLESS it pins a specific version, in which case that version's date
+    is acceptable. arXiv's API gives only v1 (<published>) and the latest (<updated>)
+    years, so we can verify exactly those two; an intermediate pinned version cannot
+    be dated and stays unverifiable.
+
+    Returns one of:
+      'ok'            -- the bib year is correct for what it cites (be silent)
+      'unverifiable'  -- a specific intermediate version is pinned; its date is unknown
+                         (soften: [check manually], never push a year)
+      'wrong'         -- the bib year is not the correct one (WARN; suggest v1's year,
+                         which is always the right year for a bare id)
+    """
     v1, vn = rec.get("year"), rec.get("updated_year")
-    if not (v1 and vn) or v1 == vn:
-        return False
+    if not v1:
+        return "ok"          # no record year to compare -- say nothing
     try:
         by = int(str(bibval).strip())
     except (TypeError, ValueError):
-        return False
-    return min(v1, vn) <= by <= max(v1, vn)
+        return "ok"
+    pinned = _cited_arxiv_version(e)
+    if pinned is None:
+        # Bare id: the correct year is the v1 submission year, full stop.
+        return "ok" if by == v1 else "wrong"
+    if pinned == 1:
+        return "ok" if by == v1 else "wrong"
+    # A later version is pinned. We can verify it only when it is the LATEST version
+    # arXiv reports (whose year is `updated_year`); any other pinned version has no
+    # date in the record, so its year cannot be checked -- do not flag or push.
+    if vn and by == vn:
+        return "ok"
+    return "unverifiable"
 
 
 def _soft_field_diffs(e, rec):
@@ -946,9 +1082,17 @@ def _soft_field_diffs(e, rec):
             if key == "pages" and _pages_same_single(norm(recraw), norm(bibraw)):
                 continue
             # The proposed value is handed back in its biblatex-canonical written
-            # form (a page range as '920--926', not the registry's '920-926'), so an
-            # applied suggestion does not itself trip the dash-style check.
-            to = biblatex_pages(recraw) if key == "pages" else recraw
+            # form: a RANGE (pages, or a volume/number issue span like '3-4') uses
+            # '--' (so an applied suggestion does not itself trip the dash-style
+            # check). A page value always goes through biblatex_pages; a volume/number
+            # only does so when it is actually a range (else its raw form -- which may
+            # contain spaces/punctuation a page-normalizer would mangle -- is kept).
+            if key == "pages":
+                to = biblatex_pages(recraw)
+            elif key in ("volume", "number") and _is_range(recraw):
+                to = biblatex_pages(recraw)
+            else:
+                to = recraw
             out.append((key, label, bibraw, to))
     return out
 
@@ -1050,12 +1194,17 @@ class _TitleFacts:
     branch that needs it asks, via the injected `probe` callable, so a path that
     never reaches the mismatch branches issues no fetch."""
 
-    def __init__(self, e, rec, source, timeout, probe):
+    def __init__(self, e, rec, source, timeout, probe, nonarticle=False):
         self.e, self.rec, self.source, self.timeout = e, rec, source, timeout
         self._probe = probe
         self._retitle = _UNSET
         self.btitle = e.get("title", "")
         self.raw_atitle = rec.get("title", "")
+        # A software/dataset record's title is the Zenodo/GitHub release string
+        # ('org/repo: Clean Name X.Y.Z'); fold that packaging away so the cited clean
+        # name compares as the same title (the circuit_knitting_toolbox ERROR FP).
+        if nonarticle:
+            self.raw_atitle = _software_release_title(self.raw_atitle)
         # Record markup: strip TAGS for comparison, but remember markup was present so
         # no mangled value is offered as a verbatim suggestion.
         self.rec_has_markup = _has_markup(self.raw_atitle) and not _has_markup(self.btitle)
@@ -1197,13 +1346,54 @@ def _decide_title(facts, rep, e, source):
                     f"cited title if you mean the current version", "record",
                     category="preprint_retitled", type="preprint_retitled", field="title")
             return False
-        rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle}:\n"
+        # A VERY HIGH overlap (>=85%) is a cosmetic variant -- a leading article
+        # ('A Theory ...' vs 'Theory ...'), one re-ordered word, a v1-vs-published
+        # wording tweak -- where the two titles denote the same work. Pushing the
+        # record's title as a verbatim [fix] there is "too much manual title editing"
+        # and risks adopting the record's own quirks, so we show BOTH titles and let
+        # the author decide ([check manually]); no suggested patch. A MODERATE
+        # difference (0.6-0.85, several words apart) still carries the record's title,
+        # which materially helps -- as does the STRONG mismatch above.
+        cosmetic = overlap >= 0.85
+        rep.add(Severity.INFO, e, f"[{source}] title differs slightly (overlap {overlap:.0%}){mangle}"
+                + ("; verify which form you mean" if cosmetic else "") + ":\n"
                 f"        bib:    {f.btitle[:90]}\n"
                 f"        {source}: {f.atitle[:90]}",
                 "record", category="metadata_mismatch", type="metadata_mismatch.title_overlap_slight",
-                field="title", suggested=f.title_sug())
+                field="title", suggested=None if cosmetic else f.title_sug())
         return False
     return False
+
+
+# For each record document_type, the set of bib entry types that ALREADY express it,
+# so the entry is correctly typed and gets NO entrytype_suggestion. Several biblatex
+# types are legitimate expressions of one record type:
+#   * `proceedings` (a conference paper) is `@inproceedings`, its `@conference` alias,
+#     or `@proceedings` (the whole volume) -- the record type does not distinguish.
+#   * `book chapter` is the registry type Crossref assigns to LNCS/symposium
+#     CONFERENCE papers as well as true book chapters, so an @inproceedings/@conference
+#     cited for such a paper is already correct -- it must not be pushed to
+#     @incollection (the bib type is at least as accurate as Crossref's). True book
+#     chapters are @incollection/@inbook.
+#   * `thesis` is @thesis or its @phdthesis/@mastersthesis aliases.
+#   * `book` is @book/@mvbook/@collection (a whole edited volume).
+#   * `journal article` is @article.
+# The relationship is symmetric: a type listed here is never suggested to change INTO
+# something it already is, in either the article-like or book-like direction.
+_DOCTYPE_SATISFIED_BY = {
+    "thesis": {"thesis", "phdthesis", "mastersthesis"},
+    "proceedings": {"inproceedings", "conference", "proceedings"},
+    "book chapter": {"incollection", "inbook", "inproceedings", "conference"},
+    "book": {"book", "mvbook", "collection"},
+    "journal article": {"article"},
+}
+
+
+def _entrytype_already_satisfies(etype, doc_type):
+    """True when the bib entry type ALREADY expresses the record's document type, so no
+    entrytype_suggestion should fire (e.g. @inproceedings for a `proceedings` record).
+    Generalizes the family of '@X -> @X' self-loops to one decision over a table."""
+    return etype in _DOCTYPE_SATISFIED_BY.get(doc_type, frozenset())
 
 
 def compare_against_record(e, rec, source, rep, timeout=None):
@@ -1231,7 +1421,9 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     #     SEG/conference paper mistyped '@Book' (with a 'journal=' field), which would
     #     otherwise be mis-reported as 'a book should carry an ISBN'.
     # Withdraw the offline guess first (it may have said '@online'/'@misc') and emit the
-    # record-grounded suggestion. The exact same-type case (already correct) says nothing.
+    # record-grounded suggestion. The case where the bib type ALREADY expresses the
+    # record's document type (e.g. @inproceedings for a `proceedings` record) is
+    # already correct -- it says nothing (see _entrytype_already_satisfies).
     doc_type = (rec.get("document_type") or "").lower()
     bib_is_articlelike = e.etype in ("article", "inproceedings", "conference")
     bib_is_booklike = e.etype in ("book", "mvbook", "collection", "incollection", "inbook")
@@ -1242,6 +1434,25 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     # are skipped below: they do not exist for software/data, so comparing them would
     # manufacture false metadata_mismatch findings.
     nonarticle = doc_type in ("software", "dataset")
+    # The record is a PREPRINT/working-paper MANIFESTATION (its journal is SSRN /
+    # bioRxiv / ...) while the bib names a DIFFERENT, real journal -- the DOI matched
+    # the preprint, not the published version the bib cites. Its journal/year/pages
+    # describe the preprint, so they must not be pushed as corrections over the bib
+    # (the azinovic SSRN-over-journal BAD-SUGGEST). Computed once here so both the
+    # soft-field (year/pages) loop and the journal block below can defer to it.
+    # Fire ONLY when the bib genuinely cites a PUBLISHED venue: its journal is a real,
+    # non-empty name that is not itself a preprint reference (neither a pseudo-journal
+    # nor a verbose 'arXiv preprint ...'/'Available at SSRN ...' string) AND the entry
+    # is not otherwise a preprint citation (eprint / arxiv id). An entry that IS a
+    # preprint is matched to its own preprint record -- the SAME object, not a
+    # divergent manifestation (the koczor2019 over-fire).
+    _bj = clean_tex(e.get("journal", "")).lower()
+    _aj = clean_tex(rec.get("journal", "")).lower()
+    rec_is_preprint_manifestation = (
+        not nonarticle and _is_preprint_container(rec.get("journal", "")) and _bj
+        and not _bib_journal_is_preprint_ref(e.get("journal", ""))
+        and not is_preprint(e)
+        and not _journal_equiv(_bj, _aj))
     if bib_is_articlelike and nonarticle:
         # The bib says @article but the DOI resolves to software/data. Identity still
         # holds (title/author are compared below), but the author likely cited the
@@ -1254,14 +1465,16 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                 f"journal article -- you may have cited the accompanying {kind}'s DOI "
                 f"rather than the paper's; verify, and use {target} if the {kind} is "
                 f"what you mean", "record", category="entrytype_suggestion", field="doi")
-    elif bib_is_articlelike and doc_type in ("thesis", "proceedings", "book chapter", "book"):
+    elif bib_is_articlelike and doc_type in ("thesis", "proceedings", "book chapter", "book") \
+            and not _entrytype_already_satisfies(e.etype, doc_type):
         rep.withdraw(e.key, "entrytype_suggestion")
         target = {"thesis": "@thesis", "proceedings": "@inproceedings/@proceedings",
                   "book chapter": "@incollection", "book": "@book"}[doc_type]
         rep.add(Severity.WARN, e, f"[{source}] the record is a {doc_type}, not a "
-                f"journal article -- use {target} instead of @{e.etype}", "record",
+                f"@{e.etype} -- use {target} instead of @{e.etype}", "record",
                 category="entrytype_suggestion", field="journal")
-    elif bib_is_booklike and doc_type in ("journal article", "proceedings"):
+    elif bib_is_booklike and doc_type in ("journal article", "proceedings") \
+            and not _entrytype_already_satisfies(e.etype, doc_type):
         rep.withdraw(e.key, "entrytype_suggestion")
         target = "@article" if doc_type == "journal article" else "@inproceedings"
         rep.add(Severity.WARN, e, f"[{source}] the record is a {doc_type}, not a book "
@@ -1281,7 +1494,8 @@ def compare_against_record(e, rec, source, rep, timeout=None):
                 category="metadata_mismatch", field="version",
                 suggested={"field": "version", "from": bib_ver, "to": rec_ver})
 
-    first_differs = _compare_authors(e, rec, source, rep)
+    first_differs = _compare_authors(e, rec, source, rep,
+                                     order_authoritative=not nonarticle)
 
     # Title: ONE exclusive outcome among the title findings, decided by a pure
     # function over facts computed once (no mutable flags threaded across branches).
@@ -1290,7 +1504,8 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     title_facts = _TitleFacts(
         e, rec, source, timeout,
         probe=lambda: _bib_matches_earlier_version(
-            e, rec, e.get("title", ""), rec.get("title", ""), timeout))
+            e, rec, e.get("title", ""), rec.get("title", ""), timeout),
+        nonarticle=nonarticle)
     title_differs_strongly = _decide_title(title_facts, rep, e, source)
 
     # The single genuine wrong-paper error: identity-level fields ALL point
@@ -1317,42 +1532,54 @@ def compare_against_record(e, rec, source, rep, timeout=None):
         # lacks them never produces a false 'volume differs' / 'pages differ' finding.
         if nonarticle and fld != "year":
             continue
+        # A preprint/working-paper manifestation's year/volume/pages describe the
+        # PREPRINT, not the published version the bib cites -- so they must not be
+        # pushed as corrections. The divergent_manifestation note (emitted in the
+        # journal block) is the actionable message; suppress these soft diffs.
+        if rec_is_preprint_manifestation:
+            continue
+        # A BOOK / BOOK-CHAPTER record matched to an @article is a different
+        # MANIFESTATION (a book reprint of a journal paper -- Kochen2015): its
+        # year/pages describe the reprint, not the cited journal version, so they
+        # must not be pushed as a 'fix'. The entrytype_suggestion is the actionable
+        # finding. (A bib that IS book-like keeps the comparison -- the record is
+        # then the same kind of object.)
+        if doc_type in ("book", "book chapter") and bib_is_articlelike:
+            continue
         # arXiv preprints are VERSIONED: v1 and a later vN can carry different years
         # (<published> vs <updated>). When the bib's year matches SOME version in the
         # record's version span [year, updated_year] -- just not the one the record
-        # reports -- the bib is not wrong, only under-specified. Best practice is to
-        # cite the version explicitly (arXiv:ID vN) so the year is unambiguous. So
-        # emit a version-pinning NOTE, not a corrective 'year 2024 -> 2023' warning
-        # whose direction is the author's choice, not a fact.
-        if fld == "year" and _bib_year_matches_a_version(bibval, rec):
-            # The bib year matches a REAL arXiv version -- it is not wrong, so this is
-            # never a corrective 'year differs' warning. We also do NOT prescribe a
-            # year: v1 (the first-submission year) and the latest-version year are both
-            # legitimate and mean DIFFERENT things -- the v1 year establishes
-            # precedence/priority ("first shown"), the latest year reflects the current
-            # revised content. Which is right is the author's editorial call, so the
-            # note only states the span and leaves the choice to them (no "pin the
-            # version" directive -- arXiv's own bib generator pins none).
+        # reports. POLICY: an entry citing the arXiv must carry the SUBMISSION (v1)
+        # year, unless it pins a specific version (then that version's date applies).
+        # A bare id whose year is the latest-version year (not v1) is therefore wrong:
+        # the bib should use v1's year (or pin the version if it means the revised
+        # content). _arxiv_year_verdict encodes this; we can only date v1 and the
+        # latest version, so an intermediate pinned version is left unverifiable.
+        if fld == "year" and source == "arxiv":
             v1, vn = rec.get("year"), rec.get("updated_year")
-            rep.add(Severity.INFO, e, f"[{source}] bib year {bibval} matches an arXiv "
-                    f"version (v1 {v1}, latest {vn}); both are valid -- v1's year marks "
-                    f"first-submission precedence, the latest year the revised content. "
-                    f"Use whichever fits why you cite it.",
-                    "record", category="preprint_version", field="year")
-            continue
-        # An entry cited AS an arXiv preprint whose year matches NO arXiv version (not
-        # v1, not the latest) is a data error -- not an editorial version choice but a
-        # year that does not correspond to the cited object at all (a typo, or the
-        # published year stamped on a preprint citation). Flag it as such (WARN),
-        # naming the real versions; no suggested year (we cannot know which is intended
-        # -- never push a guessed value).
-        if fld == "year" and source == "arxiv" and is_preprint(e):
-            v1, vn = rec.get("year"), rec.get("updated_year")
-            versions = f"v1 {v1}" + (f", latest {vn}" if vn and vn != v1 else "")
-            rep.add(Severity.WARN, e, f"[{source}] bib year {bibval} matches no arXiv "
-                    f"version of this preprint ({versions}) -- likely a wrong/typo year "
-                    f"for the cited preprint", "record", category="metadata_mismatch",
-                    field="year")
+            verdict = _arxiv_year_verdict(bibval, rec, e)
+            if verdict == "ok":
+                continue
+            if verdict == "unverifiable":
+                # A specific (intermediate) version is pinned; arXiv does not expose its
+                # date, so we cannot confirm the year -- soften, never push a value.
+                rep.add(Severity.INFO, e, f"[{source}] bib year {bibval} could not be "
+                        f"verified against the pinned arXiv version (only v1 {v1} and "
+                        f"the latest v-year {vn} are datable); check it matches the "
+                        f"version you cite", "record", category="preprint_version",
+                        field="year")
+                continue
+            # verdict == "wrong": the correct year for an arXiv citation is v1's
+            # submission year. Suggest it (a bare id always means v1); if the author
+            # means the revised content, they should pin the version explicitly.
+            extra = (" -- or, if you cite the revised content, pin that version "
+                     "(e.g. arXiv:...vN) explicitly"
+                     if vn and vn != v1 and str(bibval).strip() == str(vn) else "")
+            rep.add(Severity.WARN, e, f"[{source}] bib year {bibval} is not the arXiv "
+                    f"submission (v1) year {v1}; an entry citing the arXiv should use "
+                    f"the v1 submission year{extra}", "record",
+                    category="metadata_mismatch", field="year",
+                    suggested={"field": "year", "from": str(bibval).strip(), "to": str(v1)})
             continue
         # The before -> after lives in the suggested tail, so the prose stays terse
         # ('year differs') rather than repeating 'bib=X vs crossref=Y'.
@@ -1384,6 +1611,15 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     # The journal comparison is article-only. For a software/dataset record the
     # record's "journal" is the repository name ("Zenodo") and the bib entry has no
     # journal at all -- comparing them would be meaningless, so skip the whole block.
+    #
+    # A BOOK / BOOK-CHAPTER record's container-title is the BOOK or SERIES title
+    # ('Mathematics of Quantum Computation', 'Contemporary Mathematics', 'The
+    # Frontiers Collection'), NOT a journal name -- so it must never be pushed as the
+    # bib's `journal` (the brylinski02 / Brassard_2002 / Kochen2015 series-as-journal
+    # BAD-SUGGESTs). The entrytype_suggestion already flags the manifestation
+    # difference and is the actionable finding; suppress the journal conform here so no
+    # wrong value is offered (a real journal name in the bib is left untouched).
+    rec_is_book_container = doc_type in ("book", "book chapter")
     raw_journal = e.get("journal", "")
     bj, aj = clean_tex(raw_journal).lower(), clean_tex(rec.get("journal", "")).lower()
     rec_journal_safe = _safe_suggestion(rec.get("journal", ""))
@@ -1413,6 +1649,21 @@ def compare_against_record(e, rec, source, rep, timeout=None):
     different_journal = (bib_jkey and rec_jkey and bib_jkey != rec_jkey
                          and "arxiv" not in bj and "arxiv" not in aj)
     if nonarticle:
+        pass
+    elif rec_is_preprint_manifestation:
+        # Surface the manifestation difference (the bib may want the preprint's DOI or
+        # the published one), but never push the pseudo-journal as the journal.
+        rep.add(Severity.INFO, e, f"[{source}] this id resolves to a preprint/working-"
+                f"paper version ({rec_journal_safe!r}); the bib cites "
+                f"{raw_journal.strip()!r} -- verify you mean the published version, not "
+                f"the preprint", "record", category="divergent_manifestation",
+                field="journal")
+    elif rec_is_book_container and not (bib_jkey and rec_jkey and bib_jkey == rec_jkey):
+        # The record is a book/chapter manifestation: its container is a book/series
+        # title, not the journal. Never conform the bib's journal toward it. (The one
+        # exception -- both sides resolve to the SAME curated journal -- cannot happen
+        # for a book container, but the guard keeps a legitimate journal nudge alive
+        # if a record is ever mis-typed.)
         pass
     elif different_journal:
         rec_disp = (rec_forms[0] if rec_forms else None) or rec_journal_safe

@@ -219,6 +219,20 @@ def test_commented_citations_are_not_extracted_or_sent_to_llm():
     assert len(stripped) == len(tex) and stripped.count("\n") == tex.count("\n")
 
 
+def test_collect_tex_tolerates_non_utf8(tmp_path):
+    # TOOL-BUG: a .tex with a CP-1252 byte (0x93 smart quote) is NOT UTF-8.
+    # collect_tex must not abort the whole run with a UnicodeDecodeError -- it should
+    # decode tolerantly so the citations are still scanned (charter: a tool-side
+    # failure must never masquerade as a citation result).
+    from veracite.llm import collect_tex
+    p = tmp_path / "VQE_2.tex"
+    # \x93 / \x94 are CP-1252 curly quotes, invalid as standalone UTF-8.
+    p.write_bytes(b"A claim \\cite{realkey} \x93quoted\x94 text.\n")
+    got = collect_tex([str(tmp_path)])
+    assert len(got) == 1
+    assert "\\cite{realkey}" in got[0][1]
+
+
 def test_every_api_endpoint_builds_a_well_formed_url():
     # Contract test for the whole external API surface: every endpoint must produce a
     # filled, correctly-escaped URL. This catches a silent breakage like the arXiv
@@ -444,6 +458,97 @@ def test_place_alias_not_flagged_but_real_invalid_field_still_is():
 def test_journal_equiv_distinguishes_nature_variants():
     assert not record._journal_equiv("nature", "nature physics")
     assert record._journal_equiv("phys. rev. lett.", "physical review letters")
+
+
+def test_book_chapter_container_not_pushed_as_journal():
+    # brylinski02 / Brassard_2002 / Kochen2015 BAD-SUGGEST: when an @article resolves
+    # to a BOOK CHAPTER, the record's container is the book/series title
+    # ('Computational Mathematics', a series), NOT a journal -- it must never be
+    # suggested as the bib's `journal`. The actionable finding is the entrytype nudge.
+    e = _entry("@article{k, author={Brylinski, R}, title={T},\n"
+               " journal={Mathematics of Quantum Computation}, year={2002}, doi={10.1/x}}\n")
+    rec = {"authors": ["brylinski"], "given": {}, "title": "T", "year": 2002,
+           "journal": "Computational Mathematics", "document_type": "book chapter"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.suggested and f.suggested.get("field") == "journal"
+                   for f in rep.findings), "a book-series container must not be pushed as journal"
+    assert any(f.category == "entrytype_suggestion" for f in rep.findings), \
+        "the manifestation difference is surfaced as the entrytype nudge"
+
+
+def test_ssrn_preprint_manifestation_not_pushed_over_journal():
+    # azinovic BAD-SUGGEST: the bib cites the PUBLISHED journal ('International
+    # Economic Review', 2022) but the DOI matched the SSRN working paper
+    # ('SSRN Electronic Journal', 2019). The preprint's journal/year must NOT be
+    # pushed over the published values; surface a divergent_manifestation note instead.
+    from veracite.compare import _is_preprint_container
+    assert _is_preprint_container("SSRN Electronic Journal")
+    assert not _is_preprint_container("International Economic Review")
+    e = _entry("@article{k, author={Azinovic, Marlon}, title={Deep Equilibrium Nets},\n"
+               " journal={International Economic Review}, year={2022}, doi={10.2139/ssrn.1}}\n")
+    rec = {"authors": ["azinovic"], "given": {}, "authors_display": ["Azinovic"],
+           "title": "Deep Equilibrium Nets", "year": 2019,
+           "journal": "SSRN Electronic Journal", "document_type": "journal article"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.suggested and f.suggested.get("field") == "journal"
+                   for f in rep.findings), "never push 'SSRN Electronic Journal' as journal"
+    assert not any(f.suggested and f.suggested.get("field") == "year"
+                   for f in rep.findings), "the preprint year must not override the published year"
+    assert any(f.category == "divergent_manifestation" for f in rep.findings), \
+        "the manifestation difference is surfaced as an actionable note"
+
+
+def test_preprint_bib_matched_to_preprint_record_no_divergent_note():
+    # The koczor2019 over-fire that the live re-run surfaced: when the BIB itself cites
+    # the preprint (journal='arXiv preprint arXiv:1912.08660', resolved via arXiv), the
+    # record IS the same object -- NOT a divergent manifestation. The note must not
+    # fire, and the existing arXiv journal-style fix is the actionable one.
+    from veracite.compare import _bib_journal_is_preprint_ref
+    assert _bib_journal_is_preprint_ref("arXiv preprint arXiv:1912.08660")
+    assert _bib_journal_is_preprint_ref("Available at SSRN 3745608")
+    assert not _bib_journal_is_preprint_ref("International Economic Review")
+    e = _entry("@article{k, author={Koczor, B and Benjamin, S},\n"
+               " title={Quantum natural gradient}, journal={arXiv preprint arXiv:1912.08660},\n"
+               " year={2019}, url={https://arxiv.org/abs/1912.08660}}\n")
+    rec = {"authors": ["koczor", "benjamin"], "given": {},
+           "title": "Quantum natural gradient", "year": 2019, "journal": "arXiv",
+           "document_type": "journal article"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep)
+    assert not any(f.category == "divergent_manifestation" for f in rep.findings), \
+        "a preprint cited as a preprint is the same object, not a divergent manifestation"
+
+
+def test_book_reprint_manifestation_year_pages_not_pushed():
+    # Kochen2015 cluster: an @article (journal version) resolves to a BOOK-CHAPTER
+    # reprint. Its year/pages describe the reprint, not the cited journal version, so
+    # they must NOT be pushed as 'fix'es -- only the entrytype nudge is actionable.
+    e = _entry("@article{k, author={Kochen, Simon}, title={A Reconstruction},\n"
+               " journal={Foundations of Physics}, volume={45}, pages={557--590},\n"
+               " year={2015}, doi={10.1/x}}\n")
+    rec = {"authors": ["kochen"], "given": {}, "title": "A Reconstruction", "year": 2017,
+           "pages": "201-235", "journal": "The Frontiers Collection",
+           "document_type": "book chapter"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.suggested and f.suggested.get("field") in ("year", "pages", "journal")
+                   for f in rep.findings), "a book-reprint's metadata must not override the journal version"
+    assert any(f.category == "entrytype_suggestion" for f in rep.findings)
+
+
+def test_journal_article_record_still_conforms_journal():
+    # The look-alike that must NOT be suppressed: a genuine journal-article record
+    # still conforms the bib's journal toward the canonical form.
+    e = _entry("@article{k, author={A, B}, title={T}, journal={Phys Rev Lett},\n"
+               " year={2020}, doi={10.1/x}}\n")
+    rec = {"authors": ["b"], "given": {}, "title": "T", "year": 2020,
+           "journal": "Physical Review Letters", "document_type": "journal article"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert any(f.suggested and f.suggested.get("field") == "journal"
+               and f.suggested["to"] == "Physical Review Letters" for f in rep.findings)
 
 
 def test_surname_match_particles_only():
@@ -1045,6 +1150,55 @@ def test_author_name_deviation_from_record_flagged():
     rep3 = Report(color=False)
     record.compare_against_record(e3, rec3, "crossref", rep3)
     assert not any("author name differs" in f.message for f in rep3.findings)
+
+
+def test_umlaut_transliteration_not_a_name_deviation():
+    # The bib's '\"a' (Fährmann) and Crossref's 'ae' transliteration (Faehrmann) are
+    # the SAME name -- ä == ae == a. Neither a name deviation [fix] nor a
+    # given-name/'missing' finding may fire (the sweke2020 FP that pushed
+    # 'Fahrmann' -> 'Faehrmann', the most dangerous because it carried [fix]).
+    from veracite.compare import _clean_name_key
+    assert _clean_name_key("Fahrmann") == _clean_name_key("Faehrmann")
+    assert _clean_name_key("Doering") == _clean_name_key("Doring") == _clean_name_key("Döring")
+    e = _entry("@article{k, author={F{\\\"a}hrmann, A.}, title={T},\n"
+               " year={2020}, doi={10.1/x}}\n")
+    rec = {"authors": ["faehrmann"], "authors_display": ["Faehrmann"],
+           "given": {"faehrmann": "A."}, "title": "T", "year": 2020}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any("author name differs" in f.message for f in rep.findings), \
+        "ä/ae/a are the same transliteration -- never a name deviation"
+    assert not any(f.suggested and "ahrmann" in str(f.suggested.get("to", ""))
+                   for f in rep.findings), "must never push a transliteration 'fix'"
+
+    # The Doering case: the ASCII transliteration 'Doering' (Andreas Döring) must not
+    # be 'corrected' toward Crossref's de-umlauted 'Doring'.
+    e2 = _entry("@article{k, author={Doering, Andreas}, title={T},\n"
+                " year={2010}, doi={10.1/x}}\n")
+    rec2 = {"authors": ["doring"], "authors_display": ["Doring"],
+            "given": {"doring": "Andreas"}, "title": "T", "year": 2010}
+    rep2 = Report(color=False)
+    record.compare_against_record(e2, rec2, "crossref", rep2)
+    assert not any("author name differs" in f.message for f in rep2.findings)
+
+
+def test_tex_tie_in_author_folded():
+    # A TeX tie '~' (non-breaking space) between name parts must split like a space, so
+    # 'Andrew T.~Sornborger and Patrick~J.~Coles' yields surnames Sornborger/Coles --
+    # not the glued 'tsornborger'/'jcoles' that falsely read as authors-missing
+    # (the gibbs2022 FP).
+    assert normalize.split_authors("Andrew T.~Sornborger and Patrick~J.~Coles") == \
+        normalize.split_authors("Andrew T. Sornborger and Patrick J. Coles")
+    e = _entry("@article{k, author={C.~Caro and Patrick~J.~Coles and"
+               " Andrew T.~Sornborger}, title={T}, year={2022}, doi={10.1/x}}\n")
+    rec = {"authors": ["caro", "coles", "sornborger"], "given": {},
+           "authors_display": ["Caro", "Coles", "Sornborger"], "title": "T", "year": 2022}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any("not in record" in f.message or "missing from bib" in f.message
+                   for f in rep.findings), "the tie must not glue an initial to the surname"
+    # An ESCAPED tilde accent '\~n' (Muñoz) is preserved, not torn at the tilde.
+    assert normalize.split_authors(r"Jos\'e Mu\~noz") == ["munoz"]
 
 
 def test_given_name_miscapitalization_flagged():
@@ -2124,6 +2278,62 @@ def test_parity_issue_to_number_rename_shows_field_names():
         "suggested must show field-name rename not value-to-value"
 
 
+def test_number_dash_only_difference_not_flagged():
+    # dwork-dp-book BAD-SUGGEST: the bib's correct biblatex issue range '3--4' vs
+    # Crossref's raw '3-4' is a dash-style difference, NOT a value difference -- it
+    # must produce no 'number 3--4 -> 3-4' suggestion (which would revert the en-dash).
+    e = _entry("@article{k, author={A, B}, title={T}, year={2014}, journal={J},"
+               " number={3--4}, doi={10.1/x}}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["a"], "given": {}, "title": "T", "year": 2014, "number": "3-4"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.category == "metadata_mismatch" and "number" in f.message
+                   for f in rep.findings), "a pure dash difference in number is not a mismatch"
+
+
+def test_number_real_range_difference_suggests_biblatex_dash():
+    # When a number/issue range genuinely DIFFERS, the suggested value is in biblatex
+    # '--' form, not the registry's single hyphen.
+    e = _entry("@article{k, author={A, B}, title={T}, year={2014}, journal={J},"
+               " number={3}, doi={10.1/x}}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["a"], "given": {}, "title": "T", "year": 2014, "number": "5-6"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    num = [f for f in rep.findings if f.category == "metadata_mismatch"
+           and f.suggested and f.suggested.get("field") == "number"]
+    assert num and num[0].suggested["to"] == "5--6"
+
+
+def test_alphanumeric_page_range_keeps_double_dash():
+    # Kumar_2017 PARTIAL BAD-SUGGEST: 'S547--s556' has one real defect (lowercase
+    # 's556') but the '--' is correct. The suggestion must fix the case AND keep '--'
+    # ('S547--S556'), not revert to Crossref's raw 'S547-S556'.
+    from veracite.normalize import biblatex_pages
+    assert biblatex_pages("S547-S556") == "S547--S556"
+    e = _entry("@article{k, author={A, B}, title={T}, year={2017}, journal={J},"
+               " pages={S547--s556}, doi={10.1/x}}\n")
+    rep = Report(color=False)
+    rec = {"authors": ["a"], "given": {}, "title": "T", "year": 2017, "pages": "S547-S556"}
+    record.compare_against_record(e, rec, "crossref", rep)
+    pg = [f for f in rep.findings if f.category == "metadata_mismatch"
+          and f.suggested and f.suggested.get("field") == "pages"]
+    assert pg and pg[0].suggested["to"] == "S547--S556"
+
+
+def test_malformed_unicode_dash_plus_hyphen_fixes_to_double_dash():
+    # erdos1959/wootters1982 BAD-SUGGEST: a malformed '34–-38' (Unicode en-dash +
+    # ASCII hyphen) must be fixed to '34--38', NEVER '34---38' (an em-dash, never a
+    # page separator).
+    e = _entry("@article{k, author={A, B}, title={T}, year={1959}, journal={J},"
+               " pages={34–-38}}\n")
+    rep = Report(color=False)
+    run_static([e], rep)
+    pg = [f for f in rep.findings if f.category == "style" and f.suggested
+          and f.suggested.get("field") == "pages"]
+    assert pg and pg[0].suggested["to"] == "34--38", \
+        [f.suggested for f in pg]
+
+
 def test_title_style_bibtex_endash_vs_unicode_endash_is_silent():
     # FN-4/M-1: BibTeX '--' and Unicode '–' (U+2013) are the same en-dash; a title
     # that uses '--' in the bib while Crossref serves '–' must NOT fire title_style.
@@ -2238,13 +2448,46 @@ def test_bib_latex_math_matching_record_mathml_is_silent():
 
 
 def test_clean_title_mismatch_still_suggests():
-    # Control for Rec #4: a normal (non-markup) record title still carries the patch.
+    # Control for Rec #4: a MODERATE (non-cosmetic) title difference still carries the
+    # patch -- 'Old Title Words Here' vs 'New ...' is 60% overlap, several words apart.
     e = _entry("@article{k, author={A, B}, title={Old Title Words Here}, year={2024}, doi={10.1/x}}\n")
     rec = {"authors": ["a"], "given": {}, "title": "New Title Words Here", "year": 2024}
     rep = Report(color=False)
     record.compare_against_record(e, rec, "crossref", rep)
     tit = [f for f in rep.findings if f.category == "metadata_mismatch" and "title" in f.message]
     assert tit and any(f.suggested and f.suggested.get("to") == "New Title Words Here" for f in tit)
+
+
+def test_tex_delta_macro_equals_unicode_delta_in_title():
+    # atz2022 near-FP: a title's '$\Delta$' (uppercase TeX macro) and a record's 'Δ'
+    # (Unicode) are the SAME character. The capitalized Greek macro must fold like the
+    # lowercase one, so the titles compare identical and NO title finding fires.
+    from veracite.titles import title_overlap, title_key
+    assert title_key(r"$\Delta$-Quantum machine-learning") == title_key("Δ-Quantum machine-learning")
+    assert title_overlap(r"$\Delta$-Quantum ML models", "Δ-Quantum ML models") == 1.0
+    e = _entry("@article{k, author={A, B}, title={$\\Delta$-Quantum machine-learning models},\n"
+               " year={2022}, doi={10.1/x}}\n")
+    rec = {"authors": ["a"], "given": {}, "title": "Δ-Quantum machine-learning models", "year": 2022}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any("title" in f.message for f in rep.findings if f.category == "metadata_mismatch")
+
+
+def test_cosmetic_title_difference_check_manually_no_fix():
+    # A VERY HIGH overlap (a leading article 'A Theory ...' vs 'Theory ...') is a
+    # cosmetic variant -- the titles denote the same work. Per the no-manual-title-
+    # editing policy, surface it as [check manually] (both titles shown) with NO
+    # suggested patch, rather than pushing a verbatim title rewrite.
+    e = _entry("@article{k, author={A, B},\n"
+               " title={A Theory for Equivariant Quantum Neural Networks},\n"
+               " year={2022}, doi={10.1/x}}\n")
+    rec = {"authors": ["a"], "given": {},
+           "title": "Theory for Equivariant Quantum Neural Networks", "year": 2022}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    tit = [f for f in rep.findings if f.category == "metadata_mismatch" and "title" in f.message]
+    assert tit, "a cosmetic difference is still surfaced (to verify)"
+    assert all(f.suggested is None for f in tit), "but no title [fix] is pushed"
 
 
 def test_canonical_record_authors_gated_by_confidence():
@@ -3386,10 +3629,11 @@ def test_cross_source_year_conflict_is_warning():
     assert any(f.category == "source_conflict" and "year" in f.message for f in rep.findings)
 
 
-def test_preprint_year_matching_a_version_is_a_note_not_a_correction():
-    # arXiv v1=2023, v2=2024. The bib says 2024 (it cites v2). The record reports
-    # v1's year (2023). This is NOT a wrong year -- it is a version choice -- so it
-    # is a version-pinning NOTE, with no corrective 'suggested 2024 -> 2023'.
+def test_arxiv_bare_id_year_must_be_v1_submission():
+    # POLICY: an entry citing the arXiv with a BARE id (no version pinned) must use the
+    # v1 SUBMISSION year. arXiv v1=2023, latest=2024; the bib says 2024 (the latest
+    # year) on a bare id -- that is the WRONG year, so it is a corrective WARN that
+    # suggests v1's year (2023), not a 'both are valid' note.
     e = _entry("@article{Winstone2024, author={Winstone, G.},\n"
                " title={A Title Long Enough}, year={2024}, eprint={2307.11858},\n"
                " journal={arXiv}}\n")
@@ -3397,29 +3641,42 @@ def test_preprint_year_matching_a_version_is_a_note_not_a_correction():
            "year": 2023, "updated_year": 2024, "journal": "arXiv"}
     rep = Report(color=False)
     record.compare_against_record(e, rec, "arxiv", rep)
-    yr = [f for f in rep.findings if f.category == "preprint_version"]
-    assert yr and all(f.severity is Severity.INFO for f in yr)
-    assert all(f.suggested is None for f in yr)   # no confident from->to
-    # The note is informational and NON-prescriptive: it states the v1/latest span
-    # and that both are valid (v1 = precedence, latest = revised content), without
-    # directing the author to a specific year or to "pin the version".
-    assert any("precedence" in f.message for f in yr)
-    assert not any("pin the version" in f.message for f in yr)
-    # And NOT emitted as a corrective metadata_mismatch.
-    assert not any(f.category == "metadata_mismatch" and "year" in f.message
-                   for f in rep.findings)
+    yr = [f for f in rep.findings
+          if f.category == "metadata_mismatch" and "year" in f.message]
+    assert yr and all(f.severity is Severity.WARN for f in yr)
+    assert yr[0].suggested == {"field": "year", "from": "2024", "to": "2023"}
+    assert any("submission (v1) year" in f.message for f in yr)
+
+    # The clean case: a bare id whose year IS the v1 submission year -> silent.
+    e_ok = _entry("@article{k, author={A, B}, title={A Title Long Enough},\n"
+                  " year={2023}, eprint={2307.11858}, journal={arXiv}}\n")
+    rep_ok = Report(color=False)
+    record.compare_against_record(e_ok, rec, "arxiv", rep_ok)
+    assert not any("year" in f.message for f in rep_ok.findings
+                   if f.category in ("metadata_mismatch", "preprint_version"))
 
 
-def test_preprint_year_matching_no_arxiv_version_is_a_warning():
-    # An entry cited AS an arXiv preprint whose year matches NO arXiv version (2021,
-    # when the work has v1=2023 and v2=2024) is a data error, not an editorial version
-    # choice -- the year does not correspond to the cited preprint at all. WARN, with
-    # the message naming the real versions and NO guessed 'to' (we cannot know the
-    # intended year). Both the year-outside-span and year-between-but-matching-neither
-    # cases qualify.
+def test_arxiv_pinned_version_year_accepted():
+    # When the entry PINS the latest version (eprint '...v2'), the latest-version year
+    # is the correct one -- no finding. (v1=2023, latest v2=2024; bib cites v2, year
+    # 2024.) But a bare id with the same year is the wrong-year WARN above.
     rec = {"authors": ["a"], "given": {}, "title": "A Title Long Enough",
            "year": 2023, "updated_year": 2024, "journal": "arXiv"}
-    for bad_year in ("2021", "2030"):   # before the span / after it: neither matches
+    e = _entry("@article{k, author={A, B}, title={A Title Long Enough},\n"
+               " year={2024}, eprint={2307.11858v2}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep)
+    assert not any("year" in f.message for f in rep.findings
+                   if f.category in ("metadata_mismatch", "preprint_version"))
+
+
+def test_arxiv_year_matching_no_version_warns_and_suggests_v1():
+    # A year matching NEITHER v1 nor the latest version (2021, when v1=2023 latest=2024)
+    # is a data error -- the correct year for an arXiv citation is the v1 submission
+    # year, so WARN and SUGGEST v1 (per the date policy: a bare id always means v1).
+    rec = {"authors": ["a"], "given": {}, "title": "A Title Long Enough",
+           "year": 2023, "updated_year": 2024, "journal": "arXiv"}
+    for bad_year in ("2021", "2030"):
         e = _entry("@article{k, author={A, B}, title={A Title Long Enough}, "
                    "year={" + bad_year + "}, eprint={2307.11858}, journal={arXiv}}\n")
         rep = Report(color=False)
@@ -3427,16 +3684,22 @@ def test_preprint_year_matching_no_arxiv_version_is_a_warning():
         yr = [f for f in rep.findings
               if f.category == "metadata_mismatch" and "year" in f.message]
         assert yr and all(f.severity is Severity.WARN for f in yr)
-        assert any("matches no arXiv version" in f.message for f in yr)
-        assert all(f.suggested is None for f in yr)   # never a guessed year
-    # ...but a year that DOES match a version stays the neutral note, not this WARN.
-    e_ok = _entry("@article{k, author={A, B}, title={A Title Long Enough}, "
-                  "year={2024}, eprint={2307.11858}, journal={arXiv}}\n")
-    rep_ok = Report(color=False)
-    record.compare_against_record(e_ok, rec, "arxiv", rep_ok)
-    assert not any(f.category == "metadata_mismatch" and "year" in f.message
-                   for f in rep_ok.findings)
-    assert any(f.category == "preprint_version" for f in rep_ok.findings)
+        assert yr[0].suggested == {"field": "year", "from": bad_year, "to": "2023"}
+
+
+def test_arxiv_intermediate_pinned_version_unverifiable_no_push():
+    # A specific intermediate version is pinned (v2) but the record's latest is a still
+    # later version (updated 2025) -- arXiv does not expose v2's date, so the year
+    # cannot be verified. Soften to a note; NEVER push a year (no guessing).
+    rec = {"authors": ["a"], "given": {}, "title": "A Title Long Enough",
+           "year": 2023, "updated_year": 2025, "journal": "arXiv"}
+    e = _entry("@article{k, author={A, B}, title={A Title Long Enough},\n"
+               " year={2024}, eprint={2307.11858v2}, journal={arXiv}}\n")
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "arxiv", rep)
+    assert not any(f.suggested and f.suggested.get("field") == "year"
+                   for f in rep.findings), "an undatable pinned version is never pushed"
+    assert any(f.category == "preprint_version" for f in rep.findings)
 
 
 def test_arxiv_retitled_version_is_a_note_not_a_title_mismatch(monkeypatch):
@@ -3813,6 +4076,45 @@ def test_integrity_score_clean_vs_unverified():
     assert clean["integrity_score"] >= 90 and clean["verified"] == 1
     bad = _integ({"b": ("UNVERIFIED", 0.0)}, {"b": _res()})
     assert bad["integrity_score"] < clean["integrity_score"]
+
+
+def test_structural_error_caps_integrity():
+    # A structurally-broken file (BibTeX can't parse it: stray brace / imbalance /
+    # missing header / no key) must NOT read 100/100 off its surviving clean entries
+    # (the 2212 'atomic' case). The score is capped below the healthy band.
+    from veracite.report import Severity
+    # Clean, fully-verified entries -> would score ~100 without a structural error.
+    statuses = {f"e{i}": ("VERIFIED", 1.0) for i in range(5)}
+    results = {k: _res(doi=f"10.1/{k}", record={}) for k in statuses}
+    clean = _integ(statuses, results)
+    assert clean["integrity_score"] >= 90
+    # Same entries, but the file also has a structural parse error.
+    rep = Report(color=False)
+    rep.add(Severity.ERROR, ("k", 1), "stray '}' after the entry", "syntax",
+            category="syntax")
+    recs = _records(statuses, results, (), None)
+    broken = verify.integrity(recs, rep)
+    assert broken["integrity_score"] <= 60, \
+        "a structurally-broken file must not read as healthy"
+    # missing_entry_header counts too.
+    rep2 = Report(color=False)
+    rep2.add(Severity.ERROR, ("k", 1), "missing @type{key,} header", "syntax",
+             category="missing_entry_header")
+    assert verify.integrity(_records(statuses, results, (), None), rep2)["integrity_score"] <= 60
+
+
+def test_render_summary_tolerates_undefined_score(capsys):
+    # TOOL-BUG: when every cited key is missing from the bib, nothing is checked, so
+    # integrity/confidence are None. Rendering must show '--', not crash in
+    # _score_color(None) (the 2304.13595.outputNotes case).
+    from veracite.report import Report
+    rep = Report(color=False)
+    integ = verify.integrity([], rep)            # nothing checked
+    assert integ["integrity_score"] is None and integ["confidence_score"] is None
+    # The crash was here -- it must render cleanly instead.
+    rep.render_summary(0, 0, integrity=integ)
+    out = capsys.readouterr().out
+    assert "integrity --" in out
 
 
 def test_integrity_score_ignores_unchecked_entries():
@@ -4309,6 +4611,55 @@ def test_software_no_version_field_not_flagged(monkeypatch):
     record.resolve_entry(e, rep, 0, 5)
     assert not any(f.category == "metadata_mismatch" and "version" in f.message
                    for f in rep.findings)
+
+
+def test_software_zenodo_identity_no_false_wrong_record():
+    # The circuit_knitting_toolbox ERROR FP (the cardinal sin): a correctly-cited
+    # Zenodo software DOI must NOT escalate to id_resolves_wrong_record. Three folding
+    # gaps combined: (1) author ORDER (Zenodo lists Branczyk first, bib Bello first);
+    # (2) the GitHub-RELEASE title form ('org/repo: Name X.Y.Z'); (3) the brace-grouped
+    # compound surname '{Carrera Vazquez}'. Same people, same work -- no wrong-record
+    # error, no false author/title mismatches.
+    from veracite.compare import compare_against_record, _software_release_title
+    from veracite.models import Record
+    assert _software_release_title(
+        "Qiskit-Extensions/circuit-knitting-toolbox: Circuit Knitting Toolbox 0.2.0") \
+        == "Circuit Knitting Toolbox"
+    e = _entry("@misc{k, author={Luciano Bello and Agata M. Bra\\'{n}czyk and"
+               " Sergey Bravyi and Almudena {Carrera Vazquez}}, "
+               "title={{Circuit Knitting Toolbox}}, year={2023}, "
+               "doi={10.5281/zenodo.7987997}}\n")
+    rec = Record(
+        authors=["branczyk", "bravyi", normalize.fold_surname("Carrera Vazquez"), "bello"],
+        authors_display=["Branczyk", "Bravyi", "Carrera Vazquez", "Bello"],
+        given={}, year=2023, journal="Zenodo", document_type="software",
+        title="Qiskit-Extensions/circuit-knitting-toolbox: Circuit Knitting Toolbox 0.2.0")
+    rep = Report(color=False)
+    compare_against_record(e, rec, "datacite", rep)
+    assert not any(f.category == "id_resolves_wrong_record" for f in rep.findings), \
+        "a correctly-cited software DOI must never be an ERROR"
+    msgs = [f.message for f in rep.findings]
+    assert not any("first author differs" in m for m in msgs), "order is not authoritative"
+    assert not any("title differs" in m for m in msgs), "release-form title is the same name"
+    assert not any("Vazquez" in m and "not in record" in m for m in msgs), \
+        "the brace-grouped surname is present, not extra"
+
+
+def test_software_wrong_id_still_caught():
+    # The look-alike that must NOT be suppressed: a software DOI whose record is a
+    # genuinely DIFFERENT project (different name AND different authors) is still the
+    # wrong record -- the order/title-form folding must not blind the real error.
+    from veracite.compare import compare_against_record
+    from veracite.models import Record
+    e = _entry("@misc{k, author={Alice Smith and Bob Jones}, "
+               "title={{My Quantum Tool}}, year={2023}, doi={10.5281/zenodo.1}}\n")
+    rec = Record(authors=["xavier", "yancy"], authors_display=["Xavier", "Yancy"],
+                 given={}, year=2023, journal="Zenodo", document_type="software",
+                 title="someorg/other-repo: Totally Different Package 3.1.0")
+    rep = Report(color=False)
+    compare_against_record(e, rec, "datacite", rep)
+    assert any(f.category == "id_resolves_wrong_record" for f in rep.findings), \
+        "a software DOI resolving to a different project is still the wrong record"
 
 
 def test_dead_doi_falls_back_to_search_and_recovers(monkeypatch):
@@ -4992,6 +5343,63 @@ def test_entry_resolved_via_inspire_recid_typed_as_thesis(monkeypatch):
     assert res.record is not None and res.source == "inspire"
     et = [f for f in rep.findings if f.category == "entrytype_suggestion"]
     assert et and "thesis" in et[0].message and "@thesis" in et[0].message
+
+
+def test_inproceedings_with_proceedings_record_no_self_loop():
+    # The #1 corpus FP: an @inproceedings whose record is a `proceedings`
+    # (Crossref proceedings-article) ALREADY agrees -- it must not be told to
+    # 'use @inproceedings instead of @inproceedings'. Tested for both the
+    # @inproceedings entry and its @conference alias.
+    for etype in ("inproceedings", "conference"):
+        e = _entry("@%s{k, author={A. B}, title={A Conference Paper},\n"
+                   " booktitle={Proc. of STOC}, year={2019}, doi={10.1/x}}\n" % etype)
+        rec = {"authors": ["b"], "given": {}, "title": "A Conference Paper",
+               "year": 2019, "document_type": "proceedings"}
+        rep = Report(color=False)
+        record.compare_against_record(e, rec, "crossref", rep)
+        assert not any(f.category == "entrytype_suggestion" for f in rep.findings), \
+            "@%s for a `proceedings` record is already correct" % etype
+
+
+def test_inproceedings_with_book_chapter_record_not_pushed_to_incollection():
+    # Crossref types LNCS/symposium CONFERENCE papers as `book-chapter`. An
+    # @inproceedings cited for such a paper is at least as accurate as Crossref's
+    # type -- never push it to @incollection (the borderline case in the audit).
+    e = _entry("@inproceedings{k, author={A. B}, title={A SAT Paper},\n"
+               " booktitle={Theory and Applications of SAT}, year={2016}, doi={10.1/x}}\n")
+    rec = {"authors": ["b"], "given": {}, "title": "A SAT Paper",
+           "year": 2016, "document_type": "book chapter"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    assert not any(f.category == "entrytype_suggestion" for f in rep.findings)
+
+
+def test_article_with_proceedings_record_still_flagged():
+    # The look-alike that must NOT be suppressed: an @article whose record is a
+    # `proceedings` is genuinely mis-typed -- @article is not a valid expression of
+    # a conference paper, so the suggestion still fires.
+    e = _entry("@article{k, author={A. B}, title={A Conference Paper},\n"
+               " journal={Proc. of STOC}, year={2019}, doi={10.1/x}}\n")
+    rec = {"authors": ["b"], "given": {}, "title": "A Conference Paper",
+           "year": 2019, "document_type": "proceedings"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    et = [f for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert et and "@inproceedings/@proceedings" in et[0].message
+
+
+def test_article_with_book_chapter_record_still_flagged():
+    # An @article whose record is a true `book chapter` is still flagged toward
+    # @incollection -- only the conference-shaped @inproceedings/@conference types
+    # are treated as already-satisfying a book-chapter record.
+    e = _entry("@article{k, author={A. B}, title={A Book Chapter},\n"
+               " journal={Some Edited Volume}, year={2016}, doi={10.1/x}}\n")
+    rec = {"authors": ["b"], "given": {}, "title": "A Book Chapter",
+           "year": 2016, "document_type": "book chapter"}
+    rep = Report(color=False)
+    record.compare_against_record(e, rec, "crossref", rep)
+    et = [f for f in rep.findings if f.category == "entrytype_suggestion"]
+    assert et and "@incollection" in et[0].message
 
 
 def test_article_with_journal_no_volume_is_not_a_web_item():

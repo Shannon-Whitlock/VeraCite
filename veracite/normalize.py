@@ -119,6 +119,13 @@ def clean_tex(s):
     s = s.replace("\\less", "<").replace("\\greater", ">")
     s = _IFMMODE_RE.sub(r"\1", s)    # math-mode conditional -> its text branch
     s = _ACCENT_MACRO_RE.sub(lambda m: m.group(1) or m.group(2), s)
+    # A bare '~' is the TeX tie (a non-breaking space): 'Patrick~J.~Coles' is three
+    # space-separated tokens, NOT one. Fold it to a space so the surname splits out
+    # correctly ('T.~Sornborger' -> 'T. Sornborger' -> surname 'Sornborger'); without
+    # this the tie glues the initial to the surname ('tsornborger') and the author
+    # falsely reads as missing. Done AFTER the accent pass so an escaped tilde accent
+    # ('\~n' = ñ) is already consumed and only the bare tie remains.
+    s = s.replace("~", " ")
     s = _DOTLESS_RE.sub(r"\1", s)    # bare '\i'/'\j' -> 'i'/'j'
     for pat_re, repl in _TEX_LETTER_SUBS:
         s = pat_re.sub(repl, s)
@@ -143,13 +150,44 @@ def is_collaboration(name):
     return False
 
 
+def _name_parts(s):
+    """Split a name on whitespace, but keep a BRACE-GROUP as ONE part. BibTeX uses
+    a brace group precisely to bind a multi-word name part together -- '{Carrera
+    Vazquez}' and '{van der Berg}' are ONE surname, not two/three tokens. A naive
+    split() tears them, so the surname extractor would keep only the last word
+    ('Vazquez') and falsely read the rest as missing. Returns the parts WITHOUT the
+    grouping braces (they are not part of the name text)."""
+    parts, buf, depth, i = [], [], 0, 0
+    while i < len(s):
+        c = s[i]
+        if c == "{":
+            depth += 1
+            i += 1
+            continue
+        if c == "}":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if c.isspace() and depth == 0:
+            if buf:
+                parts.append("".join(buf))
+                buf = []
+        else:
+            buf.append(c)
+        i += 1
+    if buf:
+        parts.append("".join(buf))
+    return parts
+
+
 def _surname_token(a):
     """The surname portion of one author entry ('Last, First' or 'First Last'),
-    with a trailing generational suffix (Jr/III/...) dropped."""
+    with a trailing generational suffix (Jr/III/...) dropped. A brace-grouped name
+    part ('{Carrera Vazquez}') is treated as a single surname unit (see _name_parts)."""
     if "," in a:
         last = a.split(",")[0]
     else:
-        parts = a.split()
+        parts = _name_parts(a)
         last = parts[-1] if parts else a
         # 'Harry A. Hunt III' -> drop the trailing 'III' so the surname is 'Hunt'.
         if len(parts) >= 2 and re.sub(r"[^a-z]", "", parts[-1].lower()) in _NAME_SUFFIXES:
@@ -191,23 +229,43 @@ def title_is_miscased(title):
     return caps / len(words) >= 0.6
 
 
+def fold_transliterations(s):
+    """Fold the German umlaut/eszett TRANSLITERATIONS on an already-deaccented,
+    lowercased string so the three legitimate spellings of one name collapse:
+    'Muller' == 'Mueller' == 'Müller'. The umlaut ü may be written Unicode (ü ->
+    deaccent 'u'), ASCII-transliterated 'ue', or (as some de-TeX/Crossref pipelines
+    render it) bare 'u' -- all the SAME letter, so a comparison must treat them alike
+    (oe/ue/ae/ss -> o/u/a/s). Shared by every name key so identity matching and
+    deviation detection fold the SAME legitimate variation (an unfolded variant is a
+    false 'name differs' waiting to fire -- the Fährmann/Faehrmann case)."""
+    for a, b in (("oe", "o"), ("ue", "u"), ("ae", "a"), ("ss", "s")):
+        s = s.replace(a, b)
+    return s
+
+
 def fold_surname(name):
     """Reduce a surname to a lowercase ASCII key for matching. Deaccent FIRST so a
     Unicode form and its ASCII transliteration collapse the same way (the Nordic
     ligature 'Hjertenæs' -> 'hjertenaes', matching a bib that wrote 'Hjertenaes'),
     then fold the German umlaut transliterations (oe/ue/ae/ss -> o/u/a/s) so
     'Muller' == 'Mueller' == 'Müller'."""
-    s = deaccent(clean_tex(name)).lower()
-    for a, b in (("oe", "o"), ("ue", "u"), ("ae", "a"), ("ss", "s")):
-        s = s.replace(a, b)
+    s = fold_transliterations(deaccent(clean_tex(name)).lower())
     return re.sub(r"[^a-z]", "", s)
 
 
 def _split_on_and(field):
     """Split a BibTeX author field on ' and ' at brace depth 0 only, so a
     brace-wrapped collaboration like '{Google Quantum AI and collaborators}'
-    stays a single token instead of being torn in two."""
-    s = re.sub(r"\s+", " ", field.replace("\n", " "))
+    stays a single token instead of being torn in two.
+
+    A bare TeX tie '~' (a non-breaking space, e.g. 'Patrick~J.~Coles') is folded to a
+    real space FIRST so every downstream tokenizer (surname/given-name extraction)
+    sees the correct word boundaries -- without it the tie glues the initial to the
+    surname ('T.~Sornborger' -> surname 'tsornborger', a false 'author missing'). An
+    ESCAPED tilde accent ('\\~n' = ñ) is left intact (the negative-lookbehind), since
+    clean_tex resolves that later."""
+    s = re.sub(r"(?<!\\)~", " ", field)
+    s = re.sub(r"\s+", " ", s.replace("\n", " "))
     out, depth, start, i = [], 0, 0, 0
     while i < len(s) - 4:
         c = s[i]
@@ -335,9 +393,15 @@ def biblatex_pages(p):
     (biblatex renders it as an en-dash); a single page or article number is left as
     is. Registries return '920-926' with a single hyphen, but the style rule treats
     a single hyphen as non-canonical -- so a suggestion must hand back '920--926',
-    not a value that would itself trip the dash-style check."""
+    not a value that would itself trip the dash-style check.
+
+    The range may be ALPHANUMERIC, not just digits: a supplement range 'S547-S556'
+    or an article-locator '5:1-5:22' is still a range whose separator must become
+    '--' (the Kumar 'S547--S556' BAD-SUGGEST, where the digit-only guard reverted
+    the en-dash to a hyphen). The hyphen is the LAST one (the segments may contain a
+    ':'); both sides must be non-empty so a leading/trailing hyphen is not a range."""
     norm = norm_pages(str(p or ""))
-    if re.match(r"^\d+-\d+$", norm):
+    if re.match(r"^[^-]+-[^-]+$", norm):
         return norm.replace("-", "--")
     return norm
 

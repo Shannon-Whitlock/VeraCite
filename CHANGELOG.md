@@ -4,7 +4,7 @@ All notable changes to VeraCite are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and VeraCite adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.2.1] — 2026-06-29
+## [0.2.1] — 2026-06-30
 
 Patch release: false-positive fixes and journal-name canonicalization, driven by a
 stress-test corpus of real physics/atomic-physics bibliographies.
@@ -45,6 +45,31 @@ stress-test corpus of real physics/atomic-physics bibliographies.
 - **No brace protection on journal names.** Standard BibTeX/biblatex styles print the
   journal field verbatim (only the title field is recased), so journal names are
   stored and suggested without brace protection.
+
+### Fixed
+
+A second audit pass over real-world stress-test bibliographies drove a further round
+of false-positive fixes, each generalized to its class with tests.
+
+- **Entry-type self-loop** — an `@inproceedings` whose record is a `proceedings`/
+  `book-chapter` is already correct and no longer told to change into itself.
+- **No ERROR on a clean software citation** — order-insensitive authors, release-title
+  folding (`org/repo: Name X.Y.Z`), and brace-grouped surnames (`{Carrera Vazquez}`).
+- **Name markup folded** — umlaut transliterations (`ä` ≡ `ae` ≡ `a`) and the TeX tie
+  `~` no longer read as a different/glued name.
+- **Manifestation-aware** — a preprint/working-paper or book-reprint DOI no longer
+  overrides the cited published version (new **`divergent_manifestation`** note); a
+  book *series* name is never suggested as a journal.
+- **Dash handling** — a `--`/`-`-only difference is not flagged, alphanumeric ranges
+  keep `--`, and a malformed `34–-38` fixes to `34--38` (never `---`).
+- **Date policy** — a published article uses its publication date; an arXiv citation
+  uses the v1 submission year unless it pins a version.
+- **Lighter-touch titles** — a cosmetic high-overlap title difference is "check
+  manually", not a rewrite; TeX `\Delta` folds to `Δ`.
+- **Integrity score** — a structurally unparseable file is capped below the healthy
+  band instead of reading `100/100`.
+- **Crash fixes** — a non-UTF-8 `.tex` reads with an encoding fallback; an undefined
+  score renders `--` instead of crashing.
 
 ## [0.2.0] — 2026-06-29
 

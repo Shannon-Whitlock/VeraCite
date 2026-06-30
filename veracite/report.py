@@ -123,6 +123,7 @@ CATEGORY_GROUP = {
     # a published version should be cited instead, and the LLM-relevance ratings.
     "citation_order": "context", "preprint_superseded": "context",
     "preprint_version": "context", "preprint_retitled": "context",
+    "divergent_manifestation": "context",
     "id_resolves_wrong_record": "context", "wrong_paper": "context",
     "llm_relevance": "context", "llm_config": "context", "llm_ok": "context",
     "llm_unavailable": "context",
@@ -165,6 +166,7 @@ CATEGORY_DOC = {
     "llm_ok": "LLM rated the citation relevant (4-5/5) -- a clean-pass note",
     "llm_config": "LLM run misconfigured (e.g. unknown provider)",
     "preprint_superseded": "a published version now exists",
+    "divergent_manifestation": "id resolves to a preprint/working-paper version, not the cited published one",
     "preprint_version": "bib year matches an arXiv version (v1 precedence vs latest) -- informational",
     "preprint_retitled": "arXiv renamed the preprint in a later version; the cited title matches an earlier one",
     "related_work": "erratum/correction/comment/reply linked",
@@ -767,10 +769,19 @@ class Report:
                 print(line, file=out)
 
     def _score_color(self, score):
-        """Green >= 90, yellow >= 70, else red -- shared by both 0-100 scores."""
+        """Green >= 90, yellow >= 70, else red -- shared by both 0-100 scores. An
+        undefined score (None: nothing was checkable, e.g. every cited key missing
+        from the bib) is dim, not a crash -- it is rendered '--' below."""
+        if score is None:
+            return _DIM
         return _GREEN if score >= 90 else (
             SEVERITY_STYLE[Severity.WARN][1] if score >= 70
             else SEVERITY_STYLE[Severity.ERROR][1])
+
+    @staticmethod
+    def _score_text(score):
+        """A 0-100 score as 'N/100', or '--' when undefined (None)."""
+        return "--" if score is None else f"{score}/100"
 
     def _render_integrity(self, s):
         """The Layer-6 roll-up appended to the summary: the verification counts,
@@ -796,10 +807,10 @@ class Report:
         # Two headline scores, side by side: integrity (is the bib sound?) and
         # confidence (how much we trust the verifications we made?).
         score_line = (f"  {self._c('integrity', _BOLD)} "
-                      f"{self._c(str(integ) + '/100', self._score_color(integ))}")
+                      f"{self._c(self._score_text(integ), self._score_color(integ))}")
         if conf is not None:
             score_line += (f"   {self._c('confidence', _BOLD)} "
-                           f"{self._c(str(conf) + '/100', self._score_color(conf))}")
+                           f"{self._c(self._score_text(conf), self._score_color(conf))}")
         lines += [score_line, bar]
         return lines
 

@@ -499,6 +499,15 @@ _INTEGRITY_CREDIT = {
     "mismatch":          0.20,   # the id resolves to a DIFFERENT paper
 }
 _DUP_PENALTY = 10                # flat points per duplicate (a file-level defect)
+# A structurally-broken file (BibTeX cannot parse it: a stray '}', a brace imbalance,
+# a missing '@type{key,' header, an entry with no key) is not a sound bibliography no
+# matter how clean the entries that DID parse are -- so its integrity is CAPPED below
+# the healthy band rather than reading 100/100 off the survivors (the 2212 'atomic'
+# case: 23 structural errors, integrity 100). The cap is categorical (does the file
+# parse?), so it is independent of the cascade COUNT -- one brace imbalance that drops
+# 20 entries caps the same as one stray brace, avoiding double-counting the cascade.
+_STRUCTURAL_ERROR_CATEGORIES = {"syntax", "missing_entry_header"}
+_STRUCTURAL_CAP = 60             # < the 70 'yellow' band, so a broken file renders red
 
 # Per-entry CONFIDENCE, keyed by HOW the entry resolved (trust in the source), NOT by
 # whether a field disagreed. metadata_mismatch / source_conflict do not appear here.
@@ -620,6 +629,11 @@ def integrity(records, rep):
     duplicates = cat("duplicate")
     conflicts = cat("source_conflict")
     superseded = cat("preprint_superseded")
+    # Any structural parse error (a stray brace, brace imbalance, missing entry
+    # header, no citation key) means the FILE itself is broken -- recomputed live each
+    # run like duplicates, so it stays out of the stored aggregate.
+    has_structural_error = any(f.category in _STRUCTURAL_ERROR_CATEGORIES
+                               for f in rep.live_findings())
 
     # Per-entry finding categories: from the record's own issues (the single source),
     # so the per-entry defect lookup matches what is persisted/printed.
@@ -638,6 +652,11 @@ def integrity(records, rep):
         for r in checked)
     integrity_score = (max(0, round(100 * credit_sum / n - _DUP_PENALTY * duplicates))
                        if n else None)
+    # A structurally-broken file is capped below the healthy band: it cannot read as
+    # sound off its surviving entries. Applied after the per-entry/duplicate maths so
+    # a file that is ALSO bad on content scores lower still (min, never raises).
+    if integrity_score is not None and has_structural_error:
+        integrity_score = min(integrity_score, _STRUCTURAL_CAP)
 
     # CONFIDENCE (0-100): mean trust in the verification source.
     conf_sum = sum(_CONFIDENCE[_rec_confidence_kind(status_of(r), r)] for r in checked)

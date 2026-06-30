@@ -84,6 +84,20 @@ def strip_tex_comments(text):
     return "".join(out)
 
 
+def _read_tex(path):
+    """Read a .tex tolerating the common non-UTF-8 case. A .tex saved in Latin-1 or
+    CP-1252 (smart quotes -- still common in real-world TeX) would otherwise raise
+    UnicodeDecodeError and, since that is not an OSError, abort the whole run -- a
+    tool-side failure masquerading as a citation result (the charter forbids it).
+    Try UTF-8, fall back to Latin-1, which never raises and round-trips every byte;
+    the exact bytes do not matter, only the \\cite keys and surrounding words."""
+    data = open(path, "rb").read()
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
 def collect_tex(targets):
     """Return [(path, text)] for every .tex file under the given targets, with TeX
     line comments stripped -- commented-out content is not part of the manuscript, so
@@ -92,8 +106,7 @@ def collect_tex(targets):
     out = []
     for p in gather_tex_paths(targets):
         try:
-            with open(p, encoding="utf-8") as fh:
-                out.append((p, strip_tex_comments(fh.read())))
+            out.append((p, strip_tex_comments(_read_tex(p))))
         except OSError:
             pass
     return out
